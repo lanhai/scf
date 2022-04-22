@@ -1,0 +1,104 @@
+<?php
+
+namespace Scf\Core;
+
+use JetBrains\PhpStorm\Pure;
+use Scf\Server\BgTask;
+use Scf\Server\Http;
+use Scf\Util\Dir;
+use Swoole\Coroutine;
+
+class App {
+    /**
+     * @var array 模块
+     */
+    protected static array $_modules = [];
+
+
+    /**
+     * 加载web模块
+     * @param string $mode
+     * @return array
+     */
+    public static function loadModules(string $mode = 'cgi'): array {
+        //注册加载器
+        spl_autoload_register([__CLASS__, 'autoload'], true);
+        $entryScripts = Dir::getDirFiles(APP_LIB_PATH, 2);
+        $modules = [];
+        if ($entryScripts) {
+            foreach ($entryScripts as $file) {
+                $arr = explode('/', $file);
+                if (array_pop($arr) != 'config.php') {
+                    continue;
+                }
+                $config = require_once($file);
+                $config['mode'] == $mode and $modules[] = $config;
+            }
+        }
+        self::$_modules = $modules;
+        return $modules;
+    }
+
+    /**
+     * 加载后台任务
+     * @return bool
+     */
+    public static function loadBackgroundTasks(): bool {
+        if (!self::$_modules) {
+            return false;
+        }
+        $bgTaskManager = BgTask::instance();
+        foreach (self::$_modules as $module) {
+            if (isset($module['background_tasks'])) {
+                $bgTaskManager->add($module['background_tasks']);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 获取内存占用量
+     * @return string
+     */
+    public static function memoryUseage(): string {
+        return round(memory_get_usage() / 1024 / 1024, 2) . 'MB';
+    }
+
+    /**
+     * 自动加载
+     * @param $className
+     * @return bool
+     * @throws Exception
+     */
+    public static function autoload($className): bool {
+        $className = ltrim($className, '\\');
+        $fileName = '';
+        $_fileName = '';
+        $namespace = '';
+        if (($lastNsPos = strrpos($className, '\\')) !== false) {
+            $namespace = substr($className, 0, $lastNsPos);
+            $className = substr($className, $lastNsPos + 1);
+            //$_fileName = $namespace . DIRECTORY_SEPARATOR;
+            $_fileName = str_replace(APP_TOP_NAMESPACE . "\\", "", $namespace) . DIRECTORY_SEPARATOR;
+        }
+        $_fileName .= $className . '.php';
+        $namespaceInfo = explode('\\', $namespace);
+        $topNameSpace = $namespaceInfo[0];
+        $fileName = APP_LIB_PATH . $_fileName;
+        if ($fileName) {
+            $fileName = str_replace('\\', DIRECTORY_SEPARATOR, $fileName);
+            if (file_exists($fileName)) {
+                require $fileName;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return bool 是否开发环境
+     */
+    #[Pure] public static function isDevEnv(): bool {
+        return Env::isDev();
+    }
+}

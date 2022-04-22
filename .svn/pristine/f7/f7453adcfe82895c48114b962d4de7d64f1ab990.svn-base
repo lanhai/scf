@@ -1,0 +1,73 @@
+<?php
+
+
+namespace App\Admin\Controller\{moduleName};
+
+use App\Admin\Controller\Base;
+use {arNamespace} as AR;
+
+class {ApiControllerName} extends Base {
+
+    /**
+     * 详情
+     */
+    public function actionDetail() {
+        $id = $this->request()->get('id');
+        $item = AR::find($id);
+        $result = $item->toArray();
+        $this->output()->success($result);
+    }
+
+    /**
+     * 列表
+     */
+    public function actionList() {
+        $keyword = $this->request()->get('keyword');
+        $page = $this->request()->get('page');
+        $size = $this->request()->get('size');
+        $where = [];
+        if (!empty($keyword)) {
+            $where['LIKE']['OR'] = [
+                'name' => $keyword
+            ];
+        }
+        $obj = AR::find();
+        $rel = $obj->where($where)->page($page, $size)->getList();
+        if ($rel['list']) {
+            foreach ($rel['list'] as &$item) {
+
+            }
+        }
+        $this->output()->success($rel);
+    }
+
+    /**
+     * 保存
+     */
+    public function actionSave() {
+        $data = $this->request()->getPost();
+        $item = AR::factory($data);
+        if (!$item->id) {
+            $item->created = time();
+        }
+        $result = $this->result($item->save());
+        if ($result->hasError()) {
+            $result->throwError();
+        }
+        $this->output()->success($result->getData());
+    }
+    /**
+      * 删除
+      */
+    public function actionRemove() {
+        $id = $this->request()->getPost('id');
+        $item = AR::find($id);
+        if (!$item) {
+            $this->output()->error('数据不存在');
+        }
+        if (!$item->delete()) {
+            $this->output()->error('删除失败');
+        }
+        $this->output()->success();
+    }
+}

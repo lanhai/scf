@@ -1,0 +1,743 @@
+<?php
+
+namespace Scf\Database;
+
+use JetBrains\PhpStorm\ArrayShape;
+use Mix\Database\ConnectionInterface;
+use Scf\Command\Color;
+use Scf\Core\Console;
+use Scf\Core\Log;
+use Scf\Core\Struct;
+use Scf\Database\Condition\WhereBuilder;
+use Scf\Database\Connection\PdoPool;
+use Scf\Helper\JsonHelper;
+use Swoole\Coroutine;
+use Mix\Database\Expr;
+
+class ActiveRecord extends Struct {
+    /**
+     * 数据库名称
+     * @var string
+     */
+    protected string $_dbName = 'default';
+    /**
+     * 表名称
+     * @var string
+     */
+    protected string $_table;
+    /**
+     * 数据库主键名
+     * @var string
+     */
+    protected string $_primaryKey = 'id';
+    protected string $_autoIncKey = '';
+
+    protected int $actor = DBS_SLAVE;
+    /**
+     * @var int 单页数据条数
+     */
+    protected int $_pageSize = 10;
+    /**
+     * @var int 当前页码
+     */
+    protected int $_pn = 1;
+    /**
+     * @var int 缓存时间
+     */
+    protected int $cacheLifeTime = 60;
+
+    /**
+     * 快照
+     * @var array|null
+     */
+    protected array|null $snapshot = null;
+
+
+    /**
+     * @var WhereBuilder|null 查询语句构造器
+     */
+    protected WhereBuilder|null $_where = null;
+    /**
+     * @var array|null 指定读取字段
+     */
+    protected array|null $_fields = null;
+    /**
+     * @var array|null 排序
+     */
+    protected array|null $_order = null;
+
+    protected static array $ar_instance;
+    protected static array $db_instance;
+    protected PdoPool $transactionConnection;
+
+    /**
+     * @param array|string $field
+     * @param string|null $group
+     * @param string|null $order
+     * @return array|false|int|mixed|object
+     */
+    public function sum(array|string $field, string $group = null, string $order = null): mixed {
+        if ($this->actor == DBS_SLAVE) {
+            $db = $this->slave();
+        } else {
+            $db = $this->master();
+        }
+        try {
+            return $db->sum($this->_table, $field, $this->getWhereSql(), $group, $order);
+        } catch (\PDOException $exception) {
+            $this->addError($this->_table . '_SUM', $exception->getMessage());
+            return false;
+        }
+    }
+
+
+    /**
+     * 统计指定条件的行数
+     * @return int
+     */
+    public function count(): int {
+        if ($this->actor == DBS_SLAVE) {
+            $db = $this->slave();
+        } else {
+            $db = $this->master();
+        }
+        try {
+            return $db->count($this->_table, $this->_primaryKey, $this->getWhereSql());
+        } catch (\PDOException $exception) {
+            $this->addError($this->_table . '_COUNT', $exception->getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 查询指定记录是否存在
+     * @param $cacheExpired
+     * @return bool
+     */
+    public function exist($cacheExpired = 10) {
+        if (is_null($this->getWhereSql())) {
+            return false;
+        }
+        $key = '_EXIST_' . md5($this->_dbName . $this->_table . $this->getWhereSql());
+        if (Redis::pool()->get($key) !== false) {
+            return true;
+        }
+        $exist = $this->count() > 0;
+        if ($exist) {
+            Redis::pool()->set($key, time(), $cacheExpired);
+        }
+        return $exist;
+    }
+
+    /**
+     * 获取所有数据
+     * @param bool $format
+     * @return array
+     */
+    public function all(bool $format = true): array {
+        $connection = $this->connection();
+        if (!is_null($this->_fields)) {
+            $connection->select(...$this->_fields);
+        }
+        $list = $connection->get();
+        if ($list && $format) {
+            foreach ($list as &$item) {
+                $item = $this->format($item);
+            }
+        }
+        if ($list && !is_null($this->_fields) && count($this->_fields) == 1) {
+            $ids = [];
+            foreach ($list as $item) {
+                $ids[] = $item[$this->_fields[0]];
+            }
+            return $ids;
+        }
+        return $list;
+    }
+
+    /**
+     * 获取列表
+     * @param bool $format
+     * @return array
+     */
+    #[ArrayShape(['list' => "array", 'pages' => "int", 'pn' => "int", 'total' => "int", 'primarys' => "array"])] public function list(bool $format = true): array {
+        $connection = $this->connection();
+        if (!is_null($this->_fields)) {
+            $connection->select(...$this->_fields);
+        }
+        $total = $this->count();
+        $totalPage = $total ? ceil($total / $this->_pageSize) : 0;
+        $page = min($this->_pn, $totalPage) ?: 1;
+        $offset = ($page - 1) * $this->_pageSize;
+        $connection->offset($offset);
+        $connection->limit($this->_pageSize);
+        $list = $connection->get();
+        $primaryKeys = [];
+        if ($list) {
+            foreach ($list as &$item) {
+                $primaryKeys[] = $item[$this->_primaryKey];
+                if ($format) {
+                    $item = $this->format($item);
+                }
+            }
+            if (!empty($this->_autoIncKey)) {
+                $this->master()->table($this->_table)->where($this->_primaryKey . ' IN (?)', $primaryKeys)->updates([$this->_autoIncKey => new Expr($this->_autoIncKey . ' + ?', 1)]);
+            }
+        }
+        return ['list' => $list, 'pages' => (int)$totalPage, 'pn' => (int)$page, 'total' => $total, 'primarys' => $primaryKeys];
+    }
+
+    /**
+     * 获取最新记录
+     * @param int $size
+     * @return array
+     */
+    public function top(int $size = 10) {
+        return $this->page(1, $size)->list()['list'] ?? [];
+    }
+
+    /**
+     * 获取主键合集
+     * @return array
+     */
+    public function primaryKeys(): array {
+        return $this->pluck($this->_primaryKey);
+    }
+
+    /**
+     * 取一列的值
+     * @param string|null $key
+     * @return array
+     */
+    public function pluck(string $key = null): array {
+        $connection = $this->connection();
+        $key = !is_null($key) ? $key : $this->_primaryKey;
+        $connection->select($key);
+        $column = [];
+        try {
+            if ($result = $connection->get()) {
+                foreach ($result as $item) {
+                    $column[] = $item[$key];
+                }
+            }
+        } catch (\PDOException $exception) {
+            $this->addError($this->_table . '_AR', $exception->getMessage());
+        }
+        return $column;
+    }
+
+
+    /**
+     * 获取第一条数据
+     * @return array|null
+     */
+    public function first(): ?array {
+        $connection = $this->connection();
+        if (!is_null($this->_fields)) {
+            $connection->select(...$this->_fields);
+        }
+        try {
+            if (!$result = $connection->first()) {
+                return null;
+            }
+            return $result;
+        } catch (\PDOException $exception) {
+            $this->addError($this->_table . '_AR', $exception->getMessage());
+            return null;
+        }
+    }
+
+
+    /**
+     * 创建查询
+     * @param int $actor
+     * @return static
+     */
+    public static function search(int $actor = DBS_SLAVE): static {
+        $name = get_called_class();
+        $cls = new $name();
+        $cls->setActor($actor);
+        return $cls;
+    }
+
+    /**
+     * 批量更新
+     * @param $datas
+     * @return int
+     */
+    public function update($datas): int {
+        $connection = $this->connection(DBS_MASTER);
+        $row = $connection->updates($datas)->rowCount();
+        if ($row) {
+            $priIds = $this->primaryKeys();
+            $this->deleteArCache($priIds);
+        }
+        return $row;
+    }
+
+
+    /**
+     * 删除数据
+     * @return int
+     */
+    public function delete(): int {
+        $pri = $this->_primaryKey;
+        if (!empty($this->$pri)) {
+            $row = $this->master()->table($this->_table)->where("`{$pri}` = ?", $this->$pri)->delete()->rowCount();
+            if ($row) {
+                $this->deleteArCache($this->$pri);
+                $this->snapshot = null;
+                unset($this->$pri);
+            }
+        } else {
+            $priIds = $this->primaryKeys();
+            $row = $this->connection(DBS_MASTER)->delete()->rowCount();
+            if ($row && $priIds) {
+                $this->deleteArCache($priIds);
+            }
+        }
+        return $row;
+    }
+
+
+    /**
+     * 保存活动记录
+     * @param bool $filterNull
+     * @return bool
+     */
+    public function save(bool $filterNull = true): bool {
+        try {
+            if (!$this->validate()) {
+                return false;
+            }
+            //数据格式化
+            $primaryKey = $this->_primaryKey;
+            $datas = $this->format($this->toArray($filterNull));
+            if (!$datas) {
+                return false;
+            }
+            if (!empty($this->$primaryKey) && self::has($datas[$primaryKey])) {
+                $arCacheKey = $this->getArCacheKey($this->$primaryKey);
+                //如果存在快照只更新值变动过的字段
+                if (!is_null($this->snapshot)) {
+                    foreach ($datas as $k => $v) {
+                        $v = is_array($v) ? JsonHelper::toJson($v) : $v;
+                        if (isset($this->snapshot[$k])) {
+                            $snapshotVaule = is_array($this->snapshot[$k]) ? JsonHelper::toJson($this->snapshot[$k]) : $this->snapshot[$k];
+                            if (md5(strval($v)) == md5(strval($snapshotVaule))) {
+                                unset($datas[$k]);
+                            } else {
+                                //更新快照里对应字段的值
+                                $this->snapshot[$k] = $datas[$k];
+                            }
+                        }
+                    }
+                }
+                if ($datas) {
+                    $row = $this->master()->table($this->_table)->where("`{$primaryKey}` = ?", $this->$primaryKey)->updates($datas)->rowCount();
+                    if ($row && $cache = Cache::instance()->get($arCacheKey)) {
+                        foreach ($datas as $k => $v) {
+                            $cache[$k] = $v;
+                        }
+                        //换新缓存
+                        Cache::instance()->set($arCacheKey, $cache, $this->cacheLifeTime);
+                        Cache::instance()->close();
+                    }
+                }
+            } else {
+                $this->$primaryKey = $this->master()->insert($this->_table, $datas)->lastInsertId();
+            }
+        } catch (\PDOException $error) {
+            $this->addError('save', $error->getMessage());
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @param $id
+     * @param int $actor
+     * @return null|static
+     */
+    public static function ar($id, int $actor = DBS_SLAVE): null|static {
+        return self::find($id, $actor);
+    }
+
+    /**
+     * 根据主键值查找唯一对象
+     * @param $id
+     * @param int $actor
+     * @return null|static
+     */
+    public static function find($id, int $actor = DBS_SLAVE): static|null {
+        $name = get_called_class();
+        /**
+         * @var ActiveRecord $cls
+         */
+        $cls = new $name();
+        $cls->setActor($actor);
+        //获取存活的记录
+        if (!$result = Cache::instance()->get($cls->getArCacheKey($id))) {
+            try {
+                if ($actor == DBS_SLAVE) {
+                    $db = $cls->slave();
+                } else {
+                    $db = $cls->master();
+                }
+                $result = $db->table($cls->_table)->where("`{$cls->_primaryKey}` = ?", $id)->first();
+                if (!$result) {
+                    return null;
+                }
+                Cache::instance()->set($cls->getArCacheKey($id), $result, $cls->cacheLifeTime);
+                Cache::instance()->close();
+            } catch (\PDOException $exception) {
+                $cls->addError($cls->_table . '_AR', $exception->getMessage());
+                Log::instance()->error($exception->getMessage());
+                return null;
+            }
+        }
+        $cls->create($result);
+        $cls->snapshot = $cls->toArray(false);
+        return $cls;
+    }
+
+    /**
+     * 查询对应条件的第一条AR数据
+     * @return static|null
+     */
+    public function firstAR(): static|null {
+        $connection = $this->connection();
+        $connection->select($this->_primaryKey);
+        try {
+            if (!$result = $connection->first()) {
+                return null;
+            }
+            return self::find($result[$this->_primaryKey]);
+        } catch (\PDOException $exception) {
+            $this->addError($this->_table . '_AR', $exception->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 读取协程AR
+     * @param $id
+     * @return static|null
+     */
+    protected static function getInstanceAr($id): static|null {
+        $key = self::getInstanceArKey($id);
+        return self::$ar_instance[$key] ?? null;
+    }
+
+    /**
+     * 设置协程AR
+     * @param $id
+     * @param $ar
+     * @return void
+     */
+    protected static function setInstanceAr($id, $ar) {
+        $cid = Coroutine::getCid();
+        $key = self::getInstanceArKey($id);
+        self::$ar_instance[$key] = $ar;
+        if ($cid > 0) {
+            Coroutine::defer(function () use ($key) {
+                //Console::log('释放AR资源:' . $key);
+                unset(self::$ar_instance[$key]);
+            });
+        }
+    }
+
+    /**
+     * 更新协程AR
+     * @param $id
+     * @param $ar
+     * @return void
+     */
+    protected static function updateInstanceAr($id, $ar) {
+        $key = self::getInstanceArKey($id);
+        if (isset(self::$ar_instance[$key])) {
+            self::$ar_instance[$key] = $ar;
+        }
+    }
+
+    /**
+     * 获取协程AR KEY
+     * @param $id
+     * @return string
+     */
+    protected static function getInstanceArKey($id): string {
+        $name = get_called_class();
+        $cid = Coroutine::getCid();
+        return str_replace("\\", "", $name) . '_' . $id . '_' . $cid;
+    }
+
+    /**
+     * 释放AR
+     * @param int|null $cid
+     * @return void
+     */
+    public function destroyInstanceAr($id, int $cid = null) {
+        $name = get_called_class();
+        if ($cid === null) {
+            $cid = Coroutine::getCid();
+        }
+        $instanceKey = $name . '_' . $id . '_' . $cid;
+        unset(self::$ar_instance[$instanceKey]);
+    }
+
+    /**
+     * 清除AR缓存
+     * @param int|array $id
+     * @return void
+     */
+    protected function deleteArCache(int|array $id) {
+        if (!$id) {
+            return;
+        }
+        if (is_array($id)) {
+            foreach ($id as $i) {
+                $arCacheKey = $this->getArCacheKey($i);
+                Cache::instance()->delete($arCacheKey);
+                //$this->destroyInstanceAr($id);
+            }
+        } else {
+            $arCacheKey = $this->getArCacheKey($id);
+            Cache::instance()->delete($arCacheKey);
+            //$this->destroyInstanceAr($id);
+        }
+        Cache::instance()->close();
+    }
+
+    /**
+     * 判断是否存在
+     * @param $id
+     * @param int $actor
+     * @return bool
+     */
+    public static function has($id, int $actor = DBS_SLAVE): bool {
+        $name = get_called_class();
+        /**
+         * @var ActiveRecord $cls
+         */
+        $cls = new $name();
+        $cls->setActor($actor);
+//        if (Cache::instance()->get($cls->getArCacheKey($id))) {
+//            return true;
+//        }
+        if ($actor == DBS_SLAVE) {
+            $db = $cls->slave();
+        } else {
+            $db = $cls->master();
+        }
+        $result = $db->table($cls->_table)->where("`{$cls->_primaryKey}` = ?", $id)->select($cls->_primaryKey)->first();
+        if ($result) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 创建一个AR实例
+     * @param array|null $data
+     * @param string $scene
+     * @return static
+     */
+    public static function factory(array $data = null, string $scene = ''): static {
+        return parent::factory($data, $scene);
+    }
+
+    /**
+     * 设定页码
+     * @param int $pn
+     * @param int $size
+     * @return $this
+     */
+    public function page(int $pn = 1, int $size = 10): static {
+        $this->_pn = $pn;
+        $this->_pageSize = $size;
+        return $this;
+    }
+
+    /**
+     * @param WhereBuilder|array $where
+     * @return ActiveRecord
+     */
+    public function where(WhereBuilder|array $where): static {
+        if (is_array($where)) {
+            $where = new WhereBuilder($where);
+        }
+        $this->_where = $where;
+        return $this;
+    }
+
+    /**
+     * @param ...$fields
+     * @return $this
+     */
+    public function select(...$fields): static {
+        $this->_fields = $fields;
+        return $this;
+    }
+
+    /**
+     * @param array $order
+     * @return $this
+     */
+    public function order(array $order): static {
+        $this->_order = $order;
+        return $this;
+    }
+
+    /**
+     * 返回数据库设置
+     * @return array
+     */
+    #[ArrayShape(['db' => "string", 'table' => "string", 'primary_key' => "string"])]
+    public function config(): array {
+        return [
+            'db' => $this->_dbName,
+            'table' => $this->_table,
+            'primary_key' => $this->_primaryKey
+        ];
+    }
+
+    /**
+     * @param int $actor
+     * @return ConnectionInterface
+     */
+    protected function connection(int $actor = 0): ConnectionInterface {
+        $actor = $actor ?: $this->actor;
+        if ($actor == DBS_SLAVE) {
+            $connection = $this->slave()->table($this->_table);
+        } else {
+            $connection = $this->master()->table($this->_table);
+        }
+        if (!is_null($this->_where)) {
+            $where = $this->_where->build();
+            $where['sql'] and $connection->where($where['sql'], ...$where['match']);
+        }
+        if (!is_null($this->_order)) {
+            foreach ($this->_order as $field => $order) {
+                $connection->order($field, strtolower($order));
+            }
+        }
+        return $connection;
+    }
+
+    /**
+     * 从库连接
+     * @return PdoPool
+     */
+    protected function slave(): PdoPool {
+        $cid = Coroutine::getCid();
+        if (!isset(self::$db_instance[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid])) {
+            self::$db_instance[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid] = Pdo::slave($this->_dbName)->connection();
+            if ($cid > 0) {
+                Coroutine::defer(function () use ($cid) {
+                    unset(self::$db_instance[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid]);
+                });
+            }
+        }
+        return self::$db_instance[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid];
+    }
+
+    /**
+     * 主库连接
+     * @return PdoPool
+     */
+    protected function master(): PdoPool {
+        $cid = Coroutine::getCid();
+        if (isset($this->transactionConnection)) {
+            return $this->transactionConnection;
+        }
+        if (!isset(self::$db_instance[DBS_MASTER . '_' . $this->_dbName . '_' . $cid])) {
+            self::$db_instance[DBS_MASTER . '_' . $this->_dbName . '_' . $cid] = Pdo::master($this->_dbName)->connection();
+            if ($cid > 0) {
+                Coroutine::defer(function () use ($cid) {
+                    unset(self::$db_instance[DBS_MASTER . '_' . $this->_dbName . '_' . $cid]);
+                });
+            }
+        }
+        return self::$db_instance[DBS_MASTER . '_' . $this->_dbName . '_' . $cid];
+    }
+
+    /**
+     * 开启事务
+     * @return void
+     */
+    public function beginTransaction() {
+        $this->transactionConnection = Pdo::beginTransaction($this->_dbName);
+    }
+
+    /**
+     * 事务回滚
+     * @return void
+     */
+    public function rollback() {
+        $this->transactionConnection->rollback();
+        unset($this->transactionConnection);
+    }
+
+    /**
+     * 事务提交
+     * @return void
+     */
+    public function commit() {
+        $this->transactionConnection->commit();
+        unset($this->transactionConnection);
+    }
+
+    /**
+     * 获取活动数据记录缓存KEY
+     * @param $id
+     * @return string
+     */
+    protected function getArCacheKey($id): string {
+        return APP_ID . '_AR_' . strtoupper($this->_dbName) . '_' . strtoupper($this->_table) . '_' . $this->_primaryKey . '_' . $id;
+    }
+
+    /**
+     * @return null|string
+     */
+    protected function getWhereSql(): string|null {
+        if (is_null($this->_where)) {
+            return null;
+        }
+        return $this->_where->getWhereSql();
+    }
+
+    /**
+     * 数据转换
+     * @param array|null $data
+     * @return array
+     */
+    protected function format(array $data = null): array {
+        if (!$this->_validate) {
+            return $data;
+        }
+        $data = is_null($data) ? $this->toArray(true) : $data;
+        foreach ($this->_validate as $f => $v) {
+            if (isset($data[$f]) && isset($v['format'])) {
+                $dataType = $v['format'][0]['type'];
+                if ($dataType == 'json') {
+                    if (JsonHelper::is($data[$f])) {
+                        $data[$f] = JsonHelper::recover($data[$f]);
+                    } else {
+                        $data[$f] = JsonHelper::toJson($data[$f]);
+                    }
+                }
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * 设置主从库
+     * @param $actor
+     * @return $this
+     */
+    public function setActor($actor): static {
+        $this->actor = $actor;
+        return $this;
+    }
+}

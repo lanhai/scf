@@ -1,0 +1,25 @@
+<?php
+
+namespace Scf\Core;
+
+use Swoole\Coroutine;
+
+abstract class CoroutineComponent {
+    use ComponentTrait;
+
+    /**
+     * 获取单利
+     * @param array|null $conf
+     * @return static
+     */
+    final public static function instance(array $conf = null): static {
+        $class = get_called_class();
+        $cid = Coroutine::getCid();
+        if (!isset(static::$_instances[$class . '_' . $cid])) {
+            $_configs = Config::get('components');
+            $config = is_array($conf) ? $conf : ($_configs[$class] ?? []);
+            static::$_instances[$class . '_' . $cid] = new $class($config);
+        }
+        return static::$_instances[$class . '_' . $cid];
+    }
+}

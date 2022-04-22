@@ -1,0 +1,53 @@
+<?php
+
+namespace Scf\Database\Connection;
+
+use Mix\Database\Connection;
+use Mix\Database\ConnectionInterface;
+use Mix\Database\Database;
+use Mix\ObjectPool\Exception\WaitTimeoutException;
+
+class PdoPool extends Database {
+    protected array $config = [];
+
+    /**
+     * Borrow connection
+     * @return Connection
+     * @throws WaitTimeoutException
+     */
+    protected function borrow(): Connection {
+        if ($this->pool) {
+            $driver = $this->pool->borrow();
+            $conn = new PdoConnection($driver, $this->logger);
+        } else {
+            $conn = new PdoConnection($this->driver, $this->logger);
+        }
+        return $conn;
+    }
+
+    /**
+     * 获得数据库ORM
+     * @param string $table
+     * @return ConnectionInterface
+     */
+    public function table(string $table): ConnectionInterface {
+        $tablePrefix = $this->config['prefix'];
+        return $this->borrow()->table($tablePrefix . $table);
+    }
+
+    /**
+     * 插入数据
+     * @param string $table
+     * @param array $data
+     * @param string $insert
+     * @return ConnectionInterface
+     */
+    public function insert(string $table, array $data, string $insert = 'INSERT INTO'): ConnectionInterface {
+        $tablePrefix = $this->config['prefix'];
+        return $this->borrow()->insert($tablePrefix . $table, $data, $insert);
+    }
+
+    public function setConfig($config) {
+        $this->config = $config;
+    }
+}

@@ -1,0 +1,237 @@
+<?php
+
+/**
+ * 连客云集成框架
+ * User: linkcloud
+ * Date: 14-6-27
+ * Time: 下午12:29
+ */
+
+namespace HuiYun\Component;
+
+use HuiYun\Core\Component;
+use HuiYun\Session\ISession;
+use HuiYun\Util\Arr;
+
+class Session extends Component {
+
+    const FLUSH_KEY = '__FLUSH__';
+
+    protected $_config = [
+        'type'          => null, // 驱动名, null为使用原生session
+        'prefix'        => null, // SESSION名称前缀
+        'name'          => null,
+        'path'          => null,
+        'domain'        => null,
+        'expire'        => null,
+        'use_trans_sid' => null,
+        'use_cookies'   => null,
+        'cache_limiter' => null,
+        'cache_expire'  => null,
+        'var_id'        => null, // GET方式Session ID的变量名
+        'auto_start'    => true,
+    ];
+    protected $_prefix = '';
+
+    protected function _init() {
+        $this->_prefix = is_null($this->_config['prefix']) ? '' : $this->_config['prefix'];
+
+        if (!is_null($this->_config['var_id']))
+            session_id($_REQUEST[$this->_config['var_id']]);
+        if (!is_null($this->_config['name']))
+            session_name($this->_config['name']);
+        if (!is_null($this->_config['path']))
+            session_save_path($this->_config['path']);
+        if (!is_null($this->_config['domain']))
+            ini_set('session.cookie_domain', $this->_config['domain']);
+        if (!is_null($this->_config['expire']))
+            ini_set('session.gc_maxlifetime', $this->_config['expire']);
+        if (!is_null($this->_config['use_trans_sid']))
+            ini_set('session.use_trans_sid', $this->_config['use_trans_sid'] ? 1 : 0);
+        if (!is_null($this->_config['use_cookies']))
+            ini_set('session.use_cookies', $this->_config['use_cookies'] ? 1 : 0);
+        if (!is_null($this->_config['cache_limiter']))
+            session_cache_limiter($this->_config['cache_limiter']);
+        if (!is_null($this->_config['cache_expire']))
+            session_cache_expire($this->_config['cache_expire']);
+
+        if (!is_null($this->_config['type'])) {
+            $type  = $this->_config['type'];
+            $class = strpos($type, '\\') !== false ? $type : 'HuiYun\Session\\' . ucwords($type);
+
+            $handler = new $class();
+            _assert($handler instanceof ISession, 'Session type ' . $class . 'not implement of ISession');
+
+            session_set_save_handler(
+                [&$handler, "open"], [&$handler, "close"], [&$handler, "read"], [&$handler, "write"], [&$handler, "destroy"], [&$handler, "gc"]
+            );
+        }
+
+        if ($this->_config['auto_start'])
+            session_start();
+
+        if ($this->_prefix && !isset($_SESSION[$this->_prefix])) {
+            $_SESSION[$this->_prefix] = [];
+        }
+    }
+
+    /**
+     * 读取
+     * @param null|string $name 支持.语法
+     * @param null|mixed $default
+     * @return mixed
+     */
+    public function get($name = null, $default = null) {
+        $base = $this->_prefix ?
+            (array_key_exists($this->_prefix, $_SESSION) ? $_SESSION[$this->_prefix] : []) :
+            $_SESSION;
+
+        if (is_null($name)) {
+            return $base;
+        }
+
+        return Arr::path($base, $name, $default, '.');
+    }
+
+    /**
+     * 赋值
+     * @param string $name 支持.语法
+     * @param $value
+     */
+    public function set($name, $value) {
+        if ($this->_prefix) {
+            if (!isset($_SESSION[$this->_prefix])) {
+                $_SESSION[$this->_prefix] = [];
+            }
+            Arr::setPath($_SESSION[$this->_prefix], $name, $value, '.');
+        } else {
+            Arr::setPath($_SESSION, $name, $value, '.');
+        }
+    }
+
+    /**
+     * 删除一个session,不支持.语法
+     * @param string $name
+     */
+    public function del($name) {
+        if ($this->_prefix) {
+            unset($_SESSION[$this->_prefix][$name]);
+        } else {
+            unset($_SESSION[$name]);
+        }
+    }
+
+    /**
+     * 清空session
+     */
+    public function clean() {
+        if ($this->_prefix) {
+            $_SESSION[$this->_prefix] = [];
+        } else {
+            $_SESSION = [];
+        }
+    }
+
+    /**
+     * 全局读取,不带前缀
+     * @param null|string $name 支持.语法
+     * @param null|mixed $default
+     * @return mixed
+     */
+    public function getGlobal($name = null, $default = null) {
+        if (is_null($name)) {
+            return $_SESSION;
+        }
+        return Arr::path($_SESSION, $name, $default, '.');
+    }
+
+    /**
+     * 全局赋值,不带前缀
+     * @param string $name 支持.语法
+     * @param $value
+     */
+    public function setGlobal($name, $value) {
+        Arr::setPath($_SESSION, $name, $value, '.');
+    }
+
+    /**
+     * 全局删除一个session,不支持.语法
+     * @param string $name
+     */
+    public function delGlobal($name) {
+        unset($_SESSION[$name]);
+    }
+
+    /**
+     * 设置单次session, 读取一次后消失
+     * @param $name
+     * @param $value
+     */
+    public function setFlush($name, $value) {
+        if ($this->_prefix) {
+            if (!isset($_SESSION[$this->_prefix]['__FLUSH__'])) {
+                $_SESSION[$this->_prefix][self::FLUSH_KEY] = [];
+            }
+            $_SESSION[$this->_prefix][self::FLUSH_KEY][$name] = $value;
+        } else {
+            if (!isset($_SESSION[self::FLUSH_KEY])) {
+                $_SESSION[self::FLUSH_KEY] = [];
+            }
+            $_SESSION[self::FLUSH_KEY][$name] = $value;
+        }
+    }
+
+    /**
+     * 读取单次session
+     * @param $name
+     * @param null|mixed $default
+     * @return mixed|null
+     */
+    public function getFlush($name, $default = null) {
+        if ($this->_prefix) {
+            if (isset($_SESSION[$this->_prefix][self::FLUSH_KEY][$name])) {
+                $value = $_SESSION[$this->_prefix][self::FLUSH_KEY][$name];
+                unset($_SESSION[$this->_prefix][self::FLUSH_KEY][$name]);
+                return $value;
+            }
+        } else {
+            if (isset($_SESSION[$this->_prefix][self::FLUSH_KEY][$name])) {
+                $value = $_SESSION[$this->_prefix][self::FLUSH_KEY][$name];
+                unset($_SESSION[$this->_prefix][self::FLUSH_KEY][$name]);
+                return $value;
+            }
+        }
+
+        return $default;
+    }
+
+    /**
+     * 开启session
+     */
+    public function start() {
+        session_start();
+    }
+
+    /**
+     * 暂停session
+     */
+    public function pause() {
+        session_write_close();
+    }
+
+    /**
+     * 销毁session,包括所有的前缀
+     */
+    public function destroy() {
+        $_SESSION = [];
+        session_unset();
+        session_destroy();
+    }
+
+    /**
+     * 重新生成session id
+     */
+    public function regenerate() {
+        session_regenerate_id();
+    }
+}

@@ -1,0 +1,84 @@
+<?php
+
+namespace Scf\Server;
+
+use Scf\Core\Instance;
+use Scf\Core\Log;
+use Scf\Server\Table\Runtime;
+use Scf\Server\Table\Counter;
+use Swoole\Coroutine;
+
+class BgTask {
+    use Instance;
+
+    protected array $tasks = [];
+    protected array $taskIds = [];
+    protected array $taskCids = [];
+    protected int $id = 1;
+
+    /**
+     * 开始任务
+     * @return array
+     */
+    public function start(): array {
+        foreach ($this->tasks as $task) {
+            $id = Counter::instance()->get('background_task_latest_id') ?: 0;
+            $cid = Coroutine::create(function () use ($task, $id) {
+                $worker = new $task['namespace'];
+                if (!method_exists($worker, 'start')) {
+                    Log::instance()->error('后台任务' . $task['name'] . '未定义start方法');
+                } else {
+                    $worker->start($id);
+                }
+            });
+            $this->taskIds[] = $id;
+            $this->taskCids[] = $cid;
+            Counter::instance()->incr('background_task_latest_id');
+        }
+        Runtime::instance()->set('background_task_cid', $this->taskIds);
+        return $this->getTaskid();
+    }
+
+    /**
+     * 是否活着
+     * @param int $id
+     * @return bool
+     */
+    public function isAlive(int $id): bool {
+        return in_array($id, $this->getTaskid());
+    }
+
+    /**
+     * 获取正在运行的任务ID
+     * @return array
+     */
+    public function getTaskid(): array {
+        return Runtime::instance()->get('background_task_cid') ?: [];
+    }
+
+    /**
+     * 添加任务到任务池
+     * @param $tasks
+     * @return $this
+     */
+    public function add($tasks): static {
+        $this->tasks = $this->tasks ? [...$this->tasks, ...$tasks] : $tasks;
+        return $this;
+    }
+
+    /**
+     * 获取任务池的任务
+     * @return array
+     */
+    public function get(): array {
+        return $this->tasks;
+    }
+
+    /**
+     * 是否存在任务
+     * @return bool
+     */
+    public function hasTask(): bool {
+        return count($this->tasks) > 0;
+    }
+}

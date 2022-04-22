@@ -1,0 +1,124 @@
+<?php
+
+namespace Scf\Service;
+
+use Co\Channel;
+use Scf\Command\Color;
+use Scf\Core\Console;
+use Scf\Core\Instance;
+use Scf\Database\Redis;
+use Scf\Server\Table\Counter;
+use Scf\Service\Struct\QueueStruct;
+use Scf\Util\Date;
+use Swoole\Coroutine;
+
+class QueueManager {
+    use Instance;
+
+    protected static string $key = APP_ID . '_QUEUE_LIST_';
+    protected int $watcherId = 0;
+
+    /**
+     * 监听队列任务
+     * @param int $mc
+     * @return void
+     */
+    public function watch(int $mc = 512) {
+        Counter::instance()->incr('_queue_latest_id');
+        $this->watcherId = Counter::instance()->get('_queue_latest_id');
+        //将待重试加入队列
+        if ($retryCount = $this->count(2)) {
+            for ($i = 0; $i < $retryCount; $i++) {
+                Coroutine::create(function () {
+                    $queue = Redis::pool()->rPop(self::$key . '2');
+                    Redis::pool()->lPush(self::$key . '0', $queue);
+                });
+            }
+        }
+        Coroutine::create(function () use ($mc) {
+            while (true) {
+                if ($this->watcherId != Counter::instance()->get('_queue_latest_id')) {
+                    break;
+                }
+                if ($count = $this->count()) {
+                    $channel = new Channel($count);
+                    for ($i = 0; $i < min($count, $mc); $i++) {
+                        Coroutine::create(function () use ($channel) {
+                            $channel->push($this->pop());
+                        });
+                    }
+                    $successed = 0;
+                    for ($i = 0; $i < min($count, $mc); $i++) {
+                        $successed += $channel->pop() ? 1 : 0;
+                    }
+                    Console::log('本次累计执行队列任务:' . $count . ',执行成功:' . $successed);
+                }
+                Coroutine::sleep(0.2);
+            }
+            Coroutine::defer(function () {
+                Console::log(Color::yellow('销毁队列监听孤儿协程:' . $this->watcherId));
+            });
+        });
+    }
+
+    /**
+     * 取出一个任务并执行
+     * @return bool
+     */
+    public function pop(): bool {
+        if ($queue = Redis::pool()->rPop(self::$key . '0')) {
+            $queue = QueueStruct::factory($queue);
+            return call_user_func('\\' . $queue->handler . '::start', $queue);
+            //return $handler->handler::start($queue);
+        }
+        return false;
+    }
+
+    /**
+     * 所有队列任务
+     * @param int $status
+     * @param string|null $day
+     * @return bool|array
+     */
+    public function all(int $status = 0, string $day = null): bool|array {
+        $day = $day ?: Date::today('Y-m-d');
+        return Redis::pool()->lAll($status == 0 || $status == 2 ? self::$key . $status : self::$key . $status . '_' . $day);
+    }
+
+    /**
+     * 队列任务
+     * @param int $start
+     * @param int $end
+     * @param int $status
+     * @param string|null $day
+     * @return bool|array
+     */
+    public function lRange(int $start = 0, int $end = -1, int $status = 0, string $day = null): bool|array {
+        $day = $day ?: Date::today('Y-m-d');
+        return Redis::pool()->lRange($status == 0 || $status == 2 ? self::$key . $status : self::$key . $status . '_' . $day, $start, $end);
+    }
+
+    /**
+     * @param int $status
+     * @param string|null $day
+     * @return int
+     */
+    public function count(int $status = 0, string $day = null): int {
+        $day = $day ?: Date::today('Y-m-d');
+        return Redis::pool()->lLength($status == 0 || $status == 2 ? self::$key . $status : self::$key . $status . '_' . $day);
+    }
+
+    /**
+     * 获取队列列表
+     * @param int $length
+     * @param int $status
+     * @param string|null $day
+     * @return bool|array
+     */
+    public function load(int $length = 300, int $status = 0, string $day = null): bool|array {
+        $day = $day ?: Date::today('Y-m-d');
+        return Redis::pool()->lRange($status == 0 || $status == 2 ? self::$key . $status : self::$key . $status . '_' . $day, 0 - $length);
+    }
+
+
+}

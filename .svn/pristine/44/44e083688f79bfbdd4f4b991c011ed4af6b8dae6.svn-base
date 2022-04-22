@@ -1,0 +1,169 @@
+<?php
+
+namespace Scf\Mode\Web;
+
+use Scf\Core\CoroutineInstance;
+use Scf\Helper\JsonHelper;
+use Scf\Helper\ObjectHelper;
+
+class Request {
+    use CoroutineInstance;
+
+    /**
+     * @var array 服务器环境信息
+     */
+    protected array $_SERVER = [];
+    /**
+     * @var array get参数
+     */
+    protected array $_GET = [];
+    /**
+     * @var array post 参数
+     */
+    protected array $_POST = [];
+    /**
+     * @var array cookie
+     */
+    protected array $_COOKIE = [];
+    /**
+     * @var array 文件
+     */
+    protected array $_FILES = [];
+    /**
+     * @var array header
+     */
+    protected array $_HEADER = [];
+    /**
+     * @var string
+     */
+    protected string $_CONTENT;
+    /**
+     * @var \Swoole\Http\Request
+     */
+    protected \Swoole\Http\Request $_request;
+
+    /**
+     * 返回action name
+     * @return string
+     */
+    public function getActionName(): string {
+        return Router::instance()->getAction();
+    }
+
+    /**
+     * 返回controller name
+     * @return string
+     */
+    public function getControllerName() {
+        return Router::instance()->getController();
+    }
+
+    /**
+     * 判断是否是POST请求
+     * @return bool
+     */
+    public function isPost() {
+        return strtoupper($this->server('request_method')) == 'POST';
+
+    }
+
+    /**
+     * 读取cookie内容
+     * @param string|null $key
+     * @return array|mixed|string
+     */
+    public function cookie(string $key = null): mixed {
+        return $key ? $this->_COOKIE[$key] ?? '' : $this->_COOKIE;
+    }
+
+    /**
+     * 返回服务器参数信息
+     * @param null $key
+     * @return string|array
+     */
+    public function server($key = null): string|array {
+        return $key ? $this->_SERVER[$key] ?? '' : $this->_SERVER;
+    }
+
+    /**
+     * 获取HTTP头信息
+     * @param $key
+     * @return string|array
+     */
+    public function header($key = null): string|array {
+        return $key ? $this->_HEADER[$key] ?? '' : $this->_HEADER;
+    }
+
+    /**
+     * 获取get参数
+     * @param null $key
+     * @param mixed|null $default
+     * @return string|array|null
+     */
+    public function get($key = null, mixed $default = null): null|string|array {
+        return !is_null($key) ? empty($this->_GET[$key]) ? $default : $this->_GET[$key] : $this->_GET;
+    }
+
+    /**
+     * 获取post参数
+     * @param null $key
+     * @param mixed|null $default
+     * @return string|array|null
+     */
+    public function post($key = null, mixed $default = null): null|string|array {
+        return !is_null($key) ? empty($this->_POST[$key]) ? $default : $this->_POST[$key] : $this->_POST;
+    }
+
+    /**
+     * 获取POST的原始数据
+     * @return string
+     */
+    public function content(): string {
+        return $this->_CONTENT;
+    }
+
+    /**
+     * 获取REQUEST参数
+     * @param $key
+     * @param mixed|null $default
+     * @return array|mixed|null
+     */
+    public function getAll($key = null, mixed $default = null): mixed {
+        $request = [...$this->_GET, ...$this->_POST];
+        return !is_null($key) ? empty($request[$key]) ? $default : $request[$key] : $request;
+    }
+
+    /**
+     * 判断是否ajax请求
+     * @return bool
+     */
+    public function isAjax(): bool {
+        return strtolower(($this->_SERVER["http_x_requested_with"] ?? '') == 'xmlhttprequest' || str_contains(strtolower($this->_HEADER['accept'] ?? ''), 'json') != false);
+    }
+
+    /**
+     * @param \Swoole\Http\Request $request
+     * @return void
+     */
+    public function register(\Swoole\Http\Request $request): void {
+        $this->_request = $request;
+        $request = ObjectHelper::toArray($request);
+        $this->_COOKIE = $request['cookie'] ?: [];
+        $this->_HEADER = $request['header'] ?: [];
+        $this->_FILES = $request['files'] ?: [];
+        $this->_SERVER = $request['server'] ?: [];
+        $this->_GET = $request['get'] ?: [];
+        $this->_CONTENT = $this->_request->getContent();
+        $this->_POST = $this->isJsonContent() ? JsonHelper::is($this->_CONTENT) ? JsonHelper::recover($this->_CONTENT) : [] : ($request['post'] ?: []);
+
+    }
+
+    /**
+     * 判断是否提交的json数据
+     * @return bool
+     */
+    public function isJsonContent(): bool {
+        $contentType = $this->_request->header['content-type'] ?? 'application/x-www-form-urlencoded';
+        return $contentType == 'application/json';
+    }
+}

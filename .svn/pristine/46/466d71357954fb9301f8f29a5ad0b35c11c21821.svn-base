@@ -1,0 +1,30 @@
+<?php
+namespace HuiYun\Mode\Cli;
+
+use HuiYun\Component\Debug;
+use HuiYun\Component\Error;
+use HuiYun\Exception\NotFoundException;
+
+abstract class Module extends \HuiYun\Core\Module {
+
+	protected function _init() {
+		parent::_init();
+		if (!IS_CLI) {
+			send_http_status(400);
+			exit;
+		}
+	}
+
+	public function run() {
+
+		// 开启错误输出
+		Error::enable();
+		// 创建调试错误处理
+		Error::instance()->setCliPlainText();
+		// 关闭调试工具栏
+		Debug::disable();
+
+		parent::run();
+	}
+
+} 

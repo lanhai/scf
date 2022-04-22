@@ -1,0 +1,310 @@
+<?php
+
+namespace Scf\Core;
+
+use JetBrains\PhpStorm\ArrayShape;
+use Monolog\Handler\RotatingFileHandler;
+use Monolog\Handler\StreamHandler;
+use Monolog\Logger;
+use Scf\Component\SocketMessager;
+use Scf\Database\Redis;
+use Scf\Helper\StringHelper;
+use Scf\Server\Table\Counter;
+use Scf\Server\Table\LogTable;
+use Scf\Util\Date;
+use Scf\Util\Time;
+
+class Log {
+    use CoroutineInstance;
+
+    protected string $_module = '';
+    protected array $_config = [
+        'enable_save_to_table' => false,
+        'enable_sql' => true,
+        'enable_error' => true,
+        'enable_message' => true,
+        'enable_access' => true,
+        'check_dir' => true,
+        'error_level' => Logger::NOTICE, // 错误日志记录等级
+    ];
+    protected string $backupCounterKey = 'log_backup_start';
+    protected string $idCounterKey = 'log_id';
+
+    /**
+     * @var int 日志ID
+     */
+    protected int $id = 0;
+
+    /**
+     * 日志对象集合
+     * @var array(Logger)
+     */
+    protected array $_loggers = [];
+
+    private static array $_instances = [];
+
+    public function __construct($module = '') {
+        $this->_module = $module;
+    }
+
+
+    /**
+     * 保存错误记录
+     * @param $msg
+     * @param string $code
+     * @param string $file
+     * @param int $line
+     */
+    public function error($msg, string $code = "0", string $file = '', int $line = 0) {
+        $notify = [
+            'code' => $code,
+            'error' => $msg,
+            'file' => $file,
+            'line' => $line,
+            'time' => date('Y-m-d H:i:s'),
+            'ip' => APP_ALIAS . '@' . SERVER_HOST
+        ];
+        if ($msg instanceof \Exception) {
+            $notify['error'] = $msg->getMessage();
+            $notify['file'] = $msg->getFile();
+            $notify['line'] = $msg->getLine();
+            $error = $this->format($msg->getCode(), $msg->getMessage(), $msg->getFile(), $msg->getLine());
+        } else {
+            if (!$file) {
+                $backTrace = debug_backtrace();
+                $notify['file'] = $backTrace[0]['file'] ?? '--';
+                $notify['line'] = $backTrace[0]['line'] ?? '--';
+                $error = $this->format($code, $msg, $backTrace[0]['file'] ?? '--', $backTrace[0]['line'] ?? '--');
+            } else {
+                $error = $this->format($code, $msg, $file, $line);
+            }
+        }
+        //推送到控制台
+        Console::push($error);
+        if ($this->_config['enable_save_to_table']) {
+            //存到节点内存等待转存
+            $table = LogTable::instance();
+            $logId = Counter::instance()->incr($this->idCounterKey);
+            $table->set($logId, ['message' => $error, 'type' => 'error', 'file' => $notify['file'] . ':' . $notify['line'], 'time' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module]);
+        } else {
+            //保存日志到Redis&日志文件
+            $errorLogKey = APP_ID . '_LOGS_ERROR_' . Date::today();
+            $redis = Redis::pool();
+            $redis->lPush($errorLogKey, ['date' => date('m-d H:i:s'), 'error' => $error, 'module' => $this->_module]);
+            $redis->close();
+            $logger = $this->getLogger('error');
+            $logger?->error($error);
+        }
+        //通知机器人
+        SocketMessager::instance()->publish('error', $notify);
+    }
+
+    /**
+     * 保存信息日志
+     * @param string $msg
+     */
+    public function info(string $msg = '') {
+        //存入缓存
+        $backTrace = debug_backtrace();
+        $m = [
+            'file' => !empty($backTrace[0]['file']) ? $backTrace[0]['file'] : '--',
+            'line' => !empty($backTrace[0]['line']) ? $backTrace[0]['line'] : '--',
+        ];
+        $msg = $msg . " \"" . $m['file'] . ":" . $m['line'] . "\"";
+        //推送到控制台
+        Console::push($msg);
+        if ($this->_config['enable_save_to_table']) {
+            //存到节点内存等待转存
+            $table = LogTable::instance();
+            $logId = Counter::instance()->incr($this->idCounterKey);
+            $table->set($logId, ['message' => $msg, 'type' => 'info', 'file' => $m['file'] . ':' . $m['line'], 'time' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module]);
+        } else {
+            //储存到日志文件&redis日志服务器
+            $infoLogKey = APP_ID . '_LOGS_INFO_' . Date::today();
+            $redis = Redis::pool();
+            $redis->lPush($infoLogKey, ['date' => date('m-d H:i:s'), 'info' => $msg, 'module' => $this->_module]);
+            $redis->close();
+            $logger = $this->getLogger('message');
+            $logger?->info($msg);
+        }
+    }
+
+    /**
+     * 转存内存里的日志
+     * @return int
+     */
+    public function backup(): int {
+        if (!$this->tableCount() || !$this->_config['enable_save_to_table']) {
+            return 0;
+        }
+        $redis = Redis::pool();
+        $infoLogKey = APP_ID . '_LOGS_INFO_' . Date::today();
+        $infoLogger = $this->getLogger('message');
+        $errorLogKey = APP_ID . '_LOGS_ERROR_' . Date::today();
+        $errorLogger = $this->getLogger('error');
+        $start = Counter::instance()->get($this->backupCounterKey);
+        $logId = Counter::instance()->get($this->idCounterKey);
+        $table = LogTable::instance();
+        $count = $table->count();
+
+        for ($id = $start + 1; $id <= $logId; $id++) {
+            $row = $table->get($id);
+            switch ($row['type']) {
+                case 'error':
+                    $redis->lPush($errorLogKey, ['date' => date('m-d H:i:s'), 'error' => $row['message'], 'module' => $row['module']]);
+                    $errorLogger?->error($row['message']);
+                    break;
+                default:
+                    $redis->lPush($infoLogKey, ['date' => $row['time'], 'info' => $row['message'], 'module' => $row['module']]);
+                    $infoLogger?->info($row['message']);
+                    break;
+            }
+            $table->delete($id);
+        }
+        Counter::instance()->set($this->backupCounterKey, $logId);
+        $redis->close();
+        return $count;
+    }
+
+    /**
+     * 开启共享内存储存
+     * @param bool $status
+     * @return $this
+     */
+    public function enableTable(bool $status = true): static {
+        $this->_config['enable_save_to_table'] = $status;
+        return $this;
+    }
+
+
+    /**
+     * 设置写入模块文件夹
+     * @param $module
+     * @return $this
+     */
+    public function setModule($module): static {
+        $this->_module = $module;
+        return $this;
+    }
+
+    /**
+     * 统计待转存日志数量
+     * @return int
+     */
+    public function tableCount(): int {
+        if (!$this->_config['enable_save_to_table']) {
+            return 0;
+        }
+        return LogTable::instance()->count();
+    }
+
+
+    /**
+     * 统计REDIS日志数量
+     * @param null $day
+     * @return array
+     */
+    #[ArrayShape(['error' => "int", 'info' => "int"])]
+    public function count($day = null): array {
+        $day = $day ?: Date::today();
+        $errorLogKey = APP_ID . '_LOGS_ERROR_' . $day;
+        $infoLogKey = APP_ID . '_LOGS_INFO_' . $day;
+        return [
+            'error' => Redis::pool()->lLength($errorLogKey),
+            'info' => Redis::pool()->lLength($infoLogKey)
+        ];
+    }
+
+    /**
+     * 读取REDIS里储存的日志
+     * @param string $type
+     * @param null $day
+     * @param int $length
+     * @return array|bool
+     */
+    public function get(string $type = 'ERROR', $day = null, int $length = 1000): bool|array {
+        $day = $day ?: Date::today();
+        $key = APP_ID . '_LOGS_' . strtoupper($type) . '_' . $day;
+        return Redis::pool()->lRange($key, 0, $length);
+    }
+
+    /**
+     * 设置日志记录器
+     * @param $name
+     * @param Logger $logger
+     * @return void
+     */
+    public function setLogger($name, Logger $logger) {
+        $this->_loggers[$name] = $logger;
+    }
+
+    /**
+     * @param $name
+     * @return Logger|null
+     */
+    public function getLogger($name): Logger|null {
+        if (!isset($this->_loggers[$name])) {
+            switch ($name) {
+                case 'error':
+                    $logger = $this->createLogger('error', $this->_config['error_level']);
+                    $this->setLogger('error', $logger);
+                    break;
+                case 'access':
+                    if ($this->_config['enable_access']) {
+                        $this->setLogger('access', $this->createLogger('access', Logger::INFO));
+                    }
+                    break;
+                case 'message':
+                    if ($this->_config['enable_message']) {
+                        $logger = $this->createLogger('message', Logger::INFO);
+                        $this->setLogger('message', $logger);
+                    }
+                    break;
+                case 'sql';
+                    if ($this->_config['enable_sql']) {
+                        $this->setLogger('sql', $this->createLogger('sql', Logger::INFO));
+                    }
+                    break;
+            }
+        }
+        return $this->_loggers[$name] ?: null;
+    }
+
+    /**
+     * 创建日志记录器
+     * @param $name
+     * @param int $level
+     * @param bool $rotating
+     * @return Logger
+     */
+    public function createLogger($name, int $level = Logger::INFO, bool $rotating = true): Logger {
+        $dir = LOG_PATH . StringHelper::camel2lower($this->_module) . '/';
+        if ($this->_config['check_dir'] and !is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+        $handler = $rotating ?
+            new RotatingFileHandler($dir . $name . '.log', 100, $level) :
+            new StreamHandler($dir . $name . '.log', $level);
+        $logger = new Logger($name);
+        $logger->pushHandler($handler);
+
+        return $logger;
+    }
+
+    /**
+     * 格式换日志信息
+     * @param $code
+     * @param $msg
+     * @param $file
+     * @param $line
+     * @return mixed
+     */
+    public function format($code, $msg, $file, $line): mixed {
+        return StringHelper::varsTransform('"{code}" "{message}" "{file}:{line}"', [
+            '{code}' => intval($code),
+            '{message}' => $msg,// str_replace('"', '\\"', $msg),
+            '{file}' => $file,// str_replace('"', '\\"', $file),
+            '{line}' => intval($line),
+        ]);
+    }
+}

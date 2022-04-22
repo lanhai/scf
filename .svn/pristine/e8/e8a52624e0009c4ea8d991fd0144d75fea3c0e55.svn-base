@@ -1,0 +1,59 @@
+<?php
+
+
+namespace Scf\Core;
+
+
+use Swoole\Coroutine;
+
+trait RequestInstance {
+    private static array $instance = [];
+
+    /**
+     * @return static
+     */
+    public static function instance(): static {
+        $cid = Coroutine::getCid();
+        return self::getRequestInstance($cid);
+    }
+
+    /**
+     * @param int $cid
+     * @return static
+     */
+    private static function getRequestInstance(int $cid = 0): static {
+        $cid = $cid ?: Coroutine::getCid();
+        $pcid = Coroutine::getPcid($cid);
+        if (!$pcid) {
+            return self::create();
+        }
+        if (isset(static::$instance[$pcid])) {
+            return static::$instance[$pcid];
+        }
+        return self::getRequestInstance($pcid);
+    }
+
+    /**
+     * 创建一个协程日志记录器
+     * @return static
+     */
+    public static function create(): static {
+        $cid = Coroutine::getCid();
+        if (!isset(static::$instance[$cid])) {
+            static::$instance[$cid] = new static();
+            if ($cid > 0) {
+                Coroutine::defer(function () use ($cid) {
+                    unset(static::$instance[$cid]);
+                });
+            }
+        }
+        return static::$instance[$cid];
+    }
+
+    public function destroy(int $cid = null) {
+        if ($cid === null) {
+            $cid = Coroutine::getCid();
+        }
+        unset(static::$instance[$cid]);
+    }
+}

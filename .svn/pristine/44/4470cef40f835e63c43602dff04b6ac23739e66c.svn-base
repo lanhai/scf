@@ -1,0 +1,4 @@
+# docker run -itd --name swoole -v F:\projects:/www -p 9502:9502 -p 9501:9501 --add-host local.dmool.com:172.17.0.1 --restart always registry.cn-chengdu.aliyuncs.com/huiyun/swoole:latest
+
+
+TWowKzZaT0tjQzFNNkQzMVpXb1FwYk5vUHk0NER0VStWd1JPRTJSTms3MmpBZW5DSC9SV3Z6Mk52SVJCbWJlU0xrd0wvQmE0N3dNcmgvNTJ0UWI2ZE5uLzI1dnlIb0JKZGhNcldSK2Q4SFBkakJHeVdqQTdDYzFRTzBySmxxWldRdUZZVk1Eb1ZVRmR3YU50SDJIbk1zQXpNdjZHU1d4SE1mUzVWWUF1UEc0PQ

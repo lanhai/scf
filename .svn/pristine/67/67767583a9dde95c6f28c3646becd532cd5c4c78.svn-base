@@ -1,0 +1,1 @@
+# docker run -itd --name swoole -v F:\projects:/www -p 9502:9502 -p 9501:9501 --add-host local.dmool.com:172.17.0.1 --restart always registry.cn-chengdu.aliyuncs.com/huiyun/swoole:latest

@@ -1,0 +1,24 @@
+<?php
+
+namespace Scf\Server\Table;
+
+use Scf\Runtime\Table;
+
+class LogTable extends Table {
+
+    /**
+     *  配置项
+     * @var array
+     */
+    protected array $_config = [
+        'size' => 102400,
+        'colums' => [
+            'message' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 10240],
+            'type' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 32],
+            'file' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 1024],
+            'time' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 32],
+            'module' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 32],
+        ]
+    ];
+
+}

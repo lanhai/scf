@@ -1,0 +1,6 @@
+#!/bin/bash
+args=""
+for arg in "$@"; do
+  args+="$arg "
+done
+php ../boot toolbox $args

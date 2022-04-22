@@ -1,0 +1,12 @@
+<?php
+
+namespace Scf\Core;
+
+class Env {
+    /**
+     * @return bool 是否开发环境
+     */
+    public static function isDev(): bool {
+        return APP_RUN_ENV == 'dev';
+    }
+}

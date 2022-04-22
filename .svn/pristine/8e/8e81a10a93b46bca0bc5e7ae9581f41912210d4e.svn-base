@@ -1,0 +1,44 @@
+{
+  "name": "cqphper/scf",
+  "description": "swoole云开发框架",
+  "authors": [
+    {
+      "name": "lanhai",
+      "email": "363387485@qq.com"
+    }
+  ],
+  "version": "1.0.0",
+  "time": "2021-01-10",
+  "require": {
+    "php": ">=8.1",
+    "swoole/ide-helper": "^4.8",
+    "monolog/monolog": "^2.3",
+    "ext-fileinfo": "*",
+    "ext-redis": "*",
+    "ext-posix": "*",
+    "ext-sockets": "*",
+    "ircmaxell/filterus": "^1.0",
+    "swlib/saber": "^1.0",
+    "ext-openssl": "*",
+    "aliyuncs/oss-sdk-php": "^2.4",
+    "ext-pdo": "*",
+    "mix/database": "^3.0",
+    "mix/redis": "^3.0",
+    "ext-iconv": "*",
+    "nelexa/zip": "^4.0",
+    "alibabacloud/sts-20150401": "^1.1",
+    "alibabacloud/green": "^1.8",
+    "simps/mqtt": "^1.4",
+    "brick/math": "^0.9.3"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": false,
+  "config": {
+    "vendor-dir": "lib/vendor"
+  },
+  "autoload": {
+    "psr-4": {
+      "Scf\\": "lib/scf"
+    }
+  }
+}

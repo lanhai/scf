@@ -1,0 +1,87 @@
+<?php
+
+namespace Scf\Service\Struct;
+
+use Scf\Core\Struct;
+
+class QueueStruct extends Struct {
+
+    /**
+     * @var string|null id
+     */
+    public string|null $id;
+
+    /**
+     * @var string|null 执行脚本
+     * @rule string,max:100|执行脚本长度不能大于100位
+     */
+    public string|null $handler;
+
+    /**
+     * @var array|null data
+     * @rule array|业务数据格式错误
+     */
+    public array|null $data;
+
+    /**
+     * @var int|null created
+     * @rule int,max:9999999999|created不能大于9999999999
+     */
+    public int|null $created;
+    /**
+     * @var int|null 是否重试
+     */
+    public int|null $retry;
+    /**
+     * @var int|null 当前执行次数
+     */
+    public int|null $try_times;
+    /**
+     * @var int|null 执行次数限制
+     */
+    public int|null $try_limit;
+
+    /**
+     * @var int|null 更新时间
+     */
+    public int|null $updated;
+    /**
+     * @var int|null
+     */
+    public int|null $next_try;
+    /**
+     * @var int|null finished
+     * @rule int,max:9999999999|finished不能大于9999999999
+     */
+    public int|null $finished;
+
+    /**
+     * @var int|null status
+     * @rule int,max:9|status不能大于9
+     */
+    public int|null $status;
+
+    /**
+     * @var string|null remark
+     * @rule string,max:255|remark长度不能大于255位
+     */
+    public string|null $remark;
+    /**
+     * @var array|null 运行结果
+     * @rule array|业务数据格式错误
+     */
+    public array|null $result;
+    /**
+     * @var int|null
+     */
+    public int|null $start;
+    /**
+     * @var int|null
+     */
+    public int|null $end;
+    /**
+     * @var int|null
+     */
+    public int|null $duration;
+
+}

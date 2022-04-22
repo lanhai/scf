@@ -1,0 +1,46 @@
+<?php
+
+namespace Scf\Core;
+
+trait EnumMatcher {
+
+    /**
+     * @param $value
+     * @return null|static
+     */
+    public static function match($value): null|static {
+        $matched = null;
+        array_map(
+            function (self $e) use ($value, &$matched) {
+                if ($value == $e->value) {
+                    $matched = $e;
+                }
+            },
+            static::cases()
+        );
+        return $matched;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function val(): mixed {
+        return $this->value;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function get(): mixed {
+        return $this->value;
+    }
+
+    /**
+     * @param $val
+     * @return bool
+     */
+    public function is($val): bool {
+        return $this->value === $val;
+    }
+
+}
