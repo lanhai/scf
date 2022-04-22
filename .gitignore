@@ -5,3 +5,4 @@ var
 cmd.md
 update.cmd
 /lib/vendor/
+composer.phar
