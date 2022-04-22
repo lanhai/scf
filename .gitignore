@@ -4,6 +4,6 @@ var
 .idea
 cmd.md
 update.cmd
-/lib/vendor/
+/lib/vendor
 composer.phar
 .svn
