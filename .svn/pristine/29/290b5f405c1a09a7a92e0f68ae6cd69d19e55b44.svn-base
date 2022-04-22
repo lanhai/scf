@@ -1,5 +1,0 @@
-@echo off
-:start
-svn up
-timeout /nobreak /t 5
-goto :start
