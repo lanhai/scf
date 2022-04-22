@@ -2,8 +2,9 @@
 
 namespace Scf\Service;
 
-use Co\Channel;
 use Scf\Command\Color;
+use Scf\Core\App;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Instance;
 use Scf\Database\Redis;
@@ -12,21 +13,20 @@ use Scf\Service\Enum\QueueStatus;
 use Scf\Service\Struct\QueueStruct;
 use Scf\Util\Date;
 use Swoole\Coroutine;
+use Swoole\Event;
 use Swoole\Timer;
 
 class QueueManager {
     use Instance;
 
-    protected int $watcherId = 0;
+    protected int $managerId = 0;
 
     /**
      * 监听队列任务
      * @param int $mc
-     * @return void
+     * @return int
      */
-    public function watch(int $mc = 512) {
-        Counter::instance()->incr('_queue_latest_id');
-        $this->watcherId = Counter::instance()->get('_queue_latest_id');
+    public function watch(int $mc = 512): int {
         //将待重试加入队列
         if ($retryCount = $this->count(2)) {
             for ($i = 0; $i < $retryCount; $i++) {
@@ -36,31 +36,30 @@ class QueueManager {
                 });
             }
         }
-        //每一秒读取一次队列列表
-        Timer::tick(1000, function ($tickerId) use ($mc) {
-            $latestWatcherId = Counter::instance()->get('_queue_latest_id');
-            if ($this->watcherId != $latestWatcherId) {
-                Timer::clear($tickerId);
-                Console::log(Color::yellow('销毁队列监听孤儿协程:' . $this->watcherId));
-                return;
-            }
-            if ($count = $this->count()) {
-                $channel = new Channel($count);
-                for ($i = 0; $i < min($count, $mc); $i++) {
-                    Coroutine::create(function () use ($channel) {
-                        $channel->push($this->pop());
+        Counter::instance()->incr('_queue_manager_id');
+        $this->managerId = Counter::instance()->get('_queue_manager_id');
+        Coroutine::create(function () use ($mc) {
+            //每一秒读取一次队列列表
+            Timer::tick(1000, function ($tickerId) use ($mc) {
+                $latestManagerId = Counter::instance()->get('_queue_manager_id');
+                if ($this->managerId != $latestManagerId) {
+                    Timer::clear($tickerId);
+                }
+                if ($count = $this->count()) {
+                    $successed = 0;
+                    Coroutine\parallel(min($count, $mc), function () use (&$successed) {
+                        if ($this->pop()) {
+                            $successed++;
+                        }
                     });
+                    Console::log('本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
                 }
-                $successed = 0;
-                for ($i = 0; $i < min($count, $mc); $i++) {
-                    $successed += $channel->pop() ? 1 : 0;
-                }
-                Console::log('本次累计执行队列任务:' . $count . ',执行成功:' . $successed);
-            }
+            });
         });
+        return $this->managerId;
 //        Coroutine::create(function () use ($mc) {
 //            while (true) {
-//                if ($this->watcherId != Counter::instance()->get('_queue_latest_id')) {
+//                if ($this->managerId != Counter::instance()->get('_queue_manager_id')) {
 //                    break;
 //                }
 //                if ($count = $this->count()) {
@@ -79,7 +78,7 @@ class QueueManager {
 //                Coroutine::sleep(0.01);
 //            }
 //            Coroutine::defer(function () {
-//                Console::log(Color::yellow('销毁队列监听孤儿协程:' . $this->watcherId));
+//                Console::log(Color::yellow('销毁队列监听孤儿协程:' . $this->managerId));
 //            });
 //        });
     }

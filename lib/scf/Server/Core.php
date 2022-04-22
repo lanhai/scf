@@ -37,6 +37,8 @@ class Core {
         !defined('SERVER_IS_MASTER') and define('SERVER_IS_MASTER', strtolower(SERVER_ROLE) == 'master');
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', SCF_ROOT . '/var/' . $app->appid . '.pid');
         !defined('SERVER_MASTER_DB_PID_FILE') and define('SERVER_MASTER_DB_PID_FILE', SCF_ROOT . '/var/' . $app->appid . '_master_db.pid');
+        !defined('SERVER_QUEUE_MANAGER_PID_FILE') and define('SERVER_QUEUE_MANAGER_PID_FILE', SCF_ROOT . '/var/' . $app->appid . '_queue_manager.pid');
+        !defined('SERVER_CRONTAB_MANAGER_PID_FILE') and define('SERVER_CRONTAB_MANAGER_PID_FILE', SCF_ROOT . '/var/' . $app->appid . '_crontab_manager.pid');
         //是否开启定时任务
         !defined('SERVER_CRONTAB_ENABLE') and define('SERVER_CRONTAB_ENABLE', $options['crontab'] ?? SWITCH_ON);
         //是否开启日志机器人推送
@@ -89,7 +91,7 @@ class Core {
         if (!App::isInstall()) {
             App::install();
         }
-        if ($mode != 'cgi') {
+        if ($mode != MODE_CGI) {
             App::setPath();
         }
     }

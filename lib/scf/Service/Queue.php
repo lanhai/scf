@@ -103,7 +103,7 @@ abstract class Queue {
         $queue->updated = 0;
         $queue->finished = 0;
         $queue->status = QueueStatus::IN->get();
-        return Redis::pool()->lPush(QueueStatus::IN->get(), $queue->toArray());
+        return Redis::pool()->lPush(QueueStatus::IN->key(), $queue->toArray());
     }
 
 

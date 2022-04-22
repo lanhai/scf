@@ -187,11 +187,11 @@ class App {
     }
 
     /**
-     * 加载web模块
+     * 加载模块
      * @param string $mode
      * @return array
      */
-    public static function loadModules(string $mode = 'cgi'): array {
+    public static function loadModules(string $mode = MODE_CGI): array {
         //注册加载器
         spl_autoload_register([__CLASS__, 'autoload'], true);
         $entryScripts = Dir::getDirFiles(APP_SRC_PATH . 'lib', 2);

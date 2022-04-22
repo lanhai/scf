@@ -12,6 +12,7 @@ use Scf\Server\Table\Runtime;
 use Scf\Server\Table\Counter;
 use Scf\Util\Time;
 use Swoole\Coroutine;
+use Swoole\Event;
 use Swoole\Timer;
 
 class Crontab {
@@ -36,12 +37,15 @@ class Crontab {
      * 严格间隔执行
      */
     const RUN_MODE_INTERVAL = 3;
+    protected int $managerId = 0;
 
     /**
      * 加载后台任务
      * @return bool
      */
     public static function load(): bool {
+        Counter::instance()->incr('crontab_manager_id');
+        $managerId = Counter::instance()->get('crontab_manager_id');
         if (!$modules = App::getModules()) {
             return false;
         }
@@ -53,9 +57,9 @@ class Crontab {
         }
         if ($list) {
             foreach ($list as &$task) {
-                $id = Counter::instance()->get('background_task_latest_id') ?: 0;
-                $task['id'] = $id + 1;
+                $task['id'] = $managerId;
                 $task['created'] = time();
+                $task['manager_id'] = $managerId;
                 $task['last_run'] = 0;
                 $task['run_count'] = 0;
                 $task['status'] = 1;
@@ -107,12 +111,11 @@ class Crontab {
 
     /**
      * 开始任务
-     * @return array
+     * @return int
      */
-    public function start(): array {
+    public function start(): int {
         foreach (self::$tasks as &$task) {
-            Runtime::instance()->set('SERVER_CRONTAB_ENABLE_created_' . md5($task['namespace']), $task['created']);
-            Counter::instance()->incr('background_task_latest_id');
+            Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
             $task['cid'] = Coroutine::create(function () use (&$task) {
                 $worker = $this->createWorker($task['namespace']);
                 if (!method_exists($worker, 'run')) {
@@ -120,13 +123,14 @@ class Crontab {
                 } else {
                     switch ($task['mode']) {
                         case self::RUN_MODE_INTERVAL:
-                            $task['ticker'] = Timer::tick($task['interval'] * 1000, function () use ($worker) {
+                            $task['ticker'] = Timer::tick($task['interval'] * 1000, function ($id) use ($worker) {
                                 if ($worker->isAlive()) {
                                     $worker->updateRunTime();
                                     $worker->updateTask('next_run', time() + 1);
                                     $worker->run();
                                 } else {
-                                    $worker->clearTicker();
+                                    Timer::clear($id);
+                                    //$worker->clearTicker();
                                 }
                             });
                             self::$tickers[] = $task['ticker'];
@@ -145,7 +149,7 @@ class Crontab {
                 }
             });
         }
-        return $this->getTaskid();
+        return Counter::instance()->get('crontab_manager_id');
     }
 
 
@@ -232,7 +236,13 @@ class Crontab {
      */
     public function isAlive(): bool {
         $task = $this->getTask();
-        return $task['created'] == Runtime::instance()->get('SERVER_CRONTAB_ENABLE_created_' . md5($task['namespace']));
+        $latestManagerId = Counter::instance()->get('crontab_manager_id');
+        if ($task['manager_id'] != $latestManagerId) {
+            Timer::clearAll();
+            return false;
+        }
+        return true;
+//        return $task['created'] == Runtime::instance()->get('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']));
     }
 
     public function run() {

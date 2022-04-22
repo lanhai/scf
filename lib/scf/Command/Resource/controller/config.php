@@ -1,7 +1,7 @@
 <?php
 return [
     'name' => 'Demo',
-    'mode' => 'cgi',
+    'mode' => MODE_CGI,
     'url_partition' => '{module}/{controller}/{action}',
     'default_controller' => 'Index',
     'default_action' => 'Index',

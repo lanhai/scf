@@ -110,34 +110,104 @@ class Http extends \Scf\Core\Server {
      * 启动masterDB服务
      * @return void
      */
-    public static function startDB() {
-        Runtime::enableCoroutine();
-        if (SERVER_IS_MASTER) {
-            $masterDbPid = 0;
-            Coroutine::create(function () use (&$masterDbPid) {
-                $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-            });
-            Event::wait();
-            if ($masterDbPid) {
-                if (!Process::kill($masterDbPid, 0)) {
-                    //Console::log(Color::yellow("MasterDB PID:{$masterDbPid} not exist"));
-                } else {
-                    Console::log(Color::yellow("MasterDB PID:{$masterDbPid} killed"));
-                    Process::kill($masterDbPid, SIGKILL);
-                    unlink(SERVER_MASTER_DB_PID_FILE);
-                }
+    protected static function startRuntimeDB() {
+        if (!SERVER_IS_MASTER) {
+            return;
+        }
+        $masterDbPid = 0;
+        Coroutine::create(function () use (&$masterDbPid) {
+            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
+        });
+        Event::wait();
+        if ($masterDbPid) {
+            if (!Process::kill($masterDbPid, 0)) {
+                //Console::log(Color::yellow("MasterDB PID:{$masterDbPid} not exist"));
+            } else {
+                Console::log(Color::yellow("MasterDB PID:{$masterDbPid} killed"));
+                Process::kill($masterDbPid, SIGKILL);
+                unlink(SERVER_MASTER_DB_PID_FILE);
             }
-            $process = new Process(function () {
-                \Scf\Core\App::setPath();
-                try {
-                    Redis::instance()->create();
-                } catch (\Throwable $exception) {
-                    Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
-                }
-            });
-            $redisServerPid = $process->start();
-            File::write(SERVER_MASTER_DB_PID_FILE, $redisServerPid);
-            Console::log('MasterDB Manager PID:' . Color::green($redisServerPid));
+        }
+        $process = new Process(function () {
+            \Scf\Core\App::setPath();
+            try {
+                Redis::instance()->create();
+            } catch (\Throwable $exception) {
+                Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
+            }
+        });
+        $redisServerPid = $process->start();
+        File::write(SERVER_MASTER_DB_PID_FILE, $redisServerPid);
+        Console::log('MasterDB Manager PID:' . Color::green($redisServerPid));
+    }
+
+    /**
+     * 启动后台任务管理
+     * @return void
+     */
+    protected static function startQueueManager() {
+//        $managerPid = File::read(SERVER_QUEUE_MANAGER_PID_FILE);
+//        if ($managerPid) {
+//            if (!Process::kill($managerPid, 0)) {
+//                //Console::log(Color::yellow("Queue Manager PID:{$managerPid} not exist"));
+//            } else {
+//                Console::log(Color::yellow("Queue Manager PID:{$managerPid} killed"));
+//                Process::kill($managerPid, SIGKILL);
+//                unlink(SERVER_QUEUE_MANAGER_PID_FILE);
+//            }
+//        }
+        $process = new Process(function () {
+            \Scf\Core\App::setPath();
+            Config::init();
+            App::loadModules();
+            $managerId = QueueManager::instance()->watch();
+            Event::wait();
+            Console::error('[' . $managerId . ']startQueueManager 终止运行');
+        });
+        $pid = $process->start();
+        File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
+        Console::log('Queue Manager PID:' . Color::green($pid));
+    }
+
+    /**
+     * 启动队列任务管理
+     * @return void
+     */
+    protected static function startCrontabManager() {
+//        $managerPid = File::read(SERVER_CRONTAB_MANAGER_PID_FILE);
+//        if ($managerPid) {
+//            if (!Process::kill($managerPid, 0)) {
+//                //Console::log(Color::yellow("Queue Manager PID:{$managerPid} not exist"));
+//            } else {
+//                Console::log(Color::yellow("Crontab Manager PID:{$managerPid} killed"));
+//                Process::kill($managerPid, SIGKILL);
+//                unlink(SERVER_CRONTAB_MANAGER_PID_FILE);
+//            }
+//        }
+        $process = new Process(function () {
+            \Scf\Core\App::setPath();
+
+            Config::init();
+            App::loadModules();
+            if (SERVER_CRONTAB_ENABLE == SWITCH_ON && Crontab::load()) {
+                $managerId = Crontab::instance()->start();
+                Event::wait();
+                Console::error('[' . $managerId . ']startCrontabManager 终止运行');
+            }
+        });
+        $pid = $process->start();
+        File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
+        Console::log('Crontab Manager PID:' . Color::green($pid));
+    }
+
+    /**
+     * 启动mater节点子进程,跟随manager的重启而重新加载文件重启,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
+     * @return void
+     */
+    protected static function startMasterProcess() {
+        if (SERVER_IS_MASTER) {
+            self::startQueueManager();
+            self::startCrontabManager();
         }
     }
 
@@ -147,25 +217,14 @@ class Http extends \Scf\Core\Server {
      */
     public function start() {
         Runtime::enableCoroutine();
-        self::startDB();
-//        if (SERVER_IS_MASTER) {
-//            $masterDbPid = 0;
-//            Coroutine::create(function () use (&$masterDbPid) {
-//                $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-//            });
-//            Event::wait();
-//            if (!file_exists(SERVER_MASTER_DB_PID_FILE) || ($masterDbPid && !Process::kill($masterDbPid, 0))) {
-//                self::startDB();
-//            } else {
-//                Console::success('MasterDB已启动!PID:' . $masterDbPid);
-//            }
-//        }
-        //初始化内存表格
+        //初始化内存表格,放在最前面保证所有进程间能共享
         Table::register([
             'Scf\Server\Table\LogTable',
             'Scf\Server\Table\Counter',
             'Scf\Server\Table\Runtime',
         ]);
+        self::startRuntimeDB();
+        self::startMasterProcess();
         //实例化服务器
         $this->server = new Server($this->bindHost);
         self::$master = $this->server;
@@ -250,6 +309,7 @@ class Http extends \Scf\Core\Server {
             $this->restartTimes += 1;
             \Scf\Server\Table\Runtime::instance()->set('restart_times', $this->restartTimes);
             Log::instance()->info('第' . $this->restartTimes . '次重启完成');
+            self::startMasterProcess();
         });
         //worker启动完成
         $this->server->on('WorkerStart', function (Server $server, $workerId) {
@@ -260,10 +320,11 @@ class Http extends \Scf\Core\Server {
             //要使用app命名空间必须先加载模块
             App::loadModules();
             if ($workerId == 0) {
-                QueueManager::instance()->watch();
-                if (SERVER_IS_MASTER && SERVER_CRONTAB_ENABLE == SWITCH_ON && Crontab::load()) {
-                    Crontab::instance()->start();
-                }
+                //队列任务放在这里执行的原因是业务代码变动后自动重新加载
+                //QueueManager::instance()->watch();
+//                if (SERVER_IS_MASTER && SERVER_CRONTAB_ENABLE == SWITCH_ON && Crontab::load()) {
+//                    Crontab::instance()->start();
+//                }
                 $srcPath = \Scf\Core\App::srcPath();
                 $version = \Scf\Core\App::version();
                 $info = <<<INFO
@@ -322,6 +383,7 @@ INFO;
         $files = count(get_included_files());
         $os = SERVER_ENV;
         $host = SERVER_HOST;
+        $version = swoole_version();
         $info = <<<INFO
 ---------Server启动完成---------
 内网地址：{$host}
@@ -333,6 +395,7 @@ INFO;
 监听地址：{$this->bindHost}:{$port}
 管理进程：{$masterPid}
 文件加载：{$files}
+SW版本号：{$version}
 Worker：{$serverConfig['worker_num']}
 Task Worker：{$serverConfig['task_worker_num']}
 --------------------------------

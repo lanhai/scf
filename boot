@@ -7,6 +7,9 @@ const STATUS_ON = 1;
 const STATUS_OFF = 0;
 const SWITCH_ON = 'on';
 const SWITCH_OFF = 'off';
+const MODE_CGI = 'cgi';
+const MODE_RPC = 'rpc';
+const MODE_CLI = 'cli';
 //系统路径
 const SCF_ROOT = __DIR__;
 //主服务器,用于写入,或者单机读写
