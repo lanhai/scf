@@ -21,6 +21,7 @@ use Scf\Server\Task\RQueue;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Swoole\Coroutine;
+use Swoole\Coroutine\System;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -149,7 +150,8 @@ class Http extends \Scf\Core\Server {
             'max_coroutine' => 10240,//最多启动多少个携程
             'max_concurrency' => 2048,//最高并发
             'max_request_limit' => 128,//每秒最大请求量限制,超过此值将拒绝服务
-            'max_mysql_execute_limit' => 128 * 20//每秒最大mysql处理量限制,超过此值将拒绝服务
+            'max_mysql_execute_limit' => 128 * 20,//每秒最大mysql处理量限制,超过此值将拒绝服务
+            'package_max_length' => 10 * 1024 * 1024,//最大请求数据限制 10M
         ];
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 128);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
@@ -296,6 +298,17 @@ class Http extends \Scf\Core\Server {
         define("SERVER_MASTER_PID", $masterPid);
         define("SERVER_MANAGER_PID", $managerPid);
         Log::instance()->enableTable();
+        $scfVersion = SCF_VERSION;
+//        $cid[] = go(function () use (&$scfVersion) {
+//            $composerOutput = trim(System::exec('composer show --working-dir=' . SCF_ROOT . ' alibabacloud/sts-20150401')['output']);
+//            // 使用正则表达式匹配版本号
+//            preg_match('/versions\s*:\s*\*?\s*([\d.]+)/', $composerOutput, $matches);
+//            if (isset($matches[1])) {
+//                $scfVersion = $matches[1];
+//            }
+//        });
+//        Coroutine::join($cid);
+
         $role = SERVER_ROLE;
         $env = APP_RUN_ENV;
         $mode = APP_RUN_MODE;
@@ -317,6 +330,7 @@ class Http extends \Scf\Core\Server {
 管理进程：{$masterPid}
 文件加载：{$files}
 SW版本号：{$version}
+框架版本：{$scfVersion}
 Worker：{$serverConfig['worker_num']}
 Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid
