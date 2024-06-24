@@ -1,5 +1,5 @@
 {
-    "name": "lanhai/scf",
+    "name": "lhai/scf",
     "description": "swoole cloud framework",
     "type": "library",
     "require": {
