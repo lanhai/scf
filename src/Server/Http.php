@@ -10,6 +10,7 @@ use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
 use Scf\Command\Manager;
+use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Runtime\Table;
 use Scf\Server\Struct\Node;
@@ -556,7 +557,7 @@ INFO;
             } else {
                 $appFiles = [];
             }
-            $files = [...$appFiles, ...Dir::scan(SCF_ROOT . '/lib/scf')];
+            $files = [...$appFiles, ...Dir::scan(Root::dir())];
             $fileList = [];
             foreach ($files as $path) {
                 $fileList[] = [
