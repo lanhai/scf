@@ -7,6 +7,7 @@ use Scf\Core\Config;
 use Scf\Database\Pdo;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\App;
+use Scf\Root;
 
 class CpCreater extends Base {
     protected string $tplList = "\n1:动态数据管理模板(根据配置展示/编辑相关字段)\n2:标准数据管理模板";
@@ -122,7 +123,7 @@ class CpCreater extends Base {
         $this->setConfig('render_table', 'api');
         //模板文件选择
         if ($tplType == 1) {
-            $controllerFileContent = file_get_contents(SCF_ROOT . '/lib/scf/Server/Command/Template/CpViewTpl.vue');
+            $controllerFileContent = file_get_contents(Root::dir() . '/Command/Template/CpViewTpl.vue');
             if (!$arFile = $this->getConfig('ar_namespace')) {
                 $this->print("请输入AR文件路径");
                 $arFile = $this->receive();
@@ -238,13 +239,13 @@ class CpCreater extends Base {
             $this->setConfig('api_url', '/admin/' . StringHelper::camel2lower($apiModuleName) . '/' . StringHelper::camel2lower($apiControllerName) . '/');
             $this->setConfig('auth_action_path', StringHelper::lower2camel($apiModuleName) . "/" . StringHelper::lower2camel($apiControllerName));
             $this->setConfig('api_controller_name', StringHelper::camel2lower($apiControllerName));
-            $apiControllerFileContent = file_get_contents(SCF_ROOT . '/lib/scf/Server/Command/Template/cpController.tpl');
+            $apiControllerFileContent = file_get_contents(Root::dir() . '/Command/Template/cpController.tpl');
             $apiControllerFileContent = $this->codeFormat($apiControllerFileContent);
             if (!$this->writeFile($apiControllerFile, $apiControllerFileContent)) {
                 $this->print("文件[" . $apiControllerFile . "]创建失败!,请确认拥有相关权限后重试!");
                 return $this->createController();
             }
-            $controllerFileContent = file_get_contents(SCF_ROOT . '/lib/scf/Server/Command/Template/CpDataListTpl.vue');
+            $controllerFileContent = file_get_contents(Root::dir() . '/Command/Template/CpDataListTpl.vue');
         }
         $this->setConfig('file_name', $fileName);
         $controllerFileContent = $this->codeFormat($controllerFileContent);
