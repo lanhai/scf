@@ -18,7 +18,7 @@ if (json_last_error() == JSON_ERROR_NONE) {
         // 运行 composer show 命令
         if ($composerOutput = shell_exec($cmd)) {
             // 使用正则表达式匹配版本号
-            preg_match('/versions\s*:\s*\*?\s*([\d.]+)/', $composerOutput, $matches);
+            preg_match('/versions\s*:\s*\*?\s*v([\d.]+)/', $composerOutput, $matches);
             if (isset($matches[1])) {
                 $scfVersion = $matches[1];
             }
