@@ -40,7 +40,6 @@ class Sts extends Aliyun {
         //$config->endpoint = 'sts.' . $this->server['regionId'] . '.aliyuncs.com';// "sts.cn-hangzhou.aliyuncs.com";
         $config->regionId = $this->server['regionId'];
         $this->_client = new StsClient($config);
-
     }
 
     /**
