@@ -59,8 +59,10 @@ class Toolbox implements CommandInterface {
         run(function () {
             try {
                 $app = new App();
-                Console::write("----------------------------------------------------\n请选择要执行的任务模块(当前运行环境:" . (Lifetime::isDevEnv() ? '线下开发环境' : '线上生产环境') . ")\n----------------------------------------------------");
-                $app->ready(Manager::instance()->getArg(1)?:0);
+                Console::line();
+                Console::write("当前运行环境:" . (Lifetime::isDevEnv() ? '开发环境' : '生产环境'));
+                Console::line();
+                $app->ready(Manager::instance()->getArg(1) ?: 0);
             } catch (ExitException) {
                 \Swoole\Event::exit();
             }
@@ -138,11 +140,11 @@ class Toolbox implements CommandInterface {
                     $connection->set($cacheKey, $data, 86400);
                 }
             }
-            Console::write("-------------------------------");
+            Console::line();
             foreach ($info as $item) {
                 Console::write($item['name'] . "：" . $item['value']);
             }
-            Console::write("-------------------------------");
+            Console::line();
         });
     }
 
@@ -166,7 +168,7 @@ class Toolbox implements CommandInterface {
                 foreach ($logs as $log) {
                     Console::write("【" . $log['date'] . "】" . ($type == 'error' ? Color::red($log['message']) : Color::blue($log['message'])) . ' @' . $log['file']);
                 }
-                Console::write("--------------------------------------");
+                Console::line();
             }
         }
         return $this->logger();

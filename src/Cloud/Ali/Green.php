@@ -2,25 +2,27 @@
 
 namespace Scf\Cloud\Ali;
 
-use AlibabaCloud\Client\AlibabaCloud;
 use AlibabaCloud\Client\Exception\ClientException;
 use AlibabaCloud\Client\Exception\ServerException;
 use Scf\Cloud\Aliyun;
-use Scf\Core\Console;
 use Scf\Core\Result;
-use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
-use Scf\Helper\ObjectHelper;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Util\Sn;
-use Throwable;
-use AlibabaCloud\SDK\Green\V20220302\Models\ImageModerationResponse;
 use Darabonba\OpenApi\Models\Config;
 use AlibabaCloud\Tea\Utils\Utils\RuntimeOptions;
 use AlibabaCloud\SDK\Green\V20220302\Green as AliGreen;
 use AlibabaCloud\SDK\Green\V20220302\Models\ImageModerationRequest;
 use AlibabaCloud\Tea\Utils\Utils;
+use AlibabaCloud\SDK\Green\V20220302\Models\TextModerationPlusRequest;
+use AlibabaCloud\SDK\Green\V20220302\Models\TextModerationRequest;
 
+use AlibabaCloud\Tea\Exception\TeaUnableRetryError;
+
+/**
+ * 文档地址
+ * https://help.aliyun.com/document_detail/477720.html?spm=a2c4g.2712697.0.0.6e3259c5pl3rIz
+ */
 class Green extends Aliyun {
     /**
      * @var AliGreen
@@ -108,6 +110,7 @@ class Green extends Aliyun {
     }
 
     /**
+     * 视频审核
      * @param $videos
      * @param $taskId
      * @param $callback
@@ -146,6 +149,7 @@ class Green extends Aliyun {
     }
 
     /**
+     * 图片审核
      * @param $images
      * @return Result
      */
@@ -192,46 +196,74 @@ class Green extends Aliyun {
     }
 
     /**
+     * 文字审核
      * @param $text
      * @return Result
      */
     public function scanText($text): Result {
-        try {
-            $task = [
-                'dataId' => Sn::create_guid(),
+        $request = new TextModerationRequest([
+            'service' => 'comment_detection',
+            'serviceParameters' => JsonHelper::toJson([
                 'content' => $text
-            ];
-            $response = AliGreen::v20180509()->textScan()
-                ->body(JsonHelper::toJson(['tasks' => [$task], 'scenes' => ['antispam'], 'bizType' => 'text']))
-                ->request();
-            if (!$response->isSuccess() || !$result = JsonHelper::recover($response->getBody())) {
-                return Result::error('文本内容检测失败,请稍后重试', 'SCAN_FAIL');
+            ])
+        ]);
+        $runtime = new RuntimeOptions([
+            'readTimeout' => 10000,
+            'connectTimeout' => 10000
+        ]);
+        try {
+            $response = $this->_client->textModerationWithOptions($request, $runtime);
+            if (200 != $response->statusCode) {
+                return Result::error("文本内容审核请求失败:" . $response->statusCode);
             }
-            $pass = true;
-            $rate = 100;
-            $labels = [];
-            $words = [];
-            $results = $result['data'][0]['results'];
-            foreach ($results as $result) {
-                $rate = $result['rate'];
-                if ($result['suggestion'] !== 'pass') {
-                    foreach ($result['details'] as $detail) {
-                        $labels[] = $detail['label'];
-                        if (isset($detail['contexts'])) {
-                            $contexts = ArrayHelper::getColumn($detail['contexts'], 'context');
-                            $words = $words ? [...$words, ...$contexts] : $contexts;
-                        }
-                    }
-                    $pass = false;
-                    break;
-                }
+            $body = $response->body;
+            if (200 != $body->code) {
+                return Result::error($body->message, $body->code);
             }
-            return Result::success(compact('pass', 'rate', 'labels', 'words', 'results'));
-        } catch (ClientException $exception) {
-            return Result::error('内容检测失败,请稍后重试:' . $exception->getMessage(), 'SCAN_FAIL');
-        } catch (ServerException $exception) {
-            return Result::error('内容检测失败,请稍后重试:' . $exception->getErrorMessage(), 'SCAN_FAIL');
+            $results = JsonHelper::recover(json_encode($body->data, JSON_UNESCAPED_UNICODE));
+            return Result::success($results);
+        } catch (TeaUnableRetryError $e) {
+            return Result::error($e->getMessage());
+//            var_dump($e->getMessage());
+//            var_dump($e->getErrorInfo());
+//            var_dump($e->getLastException());
+//            var_dump($e->getLastRequest());
         }
+
+//        try {
+//            $response = $this->_client->textModerationPlusWithOptions($request, $runtime);
+//
+//            $response = AliGreen::v20180509()->textScan()
+//                ->body(JsonHelper::toJson(['tasks' => [$task], 'scenes' => ['antispam'], 'bizType' => 'text']))
+//                ->request();
+//            if (!$response->isSuccess() || !$result = JsonHelper::recover($response->getBody())) {
+//                return Result::error('文本内容检测失败,请稍后重试', 'SCAN_FAIL');
+//            }
+//            $pass = true;
+//            $rate = 100;
+//            $labels = [];
+//            $words = [];
+//            $results = $result['data'][0]['results'];
+//            foreach ($results as $result) {
+//                $rate = $result['rate'];
+//                if ($result['suggestion'] !== 'pass') {
+//                    foreach ($result['details'] as $detail) {
+//                        $labels[] = $detail['label'];
+//                        if (isset($detail['contexts'])) {
+//                            $contexts = ArrayHelper::getColumn($detail['contexts'], 'context');
+//                            $words = $words ? [...$words, ...$contexts] : $contexts;
+//                        }
+//                    }
+//                    $pass = false;
+//                    break;
+//                }
+//            }
+//            return Result::success(compact('pass', 'rate', 'labels', 'words', 'results'));
+//        } catch (ClientException $exception) {
+//            return Result::error('内容检测失败,请稍后重试:' . $exception->getMessage(), 'SCAN_FAIL');
+//        } catch (ServerException $exception) {
+//            return Result::error('内容检测失败,请稍后重试:' . $exception->getErrorMessage(), 'SCAN_FAIL');
+//        }
     }
 
 }
