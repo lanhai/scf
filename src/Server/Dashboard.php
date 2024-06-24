@@ -13,6 +13,7 @@ use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Command\Color;
 use Scf\Command\Manager;
+use Scf\Root;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
 use Scf\Util\File;
@@ -135,7 +136,7 @@ class Dashboard {
                     'log_file' => APP_PATH . 'log/server.log',
                     'pid_file' => SERVER_DASHBOARD_PID_FILE,
                 ];
-                $setting['document_root'] = SCF_ROOT . '/public';
+                $setting['document_root'] = Root::dir() . '/public';
                 $setting['enable_static_handler'] = true;
                 $setting['http_autoindex'] = true;
                 $setting['static_handler_locations'] = ['/dashboard'];
