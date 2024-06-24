@@ -21,7 +21,6 @@ use Scf\Server\Task\RQueue;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Swoole\Coroutine;
-use Swoole\Coroutine\System;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
