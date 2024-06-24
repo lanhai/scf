@@ -20,7 +20,7 @@ use AlibabaCloud\SDK\Green\V20220302\Models\TextModerationRequest;
 use AlibabaCloud\Tea\Exception\TeaUnableRetryError;
 
 /**
- * 阿里云文档地址
+ * 阿里云内容安全文档地址
  * https://help.aliyun.com/document_detail/477720.html?spm=a2c4g.2712697.0.0.6e3259c5pl3rIz
  */
 class Green extends Aliyun {
