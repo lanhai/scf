@@ -1,0 +1,224 @@
+<?php
+
+namespace Scf\Mode\Rpc;
+
+use Scf\App\Updater;
+use Scf\Core\Config;
+use Scf\Core\Console;
+use Scf\Core\Log;
+use Scf\Helper\JsonHelper;
+use Scf\Mode\Web\Request;
+use Scf\Mode\Web\Response;
+use Scf\Rpc\NodeManager\RedisManager;
+use Scf\Rpc\Rpc;
+use Scf\Command\Color;
+use Scf\Server\Http;
+use Scf\Server\Listener\CgiListener;
+use Scf\Server\Table\Runtime;
+use Scf\Util\Dir;
+use Scf\Util\Random;
+use Swoole\Event;
+use Swoole\Process;
+use Swoole\Server;
+use Swoole\Timer;
+
+class AppRPC extends \Scf\Core\App {
+    /**
+     * @var string 绑定ip
+     */
+    protected string $bindHost = '0.0.0.0';
+    /**
+     * @var int 绑定端口
+     */
+    protected int $bindPort = 9585;
+    /**
+     * @var string 本机ip地址
+     */
+    protected string $ip;
+
+    protected static self $instance;
+
+    protected static array $_services = [];
+
+    /**
+     * @param string $host
+     * @param int $port
+     */
+    public function __construct(string $host, int $port) {
+        $this->bindHost = $host;
+        $this->bindPort = $port;
+        $this->ip = SERVER_HOST;
+    }
+
+    /**
+     * @param int $port
+     * @param bool $restart
+     * @return Process
+     */
+    public static function startProcess(int $port = 9585, bool $restart = false): Process {
+        $process = new Process(function (Process $proc) use ($restart, $port) {
+            AppRPC::await(MODE_RPC);
+
+            $server = new \Swoole\Http\Server('0.0.0.0', $port + 1);
+            $rpc = AppRPC::bind()->attach($server);
+            var_dump($rpc->getWorkerPid());
+            $server->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) {
+                if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
+                    $response->end();
+                    return;
+                }
+                $response->end("RPC SERVER");
+            });
+            $server->on('start', function (\Swoole\Http\Server $server) use ($proc) {
+                $socket = $proc->exportSocket();
+                while (true) {
+                    $recv = JsonHelper::recover($socket->recv());
+                    if ($recv['command'] == 'restart') {
+                        $server->shutdown();
+                        Timer::clearAll();
+                        //Event::exit();
+                        Console::log("收到重启指令," . Color::red(5) . "秒后重启RPC服务");
+                        $timeout = 30;
+                        Timer::tick(1000, function ($id) use ($server, &$timeout) {
+                            if ($timeout == 0) {
+                                Timer::clear($id);
+
+                                return;
+                            }
+                            Console::log("收到重启指令," . Color::red($timeout) . "秒后重启RPC服务");
+                            $timeout--;
+                        });
+                        break;
+                    } else {
+
+                        Console::info($recv['command']);
+                    }
+                    usleep(1);
+                }
+            });
+            $server->start();
+            Console::info("RPC服务器结束运行");
+        });
+        $process->start();
+        return $process;
+    }
+
+    public static function bind(string $host = '0.0.0.0', int $port = 9585) {
+        $class = get_called_class();
+        if (!isset(self::$instance)) {
+            self::$instance = new $class($host, $port);
+        }
+        return self::$instance;
+    }
+
+    public function attach(Server $server): bool|Rpc {
+//        if (!self::isReady()) {
+//            return false;
+//        }
+//        self::mount(MODE_RPC);
+        ###### 配置服务端 ######
+        // 构造方法内用户可传入 节点管理器实现类(实现 `NodeManagerInterface` 接口的类) 默认为 `MemoryManager`
+        $hostConfig = Config::get('rpc');
+        if (!$hostConfig || !isset($hostConfig['server'])) {
+            Console::warning('未设置RPC服务器参数');
+            return false;
+            //exit();
+        }
+        $config = new \Scf\Rpc\Config(new RedisManager($hostConfig['server']['node_manager_server'], $hostConfig['server']['name']));
+        //设置服务名称
+        $config->setServerName($hostConfig['server']['name']);
+        //设置节点id，可忽略，构造函数已经设置
+        $config->setNodeId(Random::character(10));
+        //必须设置】设置异常处理器，对 Service-Worker 和 AssistWorker 的异常进行处理，防止未捕获导致进程退出
+        $config->setOnException(function (\Throwable $throwable) {
+            Log::instance()->error($throwable);
+        });
+        $serverConfig = $config->getServer();
+        //服务器IP地址,确保所需要调用此服务的主机能访问到此地址
+        $serverConfig->setServerIp($hostConfig['server']['host'] ?? $this->bindHost);
+        $serverConfig->setWorkerNum($hostConfig['server']['worker_num'] ?? 4);
+        $serverConfig->setListenPort($hostConfig['server']['port'] ?? $this->bindPort);
+        //注册服务
+        $rpc = new Rpc($config);
+//        $rpc->attachServer($server);
+//        return $rpc;
+        return self::addService($rpc, $server);
+    }
+
+    public static function addService(Rpc $rpc, Server $server): Rpc|false {
+        //self::mount(MODE_RPC);
+        if (!self::$_modules[MODE_RPC]) {
+            return false;
+        }
+        $serviceCount = 0;
+        $modulesCount = 0;
+        $services = [];
+        foreach (self::$_modules[MODE_RPC] as $conf) {
+            $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+            if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+                $cls = "\\" . APP_TOP_NAMESPACE . "\\Service\\{$conf['name']}\\service";
+            } else {
+                $cls = "\\" . APP_TOP_NAMESPACE . "\\{$conf['name']}\\service";
+            }
+            if (class_exists($cls)) {
+//                $_service = [
+//                    'name' => $cls,
+//                    'modules' => []
+//                ];
+                $serviceCount++;
+                /** @var Service $service */
+                $service = new $cls();
+                //创建module
+                $controllers = self::getControllers($conf['name']);
+                if ($controllers) {
+                    //$_service['modules'] = $controllers;
+                    foreach ($controllers as $controller) {
+                        $modulesCount++;
+                        $service->addModule(new $controller);
+                    }
+                }
+                //$services[] = serialize($service);
+                //$services[] = $_service;
+                $rpc->serviceManager()->addService($service);
+            }
+        }
+        //Runtime::instance()->setRpcService(serialize($rpc));
+        //Runtime::instance()->setRpcService($services);
+        try {
+            $workerPids = $rpc->attachServer($server);
+        } catch (\Throwable $exception) {
+            Log::instance()->error($exception->getMessage());
+            Console::error("RPC服务添加失败:" . $exception->getMessage());
+            return false;
+        }
+        Console::success("RPC服务添加完成!services:" . $serviceCount . ';modules:' . $modulesCount);
+        return $rpc;
+    }
+
+    private static function getControllers($service): array {
+        //注册加载器
+        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            $entryScripts = Dir::scan(self::src() . 'lib/Service/' . $service, 1);
+        } else {
+            $entryScripts = Dir::scan(self::src() . 'lib/' . $service . '/Service', 1);
+        }
+        $modules = [];
+        if ($entryScripts) {
+            foreach ($entryScripts as $file) {
+                $arr = explode('/', $file);
+                $name = str_replace(".php", "", array_pop($arr));
+                $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+                if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+                    $cls = "\\" . APP_TOP_NAMESPACE . "\\Service\\{$service}\\" . $name;
+                } else {
+                    $cls = "\\" . APP_TOP_NAMESPACE . "\\{$service}\\Service\\" . $name;
+                }
+                if (class_exists($cls)) {
+                    $modules[] = $cls;
+                }
+            }
+        }
+        return $modules;
+    }
+} 

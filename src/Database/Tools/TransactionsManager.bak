@@ -1,0 +1,150 @@
+<?php
+
+namespace Scf\Database\Tools;
+
+use Scf\Core\Traits\ProcessLifeSingleton;
+use Scf\Database\Transaction;
+use Scf\Mode\Web\Log;
+use Scf\Server\Worker\ProcessLife;
+use Throwable;
+
+class TransactionsManagerbak {
+    use ProcessLifeSingleton;
+    protected static array $transaction_instances;
+
+
+    /**
+     * @return bool
+     */
+    public static function isBegin(): bool {
+        return isset(self::$transaction_instances[ProcessLife::id()]);
+    }
+
+    /**
+     * 开启嵌套事务,所有写入操作都将开启事务,谨慎使用
+     */
+    public static function begin(): array {
+        $processLifeId = ProcessLife::id();
+        if (!isset(self::$transaction_instances[$processLifeId])) {
+            self::$transaction_instances[$processLifeId] = [
+                'savepoints' => [],
+                'connections' => [],
+                'errors' => [],
+                'created' => time()
+            ];
+        }
+        return self::$transaction_instances[$processLifeId];
+    }
+
+    public static function addPoint($point): void {
+        $processLifeId = ProcessLife::id();
+        self::$transaction_instances[$processLifeId]['savepoints'][] = $point;
+    }
+
+    public static function addError($point, $error): void {
+        $processLifeId = ProcessLife::id();
+        self::$transaction_instances[$processLifeId]['errors'][] = [
+            'point' => $point,
+            'message' => $error
+        ];
+    }
+
+    /**
+     * @return array|int[]
+     */
+    public static function finish(): array {
+        $processLifeId = ProcessLife::id();
+        $transactions = self::$transaction_instances[$processLifeId] ?? null;
+        if (!$transactions) {
+            return [
+                'commit' => 0,
+                'points' => 0,
+                'rollback' => 0,
+                'errors' => []
+            ];
+        }
+        if ($transactions['errors']) {
+            return [
+                'commit' => 0,
+                'points' => count($transactions['savepoints']),
+                'rollback' => self::rollback(),
+                'errors' => $transactions['errors']
+            ];
+        }
+        return [
+            'commit' => self::commit(),
+            'points' => count($transactions['savepoints']),
+            'rollback' => 0,
+            'errors' => []
+        ];
+    }
+
+    /**
+     * 提交嵌套事务
+     * @return int
+     */
+    private static function commit(): int {
+        $processLifeId = ProcessLife::id();
+        $commitCount = 0;
+        if (!isset(self::$transaction_instances[$processLifeId])) {
+            return $commitCount;
+        }
+        $transactions = self::$transaction_instances[$processLifeId]['connections'];
+        if ($transactions) {
+            /** @var Transaction $transaction */
+            foreach ($transactions as $transaction) {
+                try {
+                    $transaction->commit();
+                    $commitCount++;
+                } catch (\PDOException $exception) {
+                    Log::instance()->error("事务提交失败:" . $exception->getMessage());
+                }
+            }
+        }
+        unset(self::$transaction_instances[$processLifeId]);
+        return $commitCount;
+    }
+
+    /**
+     * 回滚嵌套事务
+     * @return int
+     */
+    public static function rollback(): int {
+        $processLifeId = ProcessLife::id();
+        $rollbackCount = 0;
+        if (!isset(self::$transaction_instances[$processLifeId])) {
+            return $rollbackCount;
+        }
+        $transactions = self::$transaction_instances[$processLifeId]['connections'];
+        if ($transactions) {
+            /** @var Transaction $transaction */
+            foreach ($transactions as $transaction) {
+                try {
+                    $transaction->rollback();
+                    $rollbackCount++;
+                } catch (\PDOException $exception) {
+                    Log::instance()->error("事务回滚失败:" . $exception->getMessage());
+                }
+            }
+        }
+        unset(self::$transaction_instances[$processLifeId]);
+        return $rollbackCount;
+    }
+
+    public static function set($key, Transaction $transaction): void {
+        $processLifeId = ProcessLife::id();
+        self::$transaction_instances[$processLifeId]['connections'][$key] = $transaction;
+    }
+
+    /**
+     * @throws Throwable
+     */
+    public static function get($key): ?Transaction {
+        $processLifeId = ProcessLife::id();
+        return self::$transaction_instances[$processLifeId]['connections'][$key] ?? null;
+    }
+
+    public static function all(): array {
+        return self::$transaction_instances;
+    }
+}

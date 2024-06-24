@@ -1,0 +1,482 @@
+<?php
+
+namespace Scf\Server;
+
+use Monolog\Handler\RotatingFileHandler;
+use Monolog\Handler\StreamHandler;
+use Monolog\Logger;
+use Scf\Core\Console;
+use Scf\Core\Traits\Singleton;
+use Scf\Helper\JsonHelper;
+use Scf\Mode\Web\App;
+use Scf\Command\Color;
+use Scf\Command\Manager;
+use Scf\Util\File;
+use Swoole\Coroutine;
+use Swoole\Coroutine\System;
+use Swoole\Event;
+use Swoole\Process;
+use Swoole\Redis\Server;
+use Swoole\Timer;
+
+class MasterDB {
+    use Singleton;
+
+    protected array $_config = [
+        'enable_save_to_table' => false,
+        'enable_sql' => true,
+        'enable_error' => true,
+        'enable_message' => true,
+        'enable_access' => true,
+        'check_dir' => true,
+        'error_level' => Logger::NOTICE, // 错误日志记录等级
+    ];
+
+    protected array $data = [];
+    /**
+     * 日志对象集合
+     * @var array(Logger)
+     */
+    protected array $_loggers = [];
+
+    public static function start(): void {
+        if (!App::isMaster()) {
+            return;
+        }
+        $process = new Process(function () {
+            try {
+                MasterDB::instance()->create(Manager::instance()->issetOpt('d'));
+            } catch (\Throwable $exception) {
+                Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
+            }
+        });
+        $process->start();
+        Timer::after(100, function () use (&$masterDbPid) {
+            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
+        });
+        Event::wait();
+        if (!Process::kill($masterDbPid, 0)) {
+            Console::error('MasterDB服务启动失败');
+            exit();
+        } else {
+            Console::success("MasterDB服务启动完成!PID:" . $masterDbPid);
+        }
+    }
+
+    /**
+     * @param bool $daemonize
+     * @return void
+     */
+    public function create(bool $daemonize = false,): void {
+        if (!App::isMaster()) {
+            return;
+        }
+//        $masterDbPid = 0;
+//        Coroutine::create(function () use (&$masterDbPid) {
+//            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
+//        });
+//        Event::wait();
+//        if ($masterDbPid) {
+//            if (!Process::kill($masterDbPid, 0)) {
+//                //Console::log(Color::yellow("MasterDB PID:{$masterDbPid} not exist"));
+//            } else {
+//                Console::log(Color::yellow("MasterDB PID:{$masterDbPid} killed"));
+//                Process::kill($masterDbPid, SIGKILL);
+//            }
+//        }
+        try {
+            $server = new Server('0.0.0.0', 16379, SWOOLE_BASE);
+            $setting = [
+                'worker_num' => 1,
+                'daemonize' => $daemonize,
+                'pid_file' => SERVER_MASTER_DB_PID_FILE
+            ];
+            $server->set($setting);
+            if (is_file(APP_RUNTIME_DB)) {
+                $this->data = unserialize(file_get_contents(APP_RUNTIME_DB)) ?: [];
+            } else {
+                $this->data = [];
+            }
+            $server->setHandler('lLen', function ($fd, $data) use ($server) {
+                $key = $data[0];
+                if (empty($this->data[$key])) {
+                    return $server->send($fd, Server::format(Server::INT, 0));
+                }
+                return $server->send($fd, Server::format(Server::INT, count($this->data[$key])));
+            });
+            $server->setHandler('lPush', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'lPush' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    $this->data[$key] = [];
+                }
+                array_unshift($this->data[$key], $data[1]);
+                return $server->send($fd, Server::format(Server::STATUS, "OK"));
+            });
+            $server->setHandler('listRange', function ($fd, $data) use ($server) {
+                $key = $data[0];
+                if (empty($this->data[$key])) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                }
+                $start = $data[1];
+                $end = $data[2];
+                if ($end == -1) {
+                    return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($this->data[$key])));
+                }
+                $list = [];
+                for ($i = $start; $i <= $end; $i++) {
+                    if (!isset($this->data[$key][$i])) {
+                        break;
+                    }
+                    $list[] = $this->data[$key][$i];
+                }
+                return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($list)));
+            });
+            $server->setHandler('GET', function ($fd, $data) use ($server) {
+                if (count($data) == 0) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'GET' command"));
+                }
+                $key = $data[0];
+                if (empty($this->data[$key])) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                } else {
+                    return $server->send($fd, Server::format(Server::STRING, $this->data[$key]));
+                }
+            });
+            $server->setHandler('SET', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'SET' command"));
+                }
+                $key = $data[0];
+                $this->data[$key] = $data[1];
+                return $server->send($fd, Server::format(Server::STATUS, "OK"));
+            });
+            $server->setHandler('DELETE', function ($fd, $data) use ($server) {
+                if (count($data) < 1) {
+                    return $server->send($fd, Server::format(Server::ERROR, "DELETE需要至少一个参数"));
+                }
+                $key = $data[0];
+                if (isset($this->data[$key])) {
+                    unset($this->data[$key]);
+                }
+                return $server->send($fd, Server::format(Server::STATUS, "OK"));
+            });
+            $server->setHandler('hSet', function ($fd, $data) use ($server) {
+                if (count($data) < 3) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'hSet' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    $this->data[$key] = [];
+                }
+                $field = $data[1];
+                $value = $data[2];
+                $count = !isset($this->data[$key][$field]) ? 1 : 0;
+                $this->data[$key][$field] = $value;
+                return $server->send($fd, Server::format(Server::INT, $count));
+            });
+            $server->setHandler('hDel', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'hDel' command"));
+                }
+                $key = $data[0];
+                $field = $data[1];
+                if (!empty($this->data[$key][$field])) {
+                    unset($this->data[$key][$field]);
+                    return $server->send($fd, Server::format(Server::NIL));
+                } else {
+                    return $server->send($fd, Server::format(Server::INT, 0));
+                }
+            });
+            $server->setHandler('hGet', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'hGet' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    $this->data[$key] = [];
+                }
+                $field = $data[1];
+                if (empty($this->data[$key][$field])) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                } else {
+                    return $server->send($fd, Server::format(Server::STRING, $this->data[$key][$field]));
+                }
+            });
+            $server->setHandler('hGetAll', function ($fd, $data) use ($server) {
+                if (count($data) < 1) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'hGetAll' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                }
+                return $server->send($fd, Server::format(Server::MAP, $this->data[$key]));
+            });
+            $server->setHandler('sIsMember', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "sIsMember 至少需要2个参数"));
+                }
+                $key = $data[0];
+                $member = $data[1];
+                $arr = $this->data[$key] ?? [];
+                return $server->send($fd, Server::format(Server::NIL, isset($arr[$member])));
+            });
+            $server->setHandler('sRemove', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "sRemove 至少需要2个参数"));
+                }
+                $key = $data[0];
+                $count = 0;
+                for ($i = 1; $i < count($data); $i++) {
+                    $value = $data[$i];
+                    if (isset($this->data[$key][$value])) {
+                        unset($this->data[$key][$value]);
+                        $count++;
+                    }
+                }
+                return $server->send($fd, Server::format(Server::INT, $count));
+            });
+            $server->setHandler('sClear', function ($fd, $data) use ($server) {
+                if (count($data) < 1) {
+                    return $server->send($fd, Server::format(Server::ERROR, "sClear 至少需要1个参数"));
+                }
+                if (isset($this->data[$data[0]])) {
+                    unset($this->data[$data[0]]);
+                }
+                return $server->send($fd, Server::format(Server::INT, 1));
+            });
+            $server->setHandler('sMembers', function ($fd, $data) use ($server) {
+                if (count($data) < 1) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'sMembers' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                }
+                return $server->send($fd, Server::format(Server::SET, array_keys($this->data[$key])));
+            });
+            //incr
+            $server->setHandler('incr', function ($fd, $data) use ($server) {
+                return $server->send($fd, Server::format(Server::STATUS, "OK"));
+            });
+            //decrement
+            $server->setHandler('decrement', function ($fd, $data) use ($server) {
+                return $server->send($fd, Server::format(Server::STATUS, "OK"));
+            });
+            //写入日志
+            $server->setHandler('addLog', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'addLog' command"));
+                }
+                //本地化
+                $dir = APP_LOG_PATH . $data[0] . '/';
+                if (!is_dir($dir)) {
+                    mkdir($dir, 0775, true);
+                }
+                $fileName = $dir . date('Y-m-d') . '.log';
+                if (!isset($this->data[md5($fileName)])) {
+                    $this->data[md5($fileName)] = 1;
+                } else {
+                    $this->data[md5($fileName)] += 1;
+                }
+//                $logger = $this->getLogger($data[0]);
+//                $logger?->info($data[1]);
+//                if ($data[0] == 'error') {
+//                    $logger = $this->getLogger('error');
+//                    $logger?->error($data[1]);
+//                } else {
+//                    $logger = $this->getLogger($data[0]);
+//                    $logger?->info($data[1]);
+//                }
+                return $server->send($fd, Server::format(Server::STATUS, File::write($fileName, $data[1], true) ? "OK" : "FAIL"));
+            });
+            $server->setHandler('countLog', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'countLog' command"));
+                }
+                $day = $data[1];
+                $dir = APP_LOG_PATH . $data[0] . '/';
+                $fileName = $dir . $day . '.log';
+
+                $line = 0; //初始化行数
+                if (file_exists($fileName) && $fp = fopen($fileName, 'r')) {
+                    while (stream_get_line($fp, 102400, "\n")) {
+                        $line++;
+                    }
+                    fclose($fp);//关闭文件
+                }
+                return $server->send($fd, Server::format(Server::INT, $line));
+//                if (!isset($this->data[md5($fileName)])) {
+//                    return $server->send($fd, Server::format(Server::INT, 0));
+//                }
+//                return $server->send($fd, Server::format(Server::INT, $this->data[md5($fileName)]));
+//                if (!file_exists($fileName)) {
+//                    return $server->send($fd, Server::format(Server::INT, 0));
+//                }
+//                return $server->send($fd, Server::format(Server::INT, filesize($fileName)));
+            });
+            $server->setHandler('getLog', function ($fd, $data) use ($server) {
+                $day = $data[1];
+                $dir = APP_LOG_PATH . $data[0] . '/';
+                $start = $data[2];
+                $size = $data[3];
+                $fileName = $dir . $day . '.log';
+                if (!file_exists($fileName)) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                }
+                $line = 0;
+                $list = [];
+
+                if ($start < 0) {
+                    $size = abs($start);
+                    $start = 0;
+                }
+                clearstatcache();
+//                if (file_exists($fileName) && $fp = fopen($fileName, 'r')) {
+//                    while (stream_get_line($fp, 8192, "\n")) {
+//                        $line++;
+//                        var_dump(fgets($fp));
+//                    }
+//                    fclose($fp);//关闭文件
+//                }
+
+                $content = System::readFile($fileName);
+
+                $logs = [];
+                if ($content) {
+                    $list = array_reverse(explode("\n", $content));
+                    if ($start < 0) {
+                        //$list = array_reverse($list);
+                        $size = abs($start);
+                        $start = 0;
+                    }
+                    foreach ($list as $index => $c) {
+                        if (!trim($c)) {
+                            continue;
+                        }
+                        if ($size != -1) {
+                            if ($index < $start) {
+                                continue;
+                            }
+                            if (count($logs) >= $size) {
+                                break;
+                            }
+                        }
+                        if (!$log = JsonHelper::recover($c)) {
+                            continue;
+                        }
+                        $logs[] = $log;
+                    }
+                }
+                return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
+            });
+            $server->setHandler('sAdd', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'sAdd' command"));
+                }
+                $key = $data[0];
+                if (!isset($this->data[$key])) {
+                    $array[$key] = array();
+                }
+                $count = 0;
+                for ($i = 1; $i < count($data); $i++) {
+                    $value = $data[$i];
+                    if (!isset($this->data[$key][$value])) {
+                        $this->data[$key][$value] = 1;
+                        $count++;
+                    }
+                }
+
+                return $server->send($fd, Server::format(Server::INT, $count));
+            });
+
+
+//            $server->on('Connect', function ($server, int $fd) {
+//                Console::log("【MasterDB】#" . $fd . " Connectted");
+//            });
+//            $server->on('Close', function ($server, int $fd) {
+//                Console::log("【MasterDB】#" . $fd . " Closed");
+//            });
+            $server->on('WorkerStart', function (Server $server) {
+                Timer::tick(3000, function () use ($server) {
+                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
+                });
+            });
+            $server->on('start', function (Server $server) {
+
+            });
+            $server->start();
+        } catch (\Throwable $exception) {
+            Console::log('【MasterDB】服务启动失败:' . Color::red($exception->getMessage()));
+            exit();
+        }
+    }
+
+    /**
+     * 设置日志记录器
+     * @param $name
+     * @param Logger $logger
+     * @return void
+     */
+    public function setLogger($name, Logger $logger): void {
+        $this->_loggers[$name] = $logger;
+    }
+
+    /**
+     * @param $name
+     * @return ?Logger
+     */
+    public function getLogger($name): ?Logger {
+        if (!isset($this->_loggers[$name])) {
+            switch ($name) {
+                case 'error':
+                    $this->setLogger('error', $this->createLogger('error', $this->_config['error_level']));
+                    break;
+                case 'access':
+                    if ($this->_config['enable_access']) {
+                        $this->setLogger('access', $this->createLogger('access'));
+                    }
+                    break;
+                case 'message':
+                    if ($this->_config['enable_message']) {
+                        $logger = $this->createLogger('message');
+                        $this->setLogger('message', $logger);
+                    }
+                    break;
+                case 'sql';
+                    if ($this->_config['enable_sql']) {
+                        $this->setLogger('sql', $this->createLogger('sql'));
+                    }
+                    break;
+                default:
+                    $this->setLogger($name, $this->createLogger($name));
+                    break;
+            }
+        }
+        return $this->_loggers[$name] ?: null;
+    }
+
+    /**
+     * 创建日志记录器
+     * @param $name
+     * @param int $level
+     * @param bool $rotating
+     * @return Logger
+     */
+    public function createLogger($name, int $level = Logger::INFO, bool $rotating = true): Logger {
+        $dir = APP_LOG_PATH;
+        if ($this->_config['check_dir'] and !is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+        $handler = $rotating ?
+            new RotatingFileHandler($dir . $name . '.log', 100, $level) :
+            new StreamHandler($dir . $name . '.log', $level);
+        $logger = new Logger($name);
+        $logger->pushHandler($handler);
+
+        return $logger;
+    }
+}
