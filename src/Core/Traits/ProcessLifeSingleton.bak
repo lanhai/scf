@@ -1,0 +1,170 @@
+<?php
+
+
+namespace Scf\Core\Traits;
+
+use Scf\Core\Console;
+use Scf\Core\Context;
+use Scf\Helper\JsonHelper;
+use Scf\Util\Random;
+use Swoole\Coroutine;
+use Swoole\Coroutine\Channel;
+use Swoole\Timer;
+
+/**
+ *顶级协程生命周期内的单例
+ */
+trait ProcessLifeSingleton_ {
+    private static array $instance = [];
+    private static array $parents = [];
+    private array $parentsMap = [];
+    private int $ancestorCid = 0;
+    private ?Channel $channel = null;
+    protected ?string $lifeId = null;
+
+    public function __construct($cid) {
+        $this->lifeId = Random::makeUUIDV4();
+        $this->ancestorCid = $cid;
+
+        Coroutine::defer(function () use ($cid) {
+            //延迟3秒查询状态
+            $checkTimes = 0;
+            Timer::tick(3000, function ($timerId) use ($cid, &$checkTimes) {
+                $queueNum = $this->channel->stats()['queue_num'];
+                //超过一分钟
+                if ($queueNum === 0 || $checkTimes >= 20) {
+                    Timer::clear($timerId);
+                    $this->destroy($cid);
+                }
+                $checkTimes++;
+                $cls = get_called_class();
+                Console::error("{$cls} #{$cid} destruct! instances:" . count(self::$instance) . " parents:" . count(self::$parents) . " maps:" . JsonHelper::toJson($this->parentsMap) . " channel:" . JsonHelper::toJson($this->channel->stats()));
+            });
+        });
+
+    }
+
+    /**
+     * @return static
+     */
+    public static function instance(): static {
+        $cls = get_called_class();
+        if (Coroutine::getPcid() > 0) {
+//            $cid = Coroutine::getCid();
+//            $cls = get_called_class();
+//            return self::getParentInstance($cls, $cid);
+            $topCid = Context::get("top_cid", Coroutine::getPcid(), Coroutine::getPcid());
+            $instance = Context::get("instance_" . $cls, new static($topCid), Coroutine::getPcid());
+        } else {
+            $topCid = Context::get("top_cid", Coroutine::getCid());
+            $instance = Context::get("instance_" . $cls, new static($topCid));
+        }
+        Context::set("top_cid", $topCid);
+
+        Context::set("instance_" . $cls, $instance);
+        return $instance;
+        //Console::info("cid:" . Coroutine::getCid() . " PCid:" . Coroutine::getPcid() . " topCid:" . $topCid);
+
+        //return self::create($topCid);
+    }
+
+    public function setParentsMap($map): void {
+        $this->parentsMap = $map;
+    }
+
+    /**
+     * 获取请求祖先携程ID
+     * @return int
+     */
+    public function getAncestorCid(): int {
+        return $this->ancestorCid;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isAncestorThread(): bool {
+        return $this->ancestorCid == Coroutine::getCid();
+    }
+
+
+
+    /**
+     * 获取父级协程单例
+     * @param $cls
+     * @param int $cid
+     * @param array $map
+     * @return static
+     */
+//    private static function getParentInstance($cls, int $cid = 0, array $map = []): static {
+//        $pcid = Coroutine::getPcid($cid);
+//        !$map and array_unshift($map, $cid);
+//        if ($pcid === false || $pcid == -1) {
+//            if (isset(self::$parents[$cid])) {
+//                array_unshift($map, self::$parents[$cid]);
+//                return self::getParentInstance($cls, self::$parents[$cid], $map);
+//            }
+//            $obj = self::create($cid);
+//            $obj->setParentsMap($map);
+//            return $obj;
+//        }
+//        //存在父协程
+//        self::$parents[$cid] = $pcid;
+//        array_unshift($map, $pcid);
+//        return self::getParentInstance($cls, $pcid, $map);
+//    }
+
+    /**
+     * 创建一个顶级携程生命周期内的单例
+     * @param int $id
+     * @return static
+     */
+    private static function create(int $id = 0): static {
+        $cid = $id ?: Coroutine::getCid();
+        $cls = get_called_class();
+        if (!isset(self::$instance[$cid . $cls])) {
+            self::$instance[$cid . $cls] = new static($cid);
+        }
+        $obj = self::$instance[$cid . $cls];
+        //只销毁协程内的实例
+        if ($cid > 0) {
+            $obj->add(Coroutine::getCid());
+            Coroutine::defer(function () use ($obj) {
+                $obj->pop();
+            });
+        }
+        return $obj;
+    }
+
+    public function pop(): void {
+        $this->channel->pop(3);
+    }
+
+    public function add($cid): void {
+        if (is_null($this->channel)) {
+            $this->channel = new Channel(128);
+        }
+        $this->channel->push($cid, 3);
+    }
+
+    public function destroy(int $cid = null): void {
+        if ($cid === null) {
+            $cid = Coroutine::getCid();
+        }
+        $cls = get_called_class();
+        if ($this->parentsMap) {
+            foreach ($this->parentsMap as $id) {
+                if (isset(self::$parents[$id])) {
+                    unset(self::$parents[$id]);
+                }
+            }
+        }
+        $this->channel->close();
+        unset(self::$instance[$cid . $cls]);
+    }
+
+//    public function __destruct() {
+//        $cls = get_called_class();
+//        Console::warning("{$cls} #{$this->ancestorCid} destruct");
+//    }
+}

@@ -1,0 +1,19 @@
+{
+    "name": "lanhai/scf",
+    "description": "swoole cloud framework",
+    "type": "library",
+    "require": {
+    },
+    "autoload": {
+        "psr-4": {
+            "Scf\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "lanhai",
+            "email": "363387485@qq.com"
+        }
+    ],
+    "minimum-stability": "stable"
+}
