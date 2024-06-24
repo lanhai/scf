@@ -15,5 +15,6 @@
             "email": "363387485@qq.com"
         }
     ],
+    "version": "1.0.0",
     "minimum-stability": "stable"
 }
