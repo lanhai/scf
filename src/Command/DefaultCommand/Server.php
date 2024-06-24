@@ -82,8 +82,8 @@ class Server implements CommandInterface {
         Core::initialize(MODE_CGI);
         App::mount();
 //        \Scf\Mode\Web\App::loadModules();
-        $cmd = "php " . SCF_ROOT . "/boot server bgs -env=" . APP_RUN_ENV . " -app=" . APP_DIR_NAME . " -role=master -d";
-        run(function () use ($cmd) {
+        run(function () {
+            $cmd = "php " . SCF_ROOT . "/boot server bgs -env=" . APP_RUN_ENV . " -app=" . APP_DIR_NAME . " -role=master -d";
             $result = System::exec($cmd);
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
             MasterDB::set('_MASTER_DB_PID_', $masterDbPid);
