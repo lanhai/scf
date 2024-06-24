@@ -87,6 +87,15 @@ class Console {
         return self::receive();
     }
 
+    public static function select($options = []): string {
+        self::line();
+        foreach ($options as $k => $app) {
+            Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
+        }
+        self::line();
+        return self::input('输入要进行的操作编号:', false);
+    }
+
     /**
      * 开始loading
      * @param $message

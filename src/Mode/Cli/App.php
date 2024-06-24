@@ -29,22 +29,28 @@ class App extends \Scf\Core\App {
         foreach ($this->_apps as $k => $app) {
             Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
         }
-        Console::write("----------------------------------------------------");
+        Console::line();
         if (!$cmdNum) {
-            $cmdNum = trim(fgets(STDIN));
+            $cmdNum = Console::input("输入要执行的操作编号:", false);
+            //$cmdNum = trim(fgets(STDIN));
             if (!is_numeric($cmdNum)) {
                 $cmdNum = strtolower($cmdNum);
+                Console::line();
                 if ($cmdNum == 'quit' || $cmdNum == 'q') {
-                    Console::write("----------------------------------------------------\n欢迎再次使用\n----------------------------------------------------");
+                    Console::write("欢迎再次使用");
+                    Console::line();
                     exit;
                 }
-                Console::write("----------------------------------------------------\n输入有误,请输入正确的指令编号\n----------------------------------------------------");
+                Console::write("输入有误,请输入正确的指令编号");
+                Console::line();
                 return $this->ready();
             }
         }
         $appNum = $cmdNum - 1;
         if (!isset($this->_apps[$appNum])) {
-            Console::write("----------------------------------------------------\n对应的指令不存在,请重新输入\n----------------------------------------------------");
+            Console::line();
+            Console::write("对应的指令不存在,请重新输入");
+            Console::line();
             return $this->ready();
         }
         return $this->run($appNum);
