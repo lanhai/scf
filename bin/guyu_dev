@@ -1,0 +1,2 @@
+#!/bin/bash
+php ../boot server start -env=dev -app=guyu -static=on -role=master -port=80
