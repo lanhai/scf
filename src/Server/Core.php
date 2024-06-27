@@ -35,13 +35,15 @@ class Core {
             });
             Event::wait();
         }
+        $path = $options['app'] ?? ($appDir ?: 'app');
         !defined('APP_RUN_ENV') and define('APP_RUN_ENV', Manager::instance()->issetOpt('dev') ? 'dev' : ($options['env'] ?? ($appEnv ?: 'production')));
+        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
 
         if (App::all() && !isset($options['app']) && !$appDir) {
             Console::error("请使用'-app'参数指定应用目录");
             exit(1);
         }
-        $path = $options['app'] ?? ($appDir ?: 'app');
+
         $app = App::appoint($path);
         $role = Manager::instance()->issetOpt('master') ? 'master' : ($options['role'] ?? ($serverRole ?: ($app->role ?: 'master')));
         if (!$app->role) {
@@ -76,7 +78,7 @@ class Core {
         !defined('PRINT_REDIS_LOG') and define('PRINT_REDIS_LOG', Manager::instance()->issetOpt('print_redis_logs'));
         !defined('APP_DIR_NAME') and define('APP_DIR_NAME', $path);
         !defined('APP_PATH') and define('APP_PATH', SCF_APPS_ROOT . $path . '/');
-        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(APP_PATH . 'src/lib') ? 'src' : 'phar'))));
+
         !defined('APP_PUBLIC_PATH') and define('APP_PUBLIC_PATH', APP_PATH . $app->public_path);
         !defined('APP_AUTH_KEY') and define('APP_AUTH_KEY', $app->app_auth_key);
         //APP DB

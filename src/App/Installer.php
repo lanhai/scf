@@ -2,6 +2,7 @@
 
 namespace Scf\App;
 
+use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Struct;
 use Scf\Helper\ArrayHelper;
@@ -109,8 +110,8 @@ class Installer extends Struct {
         $jsonFile = SCF_APPS_ROOT . 'apps.json';
         $appPath = SCF_APPS_ROOT . $path;
         if (!file_exists($appPath)) {
-            if (!$create && APP_RUN_MODE != 'phar') {
-                Console::error("[安装器]无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
+            if (!$create && App::isDevEnv()) {
+                Console::error("无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
                 exit();
             }
             mkdir($appPath, 0775, true);
