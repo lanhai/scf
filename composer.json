@@ -25,7 +25,6 @@
     "endroid/qr-code": "^4.4",
     "ext-dom": "*",
     "ext-xlswriter": "*",
-    "ext-pcntl": "*",
     "aliyuncs/oss-sdk-php": "^2.6",
     "overtrue/pinyin": "^5.0",
     "alibabacloud/sts-20150401": "1.1.4",
