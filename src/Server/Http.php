@@ -165,7 +165,7 @@ class Http extends \Scf\Core\Server {
         //启动控制面板服务器
         Dashboard::start($this->bindPort + 2);
         //启动masterDB(redis)服务器
-        MasterDB::start();
+        MasterDB::start(MDB_PORT);
         //启动任务管理进程
         self::startMasterProcess();
         //检查是否存在异常进程

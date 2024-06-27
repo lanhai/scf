@@ -4,7 +4,6 @@ namespace Scf\Mode\Rpc;
 
 use Scf\Core\App;
 use Scf\Core\Config;
-use Scf\Core\Log;
 use Scf\Core\Result;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Request;
@@ -109,14 +108,14 @@ class Client {
         $client->exec();
         $result = JsonHelper::recover($ret);
         $code = $result['status'] ?? 500;
-        $msg = $result['msg'] ?? '服务端系统错误';
+        $msg = $result['msg'] ?? '服务端系统错误,请确实服务端是否启动';
         if ((int)$code === 0) {
             if (isset($result['result']['errCode']) && isset($result['result']['message']) && isset($result['result']['data'])) {
                 return Result::factory($result['result']);
             }
             return Result::success($result['result'] ?? "");
         }
-        Log::instance()->error('[' . $serviceName . ']服务请求错误:' . $msg);
+        //App::isDevEnv() and Log::instance()->error('[' . $serviceName . ']服务请求错误:' . $msg);
         return match ((int)$code) {
             403 => Result::error('[' . $serviceName . ']无权访问,请检查签名', $code, $msg),
             500 => Result::error('[' . $serviceName . ']系统繁忙,请稍后重试', $code, $msg),

@@ -109,8 +109,8 @@ class Installer extends Struct {
         $jsonFile = SCF_APPS_ROOT . 'apps.json';
         $appPath = SCF_APPS_ROOT . $path;
         if (!file_exists($appPath)) {
-            if (!$create) {
-                Console::error("无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
+            if (!$create && APP_RUN_MODE != 'phar') {
+                Console::error("[安装器]无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
                 exit();
             }
             mkdir($appPath, 0775, true);
@@ -141,6 +141,8 @@ class Installer extends Struct {
             'dashboard_password' => Auth::encode(time(), Sn::create_uuid())
         ];
         !self::$_apps and self::$_apps[] = $info;
+        $info['version'] = (defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') ? $info['version'] : 'development';
+        $info['public_version'] = (defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') ? $info['public_version'] : 'development';
         return self::factory($info);
     }
 

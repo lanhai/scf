@@ -1,5 +1,5 @@
 <?php
-$scfVersion = 'latest';
+$scfVersion = 'development';
 
 // 要检查的包名
 $packageName = 'lhai/scf';

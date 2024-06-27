@@ -5,6 +5,7 @@ namespace Scf\Server\Listener;
 use Scf\Core\Console;
 use Scf\Mode\Web\App;
 use Scf\Command\Color;
+use Scf\Server\Http;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -23,7 +24,7 @@ class WorkerListener extends Listener {
         //要使用app命名空间必须先加载模块
         App::isReady() and App::mount();
         //添加RPC服务
-        \Scf\Mode\Rpc\App::addService();
+        \Scf\Mode\Rpc\App::addService(Http::instance()->getPort() + 5, $workerId);
         if ($workerId == 0) {
             $srcPath = App::src();
             $version = App::version();
@@ -40,8 +41,10 @@ INFO;
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
-        Console::log(Color::red('#' . $worker_pid . ' worker #' . $worker_id . ' 发生致命错误!signal:' . $signal . ',exit_code:' . $exit_code));
-        Timer::after(2000, function () use ($server, $worker_id) {
+        if ($signal !== 2) {
+            Console::log(Color::red('#' . $worker_pid . ' worker #' . $worker_id . ' 发生致命错误!signal:' . $signal . ',exit_code:' . $exit_code));
+        }
+        Timer::after(3000, function () use ($server, $worker_id) {
             if (!Process::kill($server->master_pid, 0)) {
                 $server->stop($worker_id);
             }
