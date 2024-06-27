@@ -87,8 +87,8 @@ class App {
      * @return void
      */
     public static function mount(string $mode = MODE_CGI): void {
-        if (!self::installer()->isInstalled() && !self::isDevEnv() && APP_RUN_MODE != 'phar') {
-            Console::error("[应用]无法挂载至:" . SCF_APPS_ROOT . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
+        if (!self::installer()->isInstalled() && self::isDevEnv()) {
+            Console::error("[LOAD]无法挂载至:" . SCF_APPS_ROOT . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
             exit();
         }
         //应用ID
