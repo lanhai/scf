@@ -10,16 +10,17 @@ use Scf\Rpc\Server\ServiceNode;
 
 
 class RedisManager implements NodeManagerInterface {
-    protected string $redisKey = 'example_server';
+    protected string $redisKey = '_RPC_SERVER_';
 
     protected int $ttl = 30;
 
     protected Redis|NullPool|NullMasterDb $pool;
 
     protected array $config;
+    protected string $serverName = 'main';
 
-    public function __construct($config, string $hashKey = 'example_server', int $ttl = 30) {
-        $this->config = $config;
+    public function __construct($serverName = 'main', string $hashKey = '_RPC_SERVER_', int $ttl = 30) {
+        $this->serverName = $serverName;
         $this->redisKey = $hashKey;
         $this->ttl = $ttl;
         $pool = $this->createRedisPool();
@@ -29,11 +30,12 @@ class RedisManager implements NodeManagerInterface {
     }
 
     protected function createRedisPool(): Redis|NullPool {
-        $this->pool = Redis::instance()->create($this->config);
+        //$this->pool = Redis::instance()->create($this->config);
+        $this->pool = Redis::pool($this->serverName, '_rpc_service_');
         return $this->pool;
     }
 
-    public function clear($serviceName) {
+    public function clear($serviceName): void {
         /** @var Redis $redis */
         $redis = $this->pool;
         try {
@@ -44,7 +46,7 @@ class RedisManager implements NodeManagerInterface {
 
     }
 
-    function getNodes(string $serviceName, ?int $version = null): array {
+    public function getNodes(string $serviceName, ?int $version = null): array {
         $fails = [];
         $hits = [];
         $time = time();
@@ -87,7 +89,7 @@ class RedisManager implements NodeManagerInterface {
         return [];
     }
 
-    function getNode(string $serviceName, ?int $version = null): ?ServiceNode {
+    public function getNode(string $serviceName, ?int $version = null): ?ServiceNode {
         $list = $this->getNodes($serviceName, $version);
         if (empty($list)) {
             return null;
@@ -130,7 +132,7 @@ class RedisManager implements NodeManagerInterface {
         return null;
     }
 
-    function failDown(ServiceNode $serviceNode): bool {
+    public function failDown(ServiceNode $serviceNode): bool {
         /** @var Redis $redis */
         $redis = $this->pool;
         try {
@@ -152,7 +154,7 @@ class RedisManager implements NodeManagerInterface {
         return false;
     }
 
-    function offline(ServiceNode $serviceNode): bool {
+    public function offline(ServiceNode $serviceNode): bool {
         /** @var Redis $redis */
         $redis = $this->pool;
         try {
@@ -171,7 +173,7 @@ class RedisManager implements NodeManagerInterface {
         return false;
     }
 
-    function alive(ServiceNode $serviceNode): bool {
+    public function alive(ServiceNode $serviceNode): bool {
         $info = [
             'service' => $serviceNode->getService(),
             'ip' => $serviceNode->getIp(),
@@ -198,12 +200,12 @@ class RedisManager implements NodeManagerInterface {
         return false;
     }
 
-    private function deleteServiceNode($serviceName, $failKey): bool {
+    private function deleteServiceNode($serviceName, $failKey): void {
         /** @var Redis $redis */
         $redis = $this->pool;
         try {
             $redis->hDel("{$this->redisKey}_{$serviceName}", $failKey);
-            return true;
+            return;
         } catch (\Throwable $throwable) {
             // 如果该 redis 断线则尝试重新连接
             $this->createRedisPool();
@@ -211,6 +213,5 @@ class RedisManager implements NodeManagerInterface {
             //$redisPool->recycleObj($redis);
         }
 
-        return false;
     }
 }

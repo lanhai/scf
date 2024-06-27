@@ -209,7 +209,7 @@ class Build implements CommandInterface {
             'appid' => APP_ID,
             'release_date' => date('Y-m-d H:i:s'),
             'server' => $ossServer['OSS_HOST'],
-            'port' => 443,
+            'port' => str_contains($ossServer['CDN_DOMAIN'], 'https://') ? 443 : 80,
             'app_object' => '',// $latestAppVersion,
             'public_object' => '',// $latestPublicVersion,
             'forced' => true,

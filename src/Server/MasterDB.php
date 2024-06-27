@@ -39,13 +39,13 @@ class MasterDB {
      */
     protected array $_loggers = [];
 
-    public static function start(): void {
+    public static function start(int $port = 16379): void {
         if (!App::isMaster()) {
             return;
         }
-        $process = new Process(function () {
+        $process = new Process(function () use ($port) {
             try {
-                MasterDB::instance()->create(Manager::instance()->issetOpt('d'));
+                MasterDB::instance()->create(Manager::instance()->issetOpt('d'), $port);
             } catch (\Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
@@ -65,9 +65,10 @@ class MasterDB {
 
     /**
      * @param bool $daemonize
+     * @param int $port
      * @return void
      */
-    public function create(bool $daemonize = false,): void {
+    public function create(bool $daemonize = false, int $port = 16379): void {
         if (!App::isMaster()) {
             return;
         }
@@ -85,7 +86,7 @@ class MasterDB {
 //            }
 //        }
         try {
-            $server = new Server('0.0.0.0', 16379, SWOOLE_BASE);
+            $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
                 'daemonize' => $daemonize,

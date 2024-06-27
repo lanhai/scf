@@ -87,8 +87,8 @@ class App {
      * @return void
      */
     public static function mount(string $mode = MODE_CGI): void {
-        if (!self::installer()->isInstalled()) {
-            Console::error("无法挂载至:" . SCF_APPS_ROOT . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
+        if (!self::installer()->isInstalled() && !self::isDevEnv() && APP_RUN_MODE != 'phar') {
+            Console::error("[应用]无法挂载至:" . SCF_APPS_ROOT . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
             exit();
         }
         //应用ID
@@ -292,8 +292,10 @@ class App {
         //注册加载器
         spl_autoload_register([__CLASS__, 'autoload']);
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO && is_dir(APP_LIB_PATH . 'Controller')) {
-            $entryScripts = Dir::scan(APP_LIB_PATH . 'Controller/', 2);
+        $entryScripts = [];
+        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            is_dir(APP_LIB_PATH . 'Controller') and $entryScripts = Dir::scan(APP_LIB_PATH . 'Controller/', 2);
+            is_dir(APP_LIB_PATH . 'Service') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . 'Service/', 2)];
         } else {
             $entryScripts = Dir::scan(APP_LIB_PATH, 2);
         }

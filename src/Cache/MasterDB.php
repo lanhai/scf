@@ -32,7 +32,7 @@ class MasterDB {
     protected function connection(): Redis|NullMasterDb {
         $pool = Redis::instance()->create([
             'host' => App::isReady() ? Config::get('app')['master_host'] ?? '127.0.0.1' : '127.0.0.1',
-            'port' => 16379,
+            'port' => MDB_PORT,
             'auth' => '',
             'db_index' => 0,
             'time_out' => 1,//连接超时时间
@@ -139,7 +139,7 @@ class MasterDB {
      * @return mixed
      */
     public static function get($k): mixed {
-        $data= self::getConnection()->command('GET', $k);
+        $data = self::getConnection()->command('GET', $k);
         return StringHelper::isJson($data) ? JsonHelper::recover($data) : $data;
     }
 

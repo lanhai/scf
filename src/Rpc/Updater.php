@@ -2,6 +2,7 @@
 
 namespace Scf\Rpc;
 
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Mode\Rpc\Document;
 use Scf\Command\Color;
@@ -10,7 +11,7 @@ use Swoole\Event;
 class Updater {
 
     public function run(): void {
-        $rpcConfig = \Scf\Core\Config::get('rpc');
+        $rpcConfig = Config::get('rpc');
         if (!$rpcConfig) {
             Console::error("未查询到RPC服务配置");
             exit();
@@ -22,7 +23,7 @@ class Updater {
             exit();
         }
         Console::write('----------------------------------------------------------------------------------------------------');
-        Console::write('序号  命名空间                    服务器                远程服务   appid    远程版本     本地版本');
+        Console::write('序号  命名空间                    服务器                远程服务        appid    远程版本     本地版本');
         Console::write('----------------------------------------------------------------------------------------------------');
         $i = 1;
         $list = [];
@@ -50,7 +51,7 @@ class Updater {
             } else {
                 $versionLocal = "未安装";
             }
-            Console::write("#{$i}    " . $name . "         {$service['server']}    {$service['service']}   {$service['appid']}    【" . $remoteVersion . "】      【" . ($remoteVersion == $versionLocal ? Color::green($versionLocal) : Color::red($versionLocal)) . "】");
+            Console::write("#{$i}    " . $name . "         {$service['server']}    {$service['service']}        {$service['appid']}    【" . $remoteVersion . "】      【" . ($remoteVersion == $versionLocal ? Color::green($versionLocal) : Color::red($versionLocal)) . "】");
             $i++;
             $service['namespace'] = $name;
             $list[] = [
@@ -59,12 +60,12 @@ class Updater {
             ];
         }
         Console::write('----------------------------------------------------------------------------------------------------');
-        $choice = Console::input("请输入要更新的服务序号");
+        $choice = Console::input("请输入要更新的服务序号:", false);
         if (!$choice || !is_numeric($choice)) {
             $this->run();
         }
         $selectedService = $list[$choice - 1];
-        if (!$this->warite($selectedService)) {
+        if (!$this->write($selectedService)) {
             $input = Console::input("【" . $selectedService['service']['namespace'] . "】 服务更新失败,请选择下一步操作\n1:更新其它服务\n2:退出");
             if ($input == 1) {
                 $this->run();
@@ -76,7 +77,7 @@ class Updater {
         $this->run();
     }
 
-    protected function warite($service) {
+    protected function write($service) {
         $document = [];
         go(function () use ($service, &$document) {
             $rpc = new \Scf\Mode\Rpc\Client($service['service'], $service['server']);
@@ -97,7 +98,7 @@ class Updater {
             exit();
         }
         $paths = explode("\\", $service['service']['namespace']);
-        $appMode = \Scf\Core\Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+        $appMode = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($appMode == APP_MODULE_STYLE_LARGE) {
             $fileDir = APP_LIB_PATH . $paths[1] . '/' . $paths[2];
             $clientFile = $fileDir . '/' . $paths[3] . '.php';
@@ -154,7 +155,6 @@ class Updater {
             $bodyContent .= PHP_EOL . '    }' . PHP_EOL . PHP_EOL;
         }
         $now = date('Y-m-d H:i:s');
-        $use = "";
         $namespaceArr = $paths;
         unset($namespaceArr[count($namespaceArr) - 1]);
         $namespace = implode("\\", $namespaceArr);
@@ -163,7 +163,8 @@ class Updater {
 <?php
 namespace {$namespace};
 
-{$use}
+use Scf\Mode\Rpc\Client;
+use Scf\Core\Result;
 
 /**
  * {$document['desc']}
