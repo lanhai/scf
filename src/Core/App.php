@@ -98,6 +98,11 @@ class App {
         //项目库路径
         !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . 'lib/');
         Config::init();
+        //加载应用第三方库
+        $vendorLoader = self::src() . '/vendor/autoload.php';
+        if (file_exists($vendorLoader)) {
+            require $vendorLoader;
+        }
         self::loadModules($mode);
     }
 
