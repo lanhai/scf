@@ -6,6 +6,7 @@ use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Core\Console;
+use Scf\Helper\JsonHelper;
 use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\Event;
@@ -35,13 +36,11 @@ class Package implements CommandInterface {
         });
         Console::info('最新版本:' . $latestVersion);
         Console::startLoading('正在推送代码到github', function ($tid) use (&$latestVersion) {
-            trim(System::exec("git add " . SCF_ROOT)['output']);
-            $commitResult = trim(System::exec('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '"')['output']);
-            Console::info('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '" 执行结果:');
-            echo $commitResult;
-            $pushTag = trim(System::exec("git push")['output']);
-            Console::info("git push 执行结果:");
-            echo $pushTag;
+            System::exec("git add " . SCF_ROOT)['output'];
+            $commitResult = System::exec('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '"')['output'];
+            Console::info('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '" 执行结果:' . JsonHelper::toJson(explode("\n", $commitResult)));
+            $pushTag = System::exec("git push")['output'];
+            Console::info("git push 执行结果:" . JsonHelper::toJson(explode("\n", $pushTag)));
             Console::endLoading($tid);
         });
         $arr = explode('.', $latestVersion);
@@ -49,12 +48,10 @@ class Package implements CommandInterface {
         $defaultVersionNum = implode('.', $arr);
         $version = Console::input('请输入版本号,(缺省 ' . $defaultVersionNum . '):', false) ?: $defaultVersionNum;
         Console::startLoading('正在推送版本标签:' . $version, function ($tid) use ($version) {
-            $addTag = trim(System::exec("git tag -a v$version -m 'release v$version'")['output']);
-            Console::info("git tag -a v$version -m 'release v$version' 执行结果:");
-            echo $addTag;
-            $pushTag = trim(System::exec("git push origin v$version")['output']);
-            Console::info("git push origin v$version 执行结果:");
-            echo $pushTag;
+            $addTag = System::exec("git tag -a v$version -m 'release v$version'")['output'];
+            Console::info("git tag -a v$version -m 'release v$version' 执行结果:" . JsonHelper::toJson(explode("\n", $addTag)));
+            $pushTag = System::exec("git push origin v$version")['output'];
+            Console::info("git push origin v$version 执行结果:" . JsonHelper::toJson(explode("\n", $pushTag)));
             Console::endLoading($tid);
         });
         Console::success('框架composer包发布成功:v' . $version);
