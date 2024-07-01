@@ -36,10 +36,12 @@ class Package implements CommandInterface {
         Console::info('最新版本:' . $latestVersion);
         Console::startLoading('正在推送代码到github', function ($tid) use (&$latestVersion) {
             trim(System::exec("git add " . SCF_ROOT)['output']);
-            $commitResult = trim(System::exec('git commit -m "publish@' . date('Y-m-d_H:i:s') . '"')['output']);
-            Console::info($commitResult);
+            $commitResult = trim(System::exec('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '"')['output']);
+            Console::info('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '" 执行结果:');
+            echo $commitResult;
             $pushTag = trim(System::exec("git push")['output']);
-            Console::info($pushTag);
+            Console::info("git push 执行结果:");
+            echo $pushTag;
             Console::endLoading($tid);
         });
         $arr = explode('.', $latestVersion);
@@ -48,12 +50,14 @@ class Package implements CommandInterface {
         $version = Console::input('请输入版本号,(缺省 ' . $defaultVersionNum . '):', false) ?: $defaultVersionNum;
         Console::startLoading('正在推送版本标签:' . $version, function ($tid) use ($version) {
             $addTag = trim(System::exec("git tag -a v$version -m 'release v$version'")['output']);
-            Console::info($addTag);
+            Console::info("git tag -a v$version -m 'release v$version' 执行结果:");
+            echo $addTag;
             $pushTag = trim(System::exec("git push origin v$version")['output']);
-            Console::info($pushTag);
+            Console::info("git push origin v$version 执行结果:");
+            echo $pushTag;
             Console::endLoading($tid);
         });
-        Console::success('发布成功:v' . $version);
+        Console::success('框架composer包发布成功:v' . $version);
     }
 
     protected function version(): string {
