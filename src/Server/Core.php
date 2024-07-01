@@ -2,6 +2,9 @@
 
 namespace Scf\Server;
 
+use FilesystemIterator;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use Scf\Core\App;
 use Scf\Command\Manager;
 use Scf\Core\Console;
@@ -116,6 +119,8 @@ class Core {
         if (!file_exists(APP_BIN_DIR)) {
             mkdir(APP_BIN_DIR, 0775, true);
         }
+        // 清理缓存目录
+        App::clearTemplateCache();
         if ($mode != MODE_CGI) {
             App::mount($mode);
         }

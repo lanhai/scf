@@ -101,8 +101,8 @@ class CgiListener extends Listener {
                     Response::instance()->status(200);
                     Response::instance()->end($result);
                 }
-            } catch (NotFoundException) {
-                $app->handleNotFound();
+            } catch (NotFoundException $e) {
+                $app->handleNotFound($e->getMessage());
             } catch (Throwable $exception) {
                 $message = $exception->getMessage();
                 $code = $exception->getCode();

@@ -32,7 +32,8 @@
     "alibabacloud/client": "1.5.32",
     "alibabacloud/tea": "3.2.1",
     "alibabacloud/tea-utils": "0.2.20",
-    "php-mqtt/client": "^2.1"
+    "php-mqtt/client": "^2.1",
+    "twig/twig": "^3.0"
   },
   "autoload": {
     "psr-4": {
