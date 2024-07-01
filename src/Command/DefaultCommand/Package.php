@@ -35,8 +35,8 @@ class Package implements CommandInterface {
         });
         Console::info('最新版本:' . $latestVersion);
         Console::startLoading('正在推送代码到github', function ($tid) use (&$latestVersion) {
-            trim(System::exec("git add .")['output']);
-            $commitResult = trim(System::exec('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '"')['output']);
+            trim(System::exec("git add " . SCF_ROOT)['output']);
+            $commitResult = trim(System::exec('git commit -m "publish@' . date('Y-m-d_H:i:s') . '"')['output']);
             Console::info($commitResult);
             $pushTag = trim(System::exec("git push")['output']);
             Console::info($pushTag);
