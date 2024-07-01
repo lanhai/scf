@@ -12,6 +12,11 @@ use Scf\Mode\Web\Exception\AppException;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Server\Env;
 use Scf\Server\Worker\ProcessLife;
+use Twig\Environment;
+use Twig\Error\LoaderError;
+use Twig\Error\RuntimeError;
+use Twig\Error\SyntaxError;
+use Twig\Loader\FilesystemLoader;
 
 
 class App extends Lifetime {
@@ -122,7 +127,16 @@ class App extends Lifetime {
     }
 
     /**
-     * 错误处理
+     * 异常处理
+     * @param $exception
+     * @throws AppException
+     */
+    public function exceptionHandler($exception) {
+        throw new AppException($exception);
+    }
+
+    /**
+     * worker运行错误处理
      * @param $level
      * @param $message
      * @param null $file
@@ -139,39 +153,22 @@ class App extends Lifetime {
         //判断是否是子携程触发的错误
         $response = Response::instance();
         if ($response->isAncestorThread() && !$response->isEnd()) {
-            Response::interrupt($message, 'SERVER_ERROR');
+            Response::error(Env::isDev() ? $message : '系统繁忙,请稍后重试', 'SERVER_ERROR', status: 500);
         }
     }
 
-    /**
-     * 异常处理
-     * @param $exception
-     * @throws AppException
-     */
-    public function exceptionHandler($exception) {
-        throw new AppException($exception);
-    }
 
     /**
      * 处理404错误
+     * @param string $msg
      * @return void
      */
-    public function handleNotFound(): void {
-        $file = self::src() . 'template/common/error_404.html';
-        $this->response()->status(404);
-        if ($this->request()->_isAjax()) {
-            $this->response()->json(Result::output()->error('Page Not Found!', 404));
-        } else {
-            if (file_exists($file)) {
-                $this->response()->end(file_get_contents($file));
-            } else {
-                $this->response()->end('Page Not Found!');
-            }
-        }
+    public function handleNotFound(string $msg = 'Page Not Found!'): void {
+        Response::error(Env::isDev() ? $msg : '没有找到您要访问的页面', status: 404);
     }
 
     /**
-     * 处理运行错误
+     * server错误处理
      * @param $error
      * @return void
      */
@@ -179,34 +176,7 @@ class App extends Lifetime {
         if ($this->response()->isEnd()) {
             return;
         }
-        $this->response()->status(200);
-        if (Env::isDev()) {
-            $output = [
-                'errCode' => $error['code'] ?: 'SERVER_ERROR',
-                'message' => !str_contains($error['error'], '@') ? $error['error'] . '@' . $error['file'] . ':' . $error['line'] : $error['error'],
-                'data' => $error
-            ];
-            $logger = ProcessLife::instance();
-            $output['debug'] = $logger->requestDebugInfo();
-            $this->response()->json($output);
-        } else {
-            if ($this->request()->isAjax()) {
-                $this->response()->json(
-                    [
-                        'errCode' => $error['code'] ?? 'SERVER_ERROR',
-                        'message' => '系统繁忙,请稍后重试',
-                        'data' => $error['error'] ?? '未知错误'
-                    ]
-                );
-            } else {
-                $file = self::src() . 'template/common/error.html';
-                if (file_exists($file)) {
-                    $this->response()->end(file_get_contents($file));
-                } else {
-                    $this->response()->end('SERVER ERROR!');
-                }
-            }
-        }
+        Response::error(Env::isDev() ? (!str_contains($error['error'], '@') ? $error['error'] . '@' . $error['file'] . ':' . $error['line'] : $error['error']) : '系统繁忙,请稍后重试', status: 500);
     }
 
     /**

@@ -231,6 +231,14 @@ class Request {
     }
 
     /**
+     * 返回module name
+     * @return string
+     */
+    public function _getModuleName(): string {
+        return Router::instance()->getModule();
+    }
+
+    /**
      * 判断是否是POST请求
      * @return bool
      */

@@ -10,6 +10,11 @@ use Scf\Helper\StringHelper;
 use Scf\Server\Env;
 use Scf\Server\Worker\ProcessLife;
 use Scf\Util\Time;
+use Twig\Environment;
+use Twig\Error\LoaderError;
+use Twig\Error\RuntimeError;
+use Twig\Error\SyntaxError;
+use Twig\Loader\FilesystemLoader;
 
 class Response {
     use ProcessLifeSingleton;
@@ -51,9 +56,10 @@ class Response {
      * @param $error
      * @param string $code
      * @param mixed $data
+     * @param int $status
      * @return void
      */
-    public static function error($error, string $code = 'SERVICE_ERROR', mixed $data = ''): void {
+    public static function error($error, string $code = 'SERVICE_ERROR', mixed $data = '', int $status = 503): void {
         if ($error instanceof Result) {
             $output = [
                 'errCode' => $error->getErrCode(),
@@ -67,8 +73,22 @@ class Response {
                 'data' => $data
             ];
         }
-        self::instance()->json($output);
-        //self::instance()->stop(503);
+        self::instance()->status($status);
+        if (Request::isAjax()) {
+            self::instance()->json($output);
+        } else {
+            $loader = new FilesystemLoader(__DIR__ . '/Template');
+            $twig = new Environment($loader, [
+                'cache' => APP_TMP_PATH . 'template',
+                'auto_reload' => true,  // 当模板文件修改时自动重新编译
+                'debug' => \Scf\Core\App::isDevEnv(), // 开启调试模式
+            ]);
+            try {
+                self::instance()->end($twig->render($status == 404 ? '404.html' : 'error.html', ['msg' => $output['message']]));
+            } catch (LoaderError|RuntimeError|SyntaxError $e) {
+                self::instance()->end($e->getMessage());
+            }
+        }
     }
 
     /**
@@ -76,16 +96,12 @@ class Response {
      * @param $message
      * @param string $code
      * @param mixed $data
+     * @param int $status
      * @return void
      */
-    #[NoReturn] public static function interrupt($message, string $code = 'SERVICE_ERROR', mixed $data = ''): void {
-        $output = [
-            'errCode' => $code,
-            'message' => $message,
-            'data' => $data
-        ];
-        self::instance()->json($output);
-        self::instance()->stop(503);
+    #[NoReturn] public static function interrupt($message, string $code = 'SERVICE_ERROR', mixed $data = '', int $status = 503): void {
+        self::error($message, $code, $data, $status);
+        self::instance()->stop($status);
     }
 
     /**

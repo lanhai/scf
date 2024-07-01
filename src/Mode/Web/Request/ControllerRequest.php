@@ -21,7 +21,13 @@ class ControllerRequest extends Component {
     public function getControllerName(): string {
         return Request::instance()->_getControllerName();
     }
-
+    /**
+     * 返回module name
+     * @return string
+     */
+    public function getModuleName(): string {
+        return Request::instance()->_getModuleName();
+    }
     /**
      * 判断是否是POST请求
      * @return bool

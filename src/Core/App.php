@@ -2,7 +2,10 @@
 
 namespace Scf\Core;
 
+use FilesystemIterator;
 use JetBrains\PhpStorm\Pure;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use Scf\App\Installer;
 use Scf\App\Updater;
 use Scf\Client\Http;
@@ -79,6 +82,24 @@ class App {
      */
     public static function path(): ?string {
         return self::installer()->app_path;
+    }
+
+    public static function clearTemplateCache(): void {
+        $dir = APP_TMP_PATH . 'template';
+        if (!is_dir($dir)) {
+            return;
+        }
+        $files = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($files as $fileinfo) {
+            $todo = ($fileinfo->isDir() ? 'rmdir' : 'unlink');
+            if (!@$todo($fileinfo->getRealPath())) {
+                Console::error("Failed to delete {$fileinfo->getRealPath()}");
+            }
+        }
+        rmdir($dir);
     }
 
     /**
