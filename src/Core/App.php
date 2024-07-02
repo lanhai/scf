@@ -85,7 +85,7 @@ class App {
     }
 
     public static function clearTemplateCache(): void {
-        $dir = APP_TMP_PATH . 'template';
+        $dir = APP_TMP_PATH . '/template';
         if (!is_dir($dir)) {
             return;
         }
@@ -109,15 +109,15 @@ class App {
      */
     public static function mount(string $mode = MODE_CGI): void {
         if (!self::installer()->isInstalled() && self::isDevEnv()) {
-            Console::error("[LOAD]无法挂载至:" . SCF_APPS_ROOT . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
+            Console::error("[LOAD]无法挂载至:" . SCF_APPS_ROOT . '/' . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
             exit();
         }
         //应用ID
         !defined('APP_ID') and define('APP_ID', self::installer()->appid ?? 'scf_app');
         //项目视图路径
-        !defined('APP_VIEW_PATH') and define('APP_VIEW_PATH', self::src() . 'template/');
+        !defined('APP_VIEW_PATH') and define('APP_VIEW_PATH', self::src() . '/template');
         //项目库路径
-        !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . 'lib/');
+        !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . '/lib');
         Config::init();
         //加载应用第三方库
         $vendorLoader = self::src() . '/vendor/autoload.php';
@@ -132,7 +132,11 @@ class App {
      * @return string
      */
     public static function src(): string {
-        return self::installer()->src();
+        if (defined('APP_SRC_DIR')) {
+            return APP_SRC_DIR;
+        }
+        define('APP_SRC_DIR', self::installer()->src());
+        return APP_SRC_DIR;
     }
 
     /**
@@ -147,7 +151,7 @@ class App {
      * @return string
      */
     public static function core($version = null): string {
-        return APP_BIN_DIR . 'v-' . ($version ?: self::version()) . '.app';
+        return APP_BIN_DIR . '/v-' . ($version ?: self::version()) . '.app';
     }
 
     /**
@@ -184,7 +188,7 @@ class App {
      * @return array
      */
     public static function all(): array {
-        $jsonFile = SCF_APPS_ROOT . 'apps.json';
+        $jsonFile = SCF_APPS_ROOT . '/apps.json';
         if (file_exists($jsonFile)) {
             clearstatcache();
             $apps = File::readJson($jsonFile);
@@ -320,8 +324,8 @@ class App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            is_dir(APP_LIB_PATH . 'Controller') and $entryScripts = Dir::scan(APP_LIB_PATH . 'Controller/', 2);
-            is_dir(APP_LIB_PATH . 'Service') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . 'Service/', 2)];
+            is_dir(APP_LIB_PATH . '/Controller') and $entryScripts = Dir::scan(APP_LIB_PATH . '/Controller/', 2);
+            is_dir(APP_LIB_PATH . '/Service') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Service/', 2)];
         } else {
             $entryScripts = Dir::scan(APP_LIB_PATH, 2);
         }
@@ -371,7 +375,7 @@ class App {
         }
         $_fileName .= $className . '.php';
         $namespaceInfo = explode('\\', $namespace);
-        $fileName = APP_LIB_PATH . $_fileName;
+        $fileName = APP_LIB_PATH . '/' . $_fileName;
         if ($fileName) {
             $fileName = str_replace('\\', DIRECTORY_SEPARATOR, $fileName);
             if (file_exists($fileName)) {

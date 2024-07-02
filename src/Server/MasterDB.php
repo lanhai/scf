@@ -273,7 +273,7 @@ class MasterDB {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'addLog' command"));
                 }
                 //本地化
-                $dir = APP_LOG_PATH . $data[0] . '/';
+                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
                 if (!is_dir($dir)) {
                     mkdir($dir, 0775, true);
                 }
@@ -299,7 +299,7 @@ class MasterDB {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'countLog' command"));
                 }
                 $day = $data[1];
-                $dir = APP_LOG_PATH . $data[0] . '/';
+                $dir = APP_LOG_PATH. '/' . $data[0] . '/';
                 $fileName = $dir . $day . '.log';
 
                 $line = 0; //初始化行数
@@ -321,7 +321,7 @@ class MasterDB {
             });
             $server->setHandler('getLog', function ($fd, $data) use ($server) {
                 $day = $data[1];
-                $dir = APP_LOG_PATH . $data[0] . '/';
+                $dir = APP_LOG_PATH. '/' . $data[0] . '/';
                 $start = $data[2];
                 $size = $data[3];
                 $fileName = $dir . $day . '.log';
@@ -473,8 +473,8 @@ class MasterDB {
             mkdir($dir, 0775, true);
         }
         $handler = $rotating ?
-            new RotatingFileHandler($dir . $name . '.log', 100, $level) :
-            new StreamHandler($dir . $name . '.log', $level);
+            new RotatingFileHandler($dir. '/' . $name . '.log', 100, $level) :
+            new StreamHandler($dir. '/' . $name . '.log', $level);
         $logger = new Logger($name);
         $logger->pushHandler($handler);
 

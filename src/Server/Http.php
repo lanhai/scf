@@ -138,7 +138,7 @@ class Http extends \Scf\Core\Server {
      */
     public function start(): void {
         Co::set(['hook_flags' => SWOOLE_HOOK_ALL]);
-        $configFile = App::src() . 'config/server.php';
+        $configFile = App::src() . '/config/server.php';
         $serverConfig = file_exists($configFile) ? require_once $configFile : [
             'port' => 9580,
             'enable_coroutine' => true,
@@ -188,7 +188,7 @@ class Http extends \Scf\Core\Server {
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
             'reload_async' => true,
             'daemonize' => Manager::instance()->issetOpt('d'),
-            'log_file' => APP_PATH . 'log/server.log',
+            'log_file' => APP_PATH . '/log/server.log',
             'pid_file' => SERVER_MASTER_PID_FILE,
             'task_worker_num' => $serverConfig['task_worker_num'] ?? 128,
             'task_enable_coroutine' => true,
@@ -197,7 +197,7 @@ class Http extends \Scf\Core\Server {
             'max_concurrency' => $serverConfig['max_concurrency'] ?? 2048,//最高并发
         ];
         if (SERVER_ENABLE_STATIC_HANDER || Env::isDev()) {
-            $setting['document_root'] = APP_PATH . 'public';
+            $setting['document_root'] = APP_PATH . '/public';
             $setting['enable_static_handler'] = true;
             $setting['http_autoindex'] = true;
             $setting['http_index_files'] = ['index.html'];
@@ -566,7 +566,7 @@ INFO;
     protected function watchFileChange(): void {
         $pid = Coroutine::create(function () {
             if (APP_RUN_MODE == 'src') {
-                $appFiles = Dir::scan(APP_PATH . 'src');
+                $appFiles = Dir::scan(APP_PATH . '/src');
             } else {
                 $appFiles = [];
             }

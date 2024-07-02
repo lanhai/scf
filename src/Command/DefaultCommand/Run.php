@@ -34,7 +34,7 @@ class Run implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         Core::initialize();
-        if ($action && file_exists(APP_PATH . $action . ".php") && $action != 'help') {
+        if ($action && file_exists(APP_PATH . '/' . $action . ".php") && $action != 'help') {
             require APP_PATH . $action . ".php";
         }
         return Manager::instance()->displayCommandHelp($this->commandName());

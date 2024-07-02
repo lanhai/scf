@@ -21,8 +21,8 @@ class Config {
      * 加载系统配置,环境配置
      */
     public static function init(): void {
-        self::load(App::src() . 'config/app.php');
-        $file = App::src() . 'config/app_' . strtolower(APP_RUN_ENV) . '.php';
+        self::load(App::src() . '/config/app.php');
+        $file = App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.php';
         is_file($file) and self::load($file);
 
     }

@@ -35,7 +35,7 @@ return [
                     'account' => 'default',
                     'REGION_ID' => '',
                     'LOG' => false,
-                    'APP_LOG_PATH' => APP_PATH . 'log/alioss/',
+                    'APP_LOG_PATH' => APP_PATH . '/log/alioss/',
                     'DISPLAY_LOG' => false,
                     'OSS_HOST' => '',
                     'BUCKET' => '',

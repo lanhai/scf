@@ -18,7 +18,7 @@ class CpCreater extends Base {
      * @param string $ar
      * @return mixed
      */
-    public function selectDir(string $path = APP_PATH . 'cp/src/views', string $ar = ""): mixed {
+    public function selectDir(string $path = APP_PATH . '/cp/src/views', string $ar = ""): mixed {
         App::loadModules();
         if ($ar) {
             $this->setConfig('ar_namespace', $ar);
@@ -129,8 +129,8 @@ class CpCreater extends Base {
                 $arFile = $this->receive();
             }
             if ($arFile) {
-                if (!file_exists(APP_LIB_PATH . str_replace("\\", "/", $arFile) . '.php')) {
-                    $this->print("AR文件不存在:" . APP_LIB_PATH . str_replace("\\", "/", $arFile) . '.php');
+                if (!file_exists(APP_LIB_PATH . '/' . str_replace("\\", "/", $arFile) . '.php')) {
+                    $this->print("AR文件不存在:" . APP_LIB_PATH. '/' . str_replace("\\", "/", $arFile) . '.php');
                     return $this->createController();
                 }
                 $nameSpaceArr = explode('/', $arFile);
@@ -180,7 +180,7 @@ class CpCreater extends Base {
                     ];
                 }
                 $settingFileName = StringHelper::camel2lower($this->getConfig('module_name')) . '_' . StringHelper::camel2lower($fileName) . ".json";
-                $jsonFile = APP_PATH . "cp/src/data/render/" . $settingFileName;
+                $jsonFile = APP_PATH . "/cp/src/data/render/" . $settingFileName;
                 if (!$this->writeFile($jsonFile, json_encode($mapSetting, 256))) {
                     $this->print("文件[" . $jsonFile . "]创建失败!,请确认拥有相关权限后重试!");
                     return $this->createAuthNode();
@@ -200,18 +200,18 @@ class CpCreater extends Base {
             $apiModuleName = StringHelper::lower2camel($this->getConfig('module_name'));
             $apiControllerName = StringHelper::lower2camel($apiControllerName);
             if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                $apiControllerPath = APP_LIB_PATH . 'Controller/Admin/' . StringHelper::lower2camel($apiModuleName);
+                $apiControllerPath = APP_LIB_PATH . '/Controller/Admin/' . StringHelper::lower2camel($apiModuleName);
             } else {
-                $apiControllerPath = APP_LIB_PATH . 'Admin/Controller/' . StringHelper::lower2camel($apiModuleName);
+                $apiControllerPath = APP_LIB_PATH . '/Admin/Controller/' . StringHelper::lower2camel($apiModuleName);
             }
             $this->print("回车创建控制器文件[" . $apiControllerName . ".php]到:" . $apiControllerPath . "目录,若需要在其它目录创建,请输入文件夹名称");
             $dirName = $this->receive();
             if ($dirName) {
                 $apiModuleName = $dirName;
                 if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                    $apiControllerPath = APP_LIB_PATH . 'Controller/Admin/' . StringHelper::lower2camel($dirName);
+                    $apiControllerPath = APP_LIB_PATH . '/Controller/Admin/' . StringHelper::lower2camel($dirName);
                 } else {
-                    $apiControllerPath = APP_LIB_PATH . 'Admin/Controller/' . StringHelper::lower2camel($dirName);
+                    $apiControllerPath = APP_LIB_PATH . '/Admin/Controller/' . StringHelper::lower2camel($dirName);
                 }
             }
             if (!is_dir($apiControllerPath) && !mkdir($apiControllerPath, 0777, true)) {

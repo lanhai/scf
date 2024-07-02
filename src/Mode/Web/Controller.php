@@ -48,16 +48,21 @@ abstract class Controller {
     }
 
     protected function display($theme = 'default'): void {
-        $tplPath = App::src() . 'template/' . (StringHelper::camel2lower($this->request()->getModuleName())) . '/' . $theme . '/' . (StringHelper::camel2lower($this->request()->getControllerName())) . '/';
+        //TODO 根据应用规模(module_style)变更模板路径目录
+        $tplPath = App::src() . '/template/' . (StringHelper::camel2lower($this->request()->getModuleName())) . '/' . $theme . '/' . (StringHelper::camel2lower($this->request()->getControllerName())) . '/';
         $tplFile = StringHelper::camel2lower($this->request()->getActionName()) . '.html';
+        if (!file_exists($tplPath . $tplFile) && $theme == 'default') {
+            //尝试查找非主题目录
+            $tplPath = App::src() . '/template/' . (StringHelper::camel2lower($this->request()->getModuleName())) . '/' . (StringHelper::camel2lower($this->request()->getControllerName())) . '/';
+        }
         if (!file_exists($tplPath . $tplFile)) {
             Response::interrupt(App::isDevEnv() ? '模板文件:' . ($tplPath . $tplFile) . ' 不存在' : '系统繁忙,请稍后重试');
         } else {
             $loader = new FilesystemLoader($tplPath);
             $twig = new Environment($loader, [
-                'cache' => APP_TMP_PATH . 'template',
+                'cache' => APP_TMP_PATH . '/template',
                 'auto_reload' => true,  // 当模板文件修改时自动重新编译
-                'debug' => App::isDevEnv(),       // 开启调试模式
+                'debug' => App::isDevEnv(), // 开启调试模式
             ]);
             try {
                 Response::exit($twig->render($tplFile, $this->_tplValues));

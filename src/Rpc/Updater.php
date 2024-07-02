@@ -100,10 +100,10 @@ class Updater {
         $paths = explode("\\", $service['service']['namespace']);
         $appMode = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($appMode == APP_MODULE_STYLE_LARGE) {
-            $fileDir = APP_LIB_PATH . $paths[1] . '/' . $paths[2];
+            $fileDir = APP_LIB_PATH. '/' . $paths[1] . '/' . $paths[2];
             $clientFile = $fileDir . '/' . $paths[3] . '.php';
         } else {
-            $fileDir = APP_LIB_PATH . '/' . $paths[1];
+            $fileDir = APP_LIB_PATH. '/' . '/' . $paths[1];
             $clientFile = $fileDir . '/' . $paths[2] . '.php';
         }
         if (!is_dir($fileDir) && !mkdir($fileDir, 0775, true)) {

@@ -73,10 +73,10 @@ class App extends \Scf\Core\App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            is_dir(self::src() . 'lib/Controller/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Controller/' . $service, 1);
-            is_dir(self::src() . 'lib/Service/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Service/' . $service, 1);
+            is_dir(self::src() . '/lib/Controller/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Controller/' . $service, 1);
+            is_dir(self::src() . '/lib/Service/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Service/' . $service, 1);
         } else {
-            $entryScripts = Dir::scan(self::src() . 'lib/' . $service . '/Service', 1);
+            $entryScripts = Dir::scan(self::src() . '/lib/' . $service . '/Service', 1);
         }
         $modules = [];
         if ($entryScripts) {

@@ -107,7 +107,7 @@ class Updater {
         }
         if ($versionInfo['public_object']) {
             Log::instance()->info("开始下载資源包:" . $versionInfo['server'] . $versionInfo['public_object']);
-            $publicFilePath = APP_UPDATE_DIR . 'app-v' . $version . '.public.zip';
+            $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
             $port = $versionInfo['port'] ?? 80;
             $client = new Client($versionInfo['server'], $port, $port == 443);
             $client->set(['timeout' => -1]);
@@ -147,7 +147,7 @@ class Updater {
         }
         if ($versionInfo['app_object']) {
             Log::instance()->info("开始下载源码包:" . $versionInfo['server'] . $versionInfo['app_object']);
-            $updateFilePath = APP_UPDATE_DIR . 'app-v' . $version . '.scfupdate';
+            $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
             $host = $versionInfo['server'];
             $port = $versionInfo['port'] ?? 80;
             $client = new Client($host, $port, $port == 443);
@@ -193,7 +193,7 @@ class Updater {
             'version' => $version,
             'remark' => $versionInfo['remark']
         ];
-        File::write(APP_PATH . 'update/update.log', JsonHelper::toJson($log), true);
+        File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
         //Log::instance()->info("已更新至版本:" . $version);
         clearstatcache();
         return true;

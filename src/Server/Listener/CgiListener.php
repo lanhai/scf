@@ -183,7 +183,7 @@ class CgiListener extends Listener {
                 $sessionId = Sn::create_uuid();
                 Response::instance()->setCookie('_SESSIONID_', $sessionId);
             }
-            $cookieFile = APP_PATH . 'tmp/dashboard_' . $sessionId . '.cookie';
+            $cookieFile = APP_PATH . '/tmp/dashboard_' . $sessionId . '.cookie';
             if (file_exists($cookieFile)) {
                 $client->setHeader('Cookie', File::read($cookieFile));
             }

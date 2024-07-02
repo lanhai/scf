@@ -4,11 +4,14 @@ namespace Scf\Core;
 
 use JetBrains\PhpStorm\NoReturn;
 use Scf\Command\Color;
+use Scf\Helper\ArrayHelper;
 use Scf\Server\Http;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Time;
 use Swoole\Event;
 use Swoole\Timer;
+use function Laravel\Prompts\select;
+use function Laravel\Prompts\text;
 
 /**
  * 带推送功能的控制台打印
@@ -78,23 +81,61 @@ class Console {
 
     /**
      * 接收控制台输入内容
-     * @param null $msg
-     * @param bool $break
+     * @param $label
+     * @param string|null $default
+     * @param bool $required
+     * @param string|null $placeholder
+     * @param string|null $hint
      * @return string
      */
-    public static function input($msg = null, bool $break = true): string {
-        !is_null($msg) and self::write($msg ?: '请输入内容', $break);
-        return self::receive();
+    public static function input($label = null, ?string $default = null, bool $required = true, ?string $placeholder = null, ?string $hint = null): string {
+        return text(
+            label: $label ?: '请输入',
+            placeholder: $placeholder ?: '',
+            default: $default ?: '',
+            required: $required,
+            hint: $hint ?: ''
+        );
+    }
+//    /**
+//     * 接收控制台输入内容
+//     * @param null $msg
+//     * @param bool $break
+//     * @return string
+//     */
+//    public static function input($msg = null, bool $break = true): string {
+//        !is_null($msg) and self::write($msg ?: '请输入内容', $break);
+//        return self::receive();
+//    }
+    public static function select($options = [], mixed $default = 0, int $start = 1, ?string $label = null): string {
+        if (ArrayHelper::isAssociative($options)) {
+            return select(
+                label: $label ?: '请选择要执行的操作',
+                options: $options,
+                default: $default == 0 ? $options[0] : $default,
+            );
+        }
+        $arr = [];
+        foreach ($options as $k => $option) {
+            if ($start > 0) {
+                $arr[$k + $start] = $option;
+            }
+        }
+        return select(
+            label: $label ?: '请选择要执行的操作',
+            options: $arr,
+            default: $default
+        );
     }
 
-    public static function select($options = []): string {
-        self::line();
-        foreach ($options as $k => $app) {
-            Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
-        }
-        self::line();
-        return self::input('输入要进行的操作编号:', false);
-    }
+//    public static function select($options = []): string {
+//        self::line();
+//        foreach ($options as $k => $app) {
+//            Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
+//        }
+//        self::line();
+//        return self::input('输入要进行的操作编号:', false);
+//    }
 
     /**
      * 开始loading
@@ -185,7 +226,7 @@ class Console {
      * @return void
      */
     public static function warning(string $str, bool $push = true): void {
-        self::log(Color::yellow($str), $push);
+        self::log(Color::brown($str), $push);
     }
 
     /**

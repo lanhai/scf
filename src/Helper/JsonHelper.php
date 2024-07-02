@@ -34,8 +34,11 @@ class JsonHelper {
      * @return bool
      */
     public static function is($data): bool {
-        if (is_array($data)) {
+        if (!is_string($data)) {
             return false;
+        }
+        if (function_exists('json_validate')) {
+            return json_validate($data);
         }
         try {
             json_decode($data);

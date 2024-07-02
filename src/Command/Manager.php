@@ -3,6 +3,7 @@
 namespace Scf\Command;
 
 use Scf\Core\Traits\Singleton;
+use Scf\Util\Dir;
 
 class Manager {
     use Singleton;
@@ -78,7 +79,7 @@ class Manager {
         $handler = $this->commands[$command];
         //定义应用路径
         $options = $this->getOpts();
-        !defined('SCF_APPS_ROOT') and define("SCF_APPS_ROOT", ($options['apps'] ?? SCF_ROOT . '/../apps') . '/');
+        !defined('SCF_APPS_ROOT') and define("SCF_APPS_ROOT", ($options['apps'] ?? dirname(SCF_ROOT)) . '/apps');
         return $handler->exec();
     }
 

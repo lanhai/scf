@@ -555,7 +555,7 @@ class Crontab {
      * @return false|string
      */
     protected function getOverridesConfigFileName(): bool|string {
-        $dir = APP_PATH . 'src/config/crontab';
+        $dir = APP_PATH . '/src/config/crontab';
         if (!file_exists($dir)) {
             try {
                 mkdir($dir, 0777, true);
