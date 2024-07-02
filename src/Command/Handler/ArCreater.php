@@ -3,10 +3,12 @@
 namespace Scf\Command\Handler;
 
 use JetBrains\PhpStorm\NoReturn;
+use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Database\Pdo;
 use Scf\Helper\ObjectHelper;
+use Throwable;
 
 class ArCreater {
     protected string $table;
@@ -16,8 +18,6 @@ class ArCreater {
 
 
     public function run(): void {
-        Console::line();
-        Console::write('请输入数据库配置名称(缺省:default):', false);
         $this->setDB();
     }
 
@@ -27,31 +27,32 @@ class ArCreater {
      * @return mixed
      */
     public function setDB($db = null): mixed {
-        $inputDb = Console::input();
-        $input = $inputDb ?: ($db ?: 'default');
+        $allDB = Config::get('database')['mysql'] ?? [];
+        $options = [];
+        foreach ($allDB as $k => $c) {
+            $options[$k] = $k;
+        }
+        $input = Console::select($options, ($db ?: 'default'), label: "请选择数据库");
+        Console::line();
         try {
-            $allDB = Config::get('database')['mysql'] ?? [];
             //查找验证数据库
             $this->setConfig('db', $input);
             if (empty($this->db())) {
                 Console::error($input . '=>数据库连接失败!');
-                Console::write("请确认输入正确并重试:", false);
                 return $this->setDB();
             }
-            Console::line();
             Console::success('#' . $input . '[' . $allDB[$input]['name'] . ']连接成功');
-            Console::write("请输入表名称(无需加前缀):", false);
+            Console::line();
             return $this->setTABLE();
         } catch (\PDOException $e) {
-            Console::line();
             Console::error($input . '=>数据库连接失败:' . $e->getMessage());
-        } catch (\Swoole\ExitException) {
+        } catch (\Swoole\ExitException $exception) {
+            Console::warning($exception->getMessage());
             return false;
-        } catch (\Throwable $exception) {
-            Console::line();
+        } catch (Throwable $exception) {
             Console::error($input . '=>数据库连接失败:' . $exception->getMessage());
         }
-        Console::write('请确认输入正确并重试:', false);
+        Console::line();
         return $this->setDB();
     }
 
@@ -60,29 +61,27 @@ class ArCreater {
      * @return mixed
      */
     protected function setTABLE(): mixed {
-        $input = Console::input();
-        if (!$input) {
-            Console::write('请输入正确的数据表名称:', false);
-            return $this->setTABLE();
+        $input = Console::input("请输入表名称", hint: '表名称无需添加修饰前缀,输入"<"返回上一步');
+        if ($input == '<') {
+            return $this->setDB();
         }
         //拼接完整表名
         $tablePrefix = $this->db()->getConfig('prefix');
         $completeTable = $tablePrefix . $input;
         //验证表明
         $dbName = $this->db()->getConfig('name');
+        Console::line();
         try {
             $sql = "SHOW FULL COLUMNS FROM {$completeTable} FROM {$dbName}";
             $result = $this->db()->getDatabase()->exec($sql)->get();;
             $this->setConfig('columns', $result);
-        } catch (\Throwable $e) {
-            Console::line();
+        } catch (Throwable $e) {
             Console::error('读取数据表失败:' . $e->getMessage());
-            console::write('请确认输入无误后重试:', false);
+            Console::line();
             return $this->setTABLE();
         }
-        Console::success('数据表连接成功,请输入要创建的文件路径,路径需严格遵循驼峰命名约定,示范:Demo/Dao/TestDao');
+        Console::success('数据表连接成功');
         Console::line();
-        console::write('输入DAO文件路径:', false);
         $this->setConfig('table', $input);
         $this->setConfig('prefix', $tablePrefix);
         return $this->setPATH();
@@ -90,27 +89,20 @@ class ArCreater {
 
     /**
      * 设置文件路径
+     * @param string $label
      * @return mixed
      */
-    protected function setPATH(): mixed {
-        $input = Console::input();
-        if (!$input) {
-            if (!$input = $this->getConfig('path')) {
-                Console::write('请输入正确的文件路径:', false);
-                return $this->setPATH();
-            }
-        }
+    protected function setPATH(string $label = '请输入要创建的文件路径'): mixed {
+        $input = Console::input($label, default: $this->getConfig('path'), hint: '路径需严格遵循驼峰命名约定,示范:Demo/Dao/TestDao');
         //分析检查路径
         $nameSpaceArr = explode('/', $input);
-        if (empty($nameSpaceArr)) {
-            Console::write('路径不合法,请严格遵循规范创建,示范:Demo/Model/TestAR');
-            Console::line();
-            return $this->setPATH();
+        if (count($nameSpaceArr) < 2) {
+            return $this->setPATH('路径不合法,请严格遵循规范创建');
         }
         $this->setConfig('path', $input);
         $pathArr = explode('/', $input);
         $className = $pathArr[count($pathArr) - 1];
-        $filePath = APP_PATH . "src/lib/";
+        $filePath = APP_PATH . "/src/lib/";
         $nameSpace = [];
         foreach ($nameSpaceArr as $k => $v) {
             if ($k == count($nameSpaceArr) - 1) {
@@ -122,21 +114,18 @@ class ArCreater {
         $nameSpace = implode('\\', $nameSpace);
         $filePath = substr($filePath, 0, -1);
         if (!is_dir($filePath) && (!mkdir($filePath, 0777, true) || !chmod($filePath, 0777))) {
-            Console::write('创建文件夹出错,请确认拥有写入权限后重试(敲击回车重试)');
+            Console::warning('创建文件夹出错,请确认拥有写入权限后重试');
             Console::line();
             return $this->setPATH();
         }
         if (file_exists($filePath . '/' . $className . '.php')) {
-            Console::write("文件[" . $filePath . "/" . $className . ".php]已存在,请选择下一步操作\n1:使用别的路径/文件名称\n2:覆盖现有文件");
-            Console::line();
-            $choose = intval(Console::input());
+            $choose = Console::select(['使用别的路径/文件名称', '覆盖现有文件'], 2, label: "文件[" . $filePath . "/" . $className . ".php]已存在,请选择下一步操作");
             if (!$choose || $choose > 2) {
-                Console::write('请输入正确的选择');
+                Console::warning('请输入正确的选择');
+                Console::line();
                 return $this->setPATH();
             }
             if ($choose == 1) {
-                Console::write('请输入要创建的文件路径,路径需严格遵循驼峰命名约定,示范:Demo/Model/TestAR');
-                Console::line();
                 return $this->setPATH();
             }
         }
@@ -144,21 +133,6 @@ class ArCreater {
         $this->setConfig('class_name', $className);
         $this->setConfig('file_path', $filePath);
         return $this->createFILE();
-//        Console::write("校验通过,确定要执行创建操作吗\n1:确定创建[" . $filePath . "/" . $className . ".php]\n2:重置文件参数\n3:退出");
-//        $choose = intval(Console::input());
-//        if (!$choose || $choose > 3) {
-//            Console::write('请输入正确的选择');
-//            return $this->setPATH();
-//        }
-//        if ($choose == 1) {
-//            return $this->createFILE();
-//        } elseif ($choose == 2) {
-//            $this->resetConfig();
-//            Console::write("请输入数据库名称");
-//            return $this->setDB();
-//        } else {
-//            $this->exit();
-//        }
     }
 
     protected function createFILE() {
@@ -169,7 +143,7 @@ class ArCreater {
         $nameSpace = $this->getConfig('name_space');
         $className = $this->getConfig('class_name');
         if (!$this->db()) {
-            Console::write('数据库连接超时,请输入数据库名称');
+            Console::warning('数据库连接超时,请输入数据库名称');
             Console::line();
             return $this->setDB();
         }
@@ -325,32 +299,25 @@ EOF;
         $res = fwrite($fileHandle, $file);
         fclose($fileHandle);
         if (!$res) {
-            Console::write("文件创建失败,请确认拥有相关路径写入权限后重试\n1:重试\n2:重设文件参数\n3:退出创建工具");
-            Console::line();
-            $choose = intval(Console::input());
+            $choose = Console::select(['重试', '重设文件参数', '退出创建工具'], default: 1, label: '文件创建失败,请确认拥有相关路径写入权限后重试');
             if ($choose == 1) {
                 return $this->createFILE();
             } elseif ($choose == 3) {
                 $this->exit();
             } else {
                 $this->resetConfig();
-                Console::write("请输入数据库名称");
                 return $this->setDB();
             }
         }
         Console::line();
-        Console::success("文件创建成功!请选择下一步操作\n");
-        Console::write("1:创建其它数据结构文件(回车)\n2:创建管理面板Vue文件\n3:退出创建工具\n输入选项序号(回车选1):", false);
-        $choose = intval(Console::input());
+        $choose = Console::select(['创建其它数据结构文件', '创建管理面板Vue文件', '退出创建工具'], default: 1, label: Color::success('文件创建成功!请选择下一步操作'));
         if ($choose == 2) {
             $cpCreater = new CpCreater();
-            return $cpCreater->selectDir(APP_PATH . 'cp/src/views', $nameSpace . '\\' . $className);
+            return $cpCreater->selectDir(APP_PATH . '/cp/src/views', $nameSpace . '\\' . $className);
         } elseif ($choose == 3) {
             $this->exit();
         } else {
             $this->resetConfig();
-            Console::line();
-            Console::write("请输入数据库名称(回车继续在'{$db}'下创建):", false);
             return $this->setDB($db);
         }
     }
@@ -417,20 +384,15 @@ EOF;
         return true;
     }
 
-    protected function resetConfig() {
+    protected function resetConfig(): void {
         $this->config = [];
     }
 
-    /**
-     * 输出消息到控制台
-     * @param $msg
-     */
-    protected function print($msg) {
-        Console::write("------------------------------------------------【" . date('H:i:s', time()) . "】------------------------------------------------\n" . $msg . "\n------------------------------------------------------------------------------------------------------------");
-    }
 
     #[NoReturn] protected function exit(): void {
-        $this->print('bye!');
+        Console::line();
+        Console::write('bye!');
+        Console::line();
         exit;
     }
 }

@@ -10,6 +10,33 @@ class Dir {
     protected static array $fileList = [];
 
     /**
+     * 规范化路径，去掉 /../ 和 /./
+     * @param string $path 要规范化的路径
+     * @return string 规范化后的路径
+     */
+    public static function normalizePath(string $path): string {
+        if ($repath = realpath($path)) {
+            return $repath;
+        }
+        $parts = array(); // 存储路径的各个部分
+        $segments = explode('/', $path); // 将路径按 / 分割成各个部分
+        foreach ($segments as $segment) {
+            if ($segment == '.' || $segment == '') {
+                // 忽略当前目录标识和空部分
+                continue;
+            }
+            if ($segment == '..') {
+                // 遇到上一级目录标识时，弹出上一个部分
+                array_pop($parts);
+            } else {
+                // 否则将部分加入数组
+                $parts[] = $segment;
+            }
+        }
+        return '/' . implode('/', $parts);
+    }
+
+    /**
      * 清空目标目录
      * @param $dir
      * @return bool

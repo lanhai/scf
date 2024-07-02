@@ -79,7 +79,7 @@ class Response {
         } else {
             $loader = new FilesystemLoader(__DIR__ . '/Template');
             $twig = new Environment($loader, [
-                'cache' => APP_TMP_PATH . 'template',
+                'cache' => APP_TMP_PATH . '/template',
                 'auto_reload' => true,  // 当模板文件修改时自动重新编译
                 'debug' => \Scf\Core\App::isDevEnv(), // 开启调试模式
             ]);

@@ -372,7 +372,7 @@ class Oss extends Aliyun {
             } catch (Throwable $e) {
                 return Result::error($e->getMessage());
             }
-//            $tmpFile = APP_TMP_PATH . $object;
+//            $tmpFile = APP_TMP_PATH.'/' . $object;
 //            $result = $client->download($tmpFile);
         }
         if ($result->hasError()) {

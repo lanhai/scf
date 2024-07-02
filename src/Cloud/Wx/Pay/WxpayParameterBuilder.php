@@ -35,7 +35,7 @@ class WxpayParameterBuilder extends Component {
     public static function build(string $appid, string $version = 'v3', ?array $pem = null): static {
         $obj = self::instance()->version($version)->appid($appid);
         if (!is_null($pem)) {
-            $caFilePath = APP_PATH . 'tmp/wxpay/pem/' . $appid . '/';
+            $caFilePath = APP_PATH . '/tmp/wxpay/pem/' . $appid . '/';
             if (!is_dir($caFilePath)) {
                 mkdir($caFilePath, 0777, true);
             }

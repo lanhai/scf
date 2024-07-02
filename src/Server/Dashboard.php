@@ -133,10 +133,10 @@ class Dashboard {
                     'max_wait_time' => 60,
                     'reload_async' => true,
                     'daemonize' => $daemonize,
-                    'log_file' => APP_PATH . 'log/server.log',
+                    'log_file' => APP_PATH . '/log/server.log',
                     'pid_file' => SERVER_DASHBOARD_PID_FILE,
                 ];
-                $setting['document_root'] = Root::dir() . '/../public';
+                $setting['document_root'] = Root::root() . '/public';
                 $setting['enable_static_handler'] = true;
                 $setting['http_autoindex'] = true;
                 $setting['static_handler_locations'] = ['/dashboard'];

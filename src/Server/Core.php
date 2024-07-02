@@ -40,7 +40,7 @@ class Core {
         }
         $path = $options['app'] ?? ($appDir ?: 'app');
         !defined('APP_RUN_ENV') and define('APP_RUN_ENV', Manager::instance()->issetOpt('dev') ? 'dev' : ($options['env'] ?? ($appEnv ?: 'production')));
-        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
+        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . '/' . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
 
         if (App::all() && !isset($options['app']) && !$appDir) {
             Console::error("请使用'-app'参数指定应用目录");
@@ -56,7 +56,6 @@ class Core {
             $app->node_id = $options['alias'] ?? Sn::create_guid();
         }
         $app->update();
-
         !defined('SERVER_NAME') and define('SERVER_NAME', $options['alias'] ?? $app->app_path);
         !defined('SERVER_ROLE') and define('SERVER_ROLE', $role);
         !defined('SERVER_MODE') and define('SERVER_MODE', $mode);
@@ -64,12 +63,12 @@ class Core {
         !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? 0);
         !defined('MDB_PORT') and define('MDB_PORT', $options['mport'] ?? 16379);
         !defined('SERVER_NODE_ID') and define('SERVER_NODE_ID', strtolower(SERVER_ROLE) . '-' . $app->node_id);
-        !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '.pid');
-        !defined('SERVER_MASTER_DB_PID_FILE') and define('SERVER_MASTER_DB_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '_master_db.pid');
-        !defined('SERVER_RPC_PID_FILE') and define('SERVER_RPC_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '_rpc.pid');
-        !defined('SERVER_DASHBOARD_PID_FILE') and define('SERVER_DASHBOARD_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '_dashboard.pid');
-        !defined('SERVER_QUEUE_MANAGER_PID_FILE') and define('SERVER_QUEUE_MANAGER_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '_queue_manager.pid');
-        !defined('SERVER_CRONTAB_MANAGER_PID_FILE') and define('SERVER_CRONTAB_MANAGER_PID_FILE', SCF_ROOT . '/../var/' . $path . '_' . SERVER_ROLE . '_crontab_manager.pid');
+        !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');
+        !defined('SERVER_MASTER_DB_PID_FILE') and define('SERVER_MASTER_DB_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_master_db.pid');
+        !defined('SERVER_RPC_PID_FILE') and define('SERVER_RPC_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_rpc.pid');
+        !defined('SERVER_DASHBOARD_PID_FILE') and define('SERVER_DASHBOARD_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_dashboard.pid');
+        !defined('SERVER_QUEUE_MANAGER_PID_FILE') and define('SERVER_QUEUE_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_queue_manager.pid');
+        !defined('SERVER_CRONTAB_MANAGER_PID_FILE') and define('SERVER_CRONTAB_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_crontab_manager.pid');
         //是否开启定时任务
         !defined('SERVER_CRONTAB_ENABLE') and define('SERVER_CRONTAB_ENABLE', $options['crontab'] ?? SWITCH_ON);
         //是否开启日志机器人推送
@@ -80,35 +79,35 @@ class Core {
         !defined('PRINT_MYSQL_LOG') and define('PRINT_MYSQL_LOG', Manager::instance()->issetOpt('print_mysql_logs'));
         !defined('PRINT_REDIS_LOG') and define('PRINT_REDIS_LOG', Manager::instance()->issetOpt('print_redis_logs'));
         !defined('APP_DIR_NAME') and define('APP_DIR_NAME', $path);
-        !defined('APP_PATH') and define('APP_PATH', SCF_APPS_ROOT . $path . '/');
+        !defined('APP_PATH') and define('APP_PATH', SCF_APPS_ROOT . '/' . $path);
 
-        !defined('APP_PUBLIC_PATH') and define('APP_PUBLIC_PATH', APP_PATH . $app->public_path);
+        !defined('APP_PUBLIC_PATH') and define('APP_PUBLIC_PATH', APP_PATH . '/' . $app->public_path);
         !defined('APP_AUTH_KEY') and define('APP_AUTH_KEY', $app->app_auth_key);
         //APP DB
-        !defined('APP_RUNTIME_DB') and define('APP_RUNTIME_DB', APP_PATH . 'db/redis');
+        !defined('APP_RUNTIME_DB') and define('APP_RUNTIME_DB', APP_PATH . '/db/redis');
         //静态文件路径
-        !defined('APP_ASSET_PATH') and define('APP_ASSET_PATH', APP_PUBLIC_PATH . 'asset/');
+        !defined('APP_ASSET_PATH') and define('APP_ASSET_PATH', APP_PUBLIC_PATH . 'asset');
         //临时文件目录路径
-        !defined('APP_TMP_PATH') and define('APP_TMP_PATH', APP_PATH . 'tmp/');
+        !defined('APP_TMP_PATH') and define('APP_TMP_PATH', APP_PATH . '/tmp');
         //日志文件目录路径
-        !defined('APP_LOG_PATH') and define('APP_LOG_PATH', APP_PATH . 'log/');
+        !defined('APP_LOG_PATH') and define('APP_LOG_PATH', APP_PATH . '/log');
         //文件更新目录
-        !defined('APP_UPDATE_DIR') and define('APP_UPDATE_DIR', APP_PATH . 'update/');
-        !defined('APP_BIN_DIR') and define('APP_BIN_DIR', APP_PATH . 'bin/');
+        !defined('APP_UPDATE_DIR') and define('APP_UPDATE_DIR', APP_PATH . '/update');
+        !defined('APP_BIN_DIR') and define('APP_BIN_DIR', APP_PATH . '/bin');
         //是否启用自动更新
         !defined('APP_AUTO_UPDATE') and define('APP_AUTO_UPDATE', $options['update'] ?? 0);
         if (!file_exists(APP_TMP_PATH)) {
             mkdir(APP_TMP_PATH, 0775, true);
             mkdir(APP_TMP_PATH . '/template', 0775, true);
         }
-        if (!file_exists(SCF_ROOT . '/../var')) {
-            mkdir(SCF_ROOT . '/../var', 0775, true);
+        if (!file_exists(dirname(SCF_ROOT) . '/var')) {
+            mkdir(dirname(SCF_ROOT) . '/var', 0775, true);
         }
         if (!file_exists(APP_LOG_PATH)) {
             mkdir(APP_LOG_PATH, 0775, true);
         }
-        if (!file_exists(APP_PATH . 'db')) {
-            mkdir(APP_PATH . 'db', 0775, true);
+        if (!file_exists(APP_PATH . '/db')) {
+            mkdir(APP_PATH . '/db', 0775, true);
         }
         if (!file_exists(APP_UPDATE_DIR)) {
             mkdir(APP_UPDATE_DIR, 0775, true);

@@ -51,7 +51,7 @@ class Build implements CommandInterface {
         if ($action && method_exists($this, $action) && $action != 'help') {
             !defined('APP_RUN_MODE') and define('APP_RUN_MODE', 'src');
             define("Scf\Command\DefaultCommand\APP_RUN_MODE", 'DIR');
-            define("Scf\Command\DefaultCommand\BUILD_PATH", SCF_ROOT . '/../build/');
+            define("Scf\Command\DefaultCommand\BUILD_PATH", dirname(SCF_ROOT) . '/build/');
             Core::initialize();
             Config::init();
             define("Scf\Command\DefaultCommand\VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');
@@ -142,20 +142,20 @@ class Build implements CommandInterface {
             $remark = $config['remark'];
             Console::log('开始打包至版本:' . $num);
         } else {
-            $buildType = Console::input("请选择打包类型 1:源码打包;2:静态资源文件打包;3:全部打包(缺省)") ?: 3;
-            $num = Console::input("请输入要发布的版本号,缺省:" . $autoVersionNum);
+            $buildType = Console::select(['源码打包', '静态资源文件打包', '全部打包'], 3, label: "请选择打包类型");
+            $num = Console::input("请输入要发布的版本号", $autoVersionNum);
             $num = $num ?: $autoVersionNum;
             $name = APP_ID . "-v" . $num;
-            $remark = Console::input("请输入版本说明");
-            $remark = $remark ?: "暂无说明";
-            $resetPasswordChoice = Console::input("是否重置仪表盘管理密码 1:重置;0:不重置(缺省)");
+            $remark = Console::input("请输入版本说明", required: false, placeholder: '日常更新,暂无说明');
+            $remark = $remark ?: "日常更新,暂无说明";
+            $resetPasswordChoice = Console::select(['重置', '不重置'], default: 2, label: "是否重置仪表盘管理密码");
             $resetPassword = (int)$resetPasswordChoice == 1;
 //            $force = Console::input("请选择是否强制更新 1:是 0:否(缺省)");
 //            $force = $force == 1;
         }
         if ($buildType == 1 || $buildType == 3) {
             //将版本信息写入version文件
-            $versionFile = APP_PATH . 'src/version.php';
+            $versionFile = APP_PATH . '/src/version.php';
             $versionData = stripslashes(var_export([
                 'appid' => APP_ID,
                 'version' => $num,
@@ -177,7 +177,7 @@ class Build implements CommandInterface {
             }
             $phar = new \Phar($buildFilePath, 0, 'src');
             $phar->compress(\Phar::GZ);
-            $phar->buildFromDirectory(APP_PATH . 'src');
+            $phar->buildFromDirectory(APP_PATH . '/src');
 
             $phar->setDefaultStub('version.php', 'version.php');
             //源代码加密

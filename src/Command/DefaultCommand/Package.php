@@ -39,7 +39,7 @@ class Package implements CommandInterface {
         $arr = explode('.', $latestVersion);
         $arr[count($arr) - 1] = (int)$arr[count($arr) - 1] + 1;
         $defaultVersionNum = implode('.', $arr);
-        $version = Console::input('请输入版本号,(缺省 ' . $defaultVersionNum . '):', false) ?: $defaultVersionNum;
+        $version = Console::input('请输入版本号', $defaultVersionNum);
         Console::info('正在推送版本标签:v' . $version);
         System::exec("git tag -a v$version -m 'release v$version'")['output'];
         System::exec("git push origin v$version")['output'];

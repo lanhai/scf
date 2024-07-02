@@ -60,8 +60,8 @@ class Install implements CommandInterface {
         $appid = $options['appid'] ?? Console::input('请输入appid,缺省值:' . $defaultAppid);
         $installer->appid = $appid ?: $defaultAppid;
 
-        if (is_dir(SCF_APPS_ROOT . $installer->app_path)) {
-            Console::log(Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作:' . SCF_APPS_ROOT . $installer->app_path));
+        if (is_dir(SCF_APPS_ROOT. '/' . $installer->app_path)) {
+            Console::log(Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作:' . SCF_APPS_ROOT. '/' . $installer->app_path));
         }
         $defaultKey = Random::character(32);
         $key = $options['key'] ?? Console::input('请输入应用秘钥,缺省值:' . $defaultKey);
@@ -103,8 +103,8 @@ class Install implements CommandInterface {
         $options = $manager->getOpts();
         $path = $options['path'] ?? Console::input('请输入应用路径(位于apps下的相对路径),缺省值:app');
 
-        if (is_dir(SCF_APPS_ROOT . $path)) {
-            Console::write(Color::green('应用文件夹已存在:' . SCF_APPS_ROOT . $path));
+        if (is_dir(SCF_APPS_ROOT. '/' . $path)) {
+            Console::write(Color::green('应用文件夹已存在:' . SCF_APPS_ROOT. '/' . $path));
             //exit();
         }
         $creater = App::appoint($path);

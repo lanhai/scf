@@ -83,7 +83,7 @@ class Installer extends Struct {
         if ($isNew) {
             self::$_apps[] = $this->toArray();
         }
-        $result = File::write(SCF_APPS_ROOT . 'apps.json', JsonHelper::toJson(self::$_apps));
+        $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(self::$_apps));
         clearstatcache();
         return $result;
     }
@@ -107,8 +107,8 @@ class Installer extends Struct {
         if (!file_exists(SCF_APPS_ROOT)) {
             mkdir(SCF_APPS_ROOT, 0775, true);
         }
-        $jsonFile = SCF_APPS_ROOT . 'apps.json';
-        $appPath = SCF_APPS_ROOT . $path;
+        $jsonFile = SCF_APPS_ROOT . '/apps.json';
+        $appPath = SCF_APPS_ROOT . '/' . $path;
         if (!file_exists($appPath)) {
             if (!$create && App::isDevEnv()) {
                 Console::error("无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
@@ -151,8 +151,8 @@ class Installer extends Struct {
      * @return string
      */
     public function src(): string {
-        $package = APP_BIN_DIR . 'v-' . $this->version . '.app';
-        return APP_RUN_MODE === 'phar' ? 'phar://' . $package . '/' : APP_PATH . 'src/';
+        $package = APP_BIN_DIR . '/v-' . $this->version . '.app';
+        return APP_RUN_MODE === 'phar' ? 'phar://' . $package : APP_PATH . '/src';
     }
 
     /**
@@ -192,18 +192,18 @@ class Installer extends Struct {
             Console::write(Color::warning($this->getError()));
         }
         $this->update_server = $this->update_server ?? "";
-        if (!file_exists(SCF_APPS_ROOT . $this->app_path)) {
-            mkdir(SCF_APPS_ROOT . $this->app_path, 0755, true);
+        if (!file_exists(SCF_APPS_ROOT . '/' . $this->app_path)) {
+            mkdir(SCF_APPS_ROOT . '/' . $this->app_path, 0755, true);
         }
         if (!$this->update_server) {
-            Util::releaseResource(Root::dir() . '/Command/Resource/config.php', SCF_APPS_ROOT . $this->app_path . '/src/config/app.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/config_dev.php', SCF_APPS_ROOT . $this->app_path . '/src/config/app_dev.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/server.php', SCF_APPS_ROOT . $this->app_path . '/src/config/server.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/version.php', SCF_APPS_ROOT . $this->app_path . '/src/version.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/controller/_config.php', SCF_APPS_ROOT . $this->app_path . '/src/lib/Demo/_config.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/controller/index.php', SCF_APPS_ROOT . $this->app_path . '/src/lib/Demo/Controller/Index.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error.html', SCF_APPS_ROOT . $this->app_path . '/src/template/common/error.html', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error_404.html', SCF_APPS_ROOT . $this->app_path . '/src/template/common/error_404.html', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/config.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/config/app.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/config_dev.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/config/app_dev.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/server.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/config/server.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/version.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/version.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/controller/_config.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/_config.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/controller/index.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/Controller/Index.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error.html', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error_404.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error_404.html', true);
         }
         return $this->update();
     }

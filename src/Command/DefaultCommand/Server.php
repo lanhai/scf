@@ -43,7 +43,7 @@ class Server implements CommandInterface {
         $commandHelp->addAction('restart', '重启服务器');
         $commandHelp->addAction('status', '查看服务器状态');
         //$commandHelp->addAction('redis', '启动redis DB服务器');
-        $commandHelp->addActionOpt('-apps_dir', '应用列表目录,默认为:' . SCF_ROOT . '/../apps/');
+        $commandHelp->addActionOpt('-apps_dir', '应用列表目录,默认为:' . dirname(SCF_ROOT) . '/apps/');
         $commandHelp->addActionOpt('-app', '启动的应用文件夹名【' . implode('|', $names) . '】,默认:app');
         $commandHelp->addActionOpt('-alias', '服务器别名,默认:应用APPID');
         $commandHelp->addActionOpt('-env', '运行环境,缺省:production');

@@ -34,7 +34,7 @@ class Toolbox implements CommandInterface {
     }
 
     public function help(Help $commandHelp): Help {
-        $commandHelp->addAction('console', '应用控制台');
+        $commandHelp->addAction('cli', '控制台应用');
         $commandHelp->addAction('rpc', 'RPC服务更新');
         $commandHelp->addAction('ar', '活动记录对象创建');
         $commandHelp->addAction('info', '服务器环境信息');
@@ -55,13 +55,13 @@ class Toolbox implements CommandInterface {
         $updater->run();
     }
 
-    public function console(): void {
+    public function cli(): void {
         run(function () {
             try {
                 $app = new App();
-                Console::line();
-                Console::write("当前运行环境:" . (Lifetime::isDevEnv() ? '开发环境' : '生产环境'));
-                Console::line();
+//                Console::line();
+//                Console::write("当前运行环境:" . (Lifetime::isDevEnv() ? '开发环境' : '生产环境'));
+//                Console::line();
                 $app->ready(Manager::instance()->getArg(1) ?: 0);
             } catch (ExitException) {
                 \Swoole\Event::exit();
