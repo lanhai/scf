@@ -19,6 +19,8 @@ class WhereBuilder {
         '!%' => 'NOT LIKE',
         '^' => 'BETWEEN',
         '!^' => 'NOT BETWEEN',
+        '>=<' => 'BETWEEN',
+        '>!<' => 'NOT BETWEEN',
         '<' => '<',
         '>' => '>',
         '>=' => '>=',
@@ -28,12 +30,10 @@ class WhereBuilder {
     ];
 
     /**
-     * 构造器
      * @param array $condition
      */
     public function __construct(array $condition = []) {
         if ($condition) {
-            //$this->and = $condition;
             foreach ($condition as $key => $value) {
                 $this->and[] = ['key' => $key, 'value' => $value];
             }

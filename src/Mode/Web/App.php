@@ -3,20 +3,12 @@
 namespace Scf\Mode\Web;
 
 use Scf\Core\Config;
-use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Helper\ArrayHelper;
-use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppException;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Server\Env;
-use Scf\Server\Worker\ProcessLife;
-use Twig\Environment;
-use Twig\Error\LoaderError;
-use Twig\Error\RuntimeError;
-use Twig\Error\SyntaxError;
-use Twig\Loader\FilesystemLoader;
 
 
 class App extends Lifetime {
@@ -68,13 +60,13 @@ class App extends Lifetime {
         $router = $this->router;
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            $ctrlClass = APP_TOP_NAMESPACE . '\\Controller\\' . $router->getModule() . '\\' . $router->getController();
+            $ctrlClass = self::buildControllerPath('Controller', $router->getController());
             $ctrlPath = $router->getController() . '/' . $router->getAction();
             $action = $router->getAction();
             $isSubController = false;
             //查找子目录控制器
             if (!class_exists($ctrlClass)) {
-                $ctrlClass = APP_TOP_NAMESPACE . '\\Controller\\' . $router->getModule() . '\\' . $router->getController() . '\\' . $action;
+                $ctrlClass = self::buildControllerPath('Controller', $router->getController(), $action);
                 if (!class_exists($ctrlClass)) {
                     Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
                     throw new NotFoundException('控制器不存在:' . $ctrlClass);
@@ -83,13 +75,13 @@ class App extends Lifetime {
                 $isSubController = true;
             }
         } else {
-            $ctrlClass = APP_TOP_NAMESPACE . '\\' . $router->getModule() . '\\Controller\\' . $router->getController();
+            $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController());
             $ctrlPath = $router->getController() . '/' . $router->getAction();
             $action = $router->getAction();
             $isSubController = false;
             //查找子目录控制器
             if (!class_exists($ctrlClass)) {
-                $ctrlClass = APP_TOP_NAMESPACE . '\\' . $router->getModule() . '\\Controller\\' . $router->getController() . '\\' . $action;
+                $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController(), $action);
                 if (!class_exists($ctrlClass)) {
                     Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
                     throw new NotFoundException('控制器不存在:' . $ctrlClass);
@@ -98,8 +90,6 @@ class App extends Lifetime {
                 $isSubController = true;
             }
         }
-
-
         $router->setCtrlPath($ctrlPath);
         $ref = new \ReflectionClass($ctrlClass);
         if ($ref->isAbstract() or $ref->isInterface()) {
@@ -120,9 +110,6 @@ class App extends Lifetime {
             Response::instance()->setHeader('Error-Info', 'method not exist:' . $ctrlClass);
             throw new NotFoundException('控制器方法不存在:' . $method);
         }
-        //        if (!$reesult instanceof Result) {
-//            throw new AppException('服务器开了点小差,请联系管理员[CONTROLLER_RETURN_ERROR]', 500);
-//        }
         return $class->$method();
     }
 

@@ -2,6 +2,7 @@
 
 namespace Scf\Mode\Rpc;
 
+use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Rpc\Manager;
@@ -35,9 +36,9 @@ class App extends \Scf\Core\App {
         foreach (self::$_modules[MODE_RPC] as $conf) {
             $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
             if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                $cls = "\\" . APP_TOP_NAMESPACE . "\\Service\\{$conf['name']}\\service";
+                $cls = self::buildControllerPath('Service', 'service');
             } else {
-                $cls = "\\" . APP_TOP_NAMESPACE . "\\{$conf['name']}\\service";
+                $cls = self::buildControllerPath($conf['name'], 'service');
             }
             if (class_exists($cls)) {
                 /** @var Service $service */
@@ -51,7 +52,7 @@ class App extends \Scf\Core\App {
                 }
                 $serviceManager->addService($service);
                 if ($workerId == 0) {
-                    Console::success("RPC服务【{$service->serviceName()}】注册成功");
+                    Console::info("RPC服务【{$service->serviceName()}】" . Color::success('注册成功'));
 //                    //注册服务
 //                    $nodeId = md5(SERVER_HOST . $port);
 //                    $serviceNode = new ServiceNode();
@@ -73,10 +74,13 @@ class App extends \Scf\Core\App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            is_dir(self::src() . '/lib/Controller/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Controller/' . $service, 1);
-            is_dir(self::src() . '/lib/Service/' . $service) and $entryScripts = Dir::scan(self::src() . 'lib/Service/' . $service, 1);
+            $serviceDir = self::buildPath(self::src(), 'lib', 'Controller', $service);
+            is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
+            $serviceDir = self::buildPath(self::src(), 'lib', 'Service');
+            is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
+
         } else {
-            $entryScripts = Dir::scan(self::src() . '/lib/' . $service . '/Service', 1);
+            $entryScripts = Dir::scan(self::buildPath(self::src(), 'lib', $service, 'Service'), 1);
         }
         $modules = [];
         if ($entryScripts) {
@@ -88,9 +92,9 @@ class App extends \Scf\Core\App {
                 }
                 $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
                 if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                    $cls = "\\" . APP_TOP_NAMESPACE . "\\Service\\{$service}\\" . $name;
+                    $cls = self::buildControllerPath('Service', $name);
                 } else {
-                    $cls = "\\" . APP_TOP_NAMESPACE . "\\{$service}\\Service\\" . $name;
+                    $cls = self::buildControllerPath($service, 'Service', $name);
                 }
                 if (class_exists($cls)) {
                     $modules[] = $cls;

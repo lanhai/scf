@@ -8,10 +8,10 @@ use Scf\Helper\ArrayHelper;
 use Scf\Server\Http;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Time;
-use Swoole\Event;
 use Swoole\Timer;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
+use function Laravel\Prompts\confirm;
 
 /**
  * 带推送功能的控制台打印
@@ -77,6 +77,26 @@ class Console {
     public static function exit(): void {
         self::write('bye bye!');
         exit(0);
+    }
+
+    /**
+     * @param string $label
+     * @param bool $default
+     * @param string $yes
+     * @param string $no
+     * @param mixed|null $required
+     * @param string|null $hint
+     * @return bool
+     */
+    public static function comfirm(string $label, bool $default = false, string $yes = "是", string $no = "否", mixed $required = null, ?string $hint = null): bool {
+        return confirm(
+            label: $label,
+            default: $default,
+            yes: $yes,
+            no: $no,
+            required: $required ?: '',
+            hint: $hint ?: ''
+        );
     }
 
     /**

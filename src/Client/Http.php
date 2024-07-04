@@ -27,6 +27,7 @@ class Http {
         $this->protocol = $protocol;
         $this->ssl = $ssl;
         $this->certificate = $certificate;
+        $this->client = new Client($host, $port, $ssl);
     }
 
     /**
@@ -75,19 +76,27 @@ class Http {
     }
 
     /**
+     * @param string $key
+     * @param string $path
+     * @return void
+     */
+    public function addFile(string $key, string $path): void {
+        $this->client->addFile($path, $key);
+    }
+
+    /**
      * 发送POST请求
      * @param mixed $body
      * @param int $timeout
+     * @param array|null $files
      * @return Result
      */
-    public function post(mixed $body = [], int $timeout = 30): Result {
+    public function post(mixed $body = [], int $timeout = 30, ?array $files = null): Result {
         try {
-            $client = new Client($this->host, $this->port, $this->ssl);
             $this->headerInit();
-            $client->setHeaders($this->headers);
-            $client->set($this->options($timeout));
-            $client->post($this->path, $body);
-            $this->client = $client;
+            $this->client->setHeaders($this->headers);
+            $this->client->set($this->options($timeout));
+            $this->client->post($this->path, $body);
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
@@ -104,14 +113,12 @@ class Http {
     public function JPost(mixed $body = [], int $timeout = 30): Result {
         try {
             $body = $body ? JsonHelper::toJson($body) : "{}";
-            $client = new Client($this->host, $this->port, $this->ssl);
             $this->headerInit();
             $this->headers['Content-Type'] = 'application/json; charset=utf-8';
             $this->headers['Content-Length'] = strlen($body);
-            $client->setHeaders($this->headers);
-            $client->set($this->options($timeout));
-            $client->post($this->path, $body);
-            $this->client = $client;
+            $this->client->setHeaders($this->headers);
+            $this->client->set($this->options($timeout));
+            $this->client->post($this->path, $body);
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
@@ -126,13 +133,46 @@ class Http {
      */
     public function XPost(mixed $body = [], int $timeout = 30): Result {
         try {
-            $client = new Client($this->host, $this->port, $this->ssl);
             $this->headerInit();
             $this->headers['Content-Type'] = 'text/xml; charset=utf-8';
             $this->headers['Content-Length'] = strlen(ArrayHelper::toXml($body));
-            $client->set($this->options($timeout));
-            $client->post($this->path, ArrayHelper::toXml($body));
-            $this->client = $client;
+            $this->client->set($this->options($timeout));
+            $this->client->post($this->path, ArrayHelper::toXml($body));
+            return $this->getResult();
+        } catch (\Exception $exception) {
+            return Result::error($exception->getMessage());
+        }
+    }
+
+    /**
+     * 发送GET请求
+     * @param int $timeout
+     * @return Result
+     */
+    public function get(int $timeout = 30): Result {
+        try {
+            $this->headerInit();
+            $this->client->setHeaders($this->headers);
+            $this->client->set($this->options($timeout));
+            $this->client->get($this->path);
+            return $this->getResult();
+        } catch (\Exception $exception) {
+            return Result::error($exception->getMessage());
+        }
+    }
+
+    /**
+     * 下载文件
+     * @param $filePath
+     * @param int $timeout
+     * @return Result
+     */
+    public function download($filePath, int $timeout = -1): Result {
+        try {
+            $this->headerInit();
+            $this->client->setHeaders($this->headers);
+            $this->client->set($this->options($timeout));
+            $this->client->download($this->path, $filePath);
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
@@ -149,24 +189,6 @@ class Http {
         return $this;
     }
 
-    /**
-     * 发送GET请求
-     * @param int $timeout
-     * @return Result
-     */
-    public function get(int $timeout = 30): Result {
-        try {
-            $client = new Client($this->host, $this->port, $this->ssl);
-            $this->headerInit();
-            $client->setHeaders($this->headers);
-            $client->set($this->options($timeout));
-            $client->get($this->path);
-            $this->client = $client;
-            return $this->getResult();
-        } catch (\Exception $exception) {
-            return Result::error($exception->getMessage());
-        }
-    }
 
     /**
      * @return string
@@ -186,25 +208,6 @@ class Http {
         return $this->client->headers;
     }
 
-    /**
-     * 下载文件
-     * @param $filePath
-     * @param int $timeout
-     * @return Result
-     */
-    public function download($filePath, int $timeout = -1): Result {
-        try {
-            $client = new Client($this->host, $this->port, $this->ssl);
-            $this->headerInit();
-            $client->setHeaders($this->headers);
-            $client->set($this->options($timeout));
-            $client->download($this->path, $filePath);
-            $this->client = $client;
-            return $this->getResult();
-        } catch (\Exception $exception) {
-            return Result::error($exception->getMessage());
-        }
-    }
 
     /**
      * 设置header
