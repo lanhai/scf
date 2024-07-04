@@ -63,20 +63,24 @@ LOGO;
         clearstatcache();
         $replace = true;
         if (is_file($destination)) {
-            echo Color::danger("{$filename} 已经存在, 是否覆盖? [ Y / N (默认) ] : ");
-            $answer = strtolower(trim(strtoupper(fgets(STDIN))));
-            if (!in_array($answer, ['y', 'yes'])) {
-                $replace = false;
-            }
+            $replace = Console::comfirm("{$filename} 已经存在, 是否覆盖?", true, "覆盖", "不覆盖");
+//            echo Color::danger("{$filename} 已经存在, 是否覆盖? [ Y / N (默认) ] : ");
+//            $answer = strtolower(trim(strtoupper(fgets(STDIN))));
+//            if (!in_array($answer, ['y', 'yes'])) {
+//                $replace = false;
+//            }
         }
         if ($replace) {
-            if ($confirm) {
-                echo Color::danger("是否释放文件 {$filename}? [ Y / N (默认) ] : ");
-                $answer = strtolower(trim(strtoupper(fgets(STDIN))));
-                if (!in_array($answer, ['y', 'yes'])) {
-                    return;
-                }
+            if ($confirm && !Console::comfirm("是否释放文件 {$filename}? ", true, "释放", "不释放")) {
+                return;
             }
+//            if ($confirm) {
+//                echo Color::danger("是否释放文件 {$filename}? [ Y / N (默认) ] : ");
+//                $answer = strtolower(trim(strtoupper(fgets(STDIN))));
+//                if (!in_array($answer, ['y', 'yes'])) {
+//                    return;
+//                }
+//            }
             $result = File::copyFile($source, $destination);
             Console::log($destination . '创建' . ($result ? Color::green('成功') : Color::red('失败')));
         }

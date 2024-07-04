@@ -30,24 +30,9 @@ class App extends \Scf\Core\App {
         $options = [];
         foreach ($this->_apps as $k => $app) {
             $options[] = ($app['name'] ?? $app);
-            //Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
         }
-        //Console::line();
         if (!$cmdNum) {
             $cmdNum = Console::select($options, 1, 1, "请选择要执行的操作,当前运行环境:" . (\Scf\Core\App::isDevEnv() ? Color::success('开发环境') : Color::warning('生产环境')));
-//            $cmdNum = Console::input("输入要执行的操作编号:", false);
-//            if (!is_numeric($cmdNum)) {
-//                $cmdNum = strtolower($cmdNum);
-//                Console::line();
-//                if ($cmdNum == 'quit' || $cmdNum == 'q') {
-//                    Console::write("欢迎再次使用");
-//                    Console::line();
-//                    exit;
-//                }
-//                Console::write("输入有误,请输入正确的指令编号");
-//                Console::line();
-//                return $this->ready();
-//            }
         }
         $appNum = $cmdNum - 1;
         if (!isset($this->_apps[$appNum])) {
@@ -71,9 +56,9 @@ class App extends \Scf\Core\App {
         $controller = $app['controller'];
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($moduleStyle == APP_MODULE_STYLE_LARGE) {
-            $ctrlClass = APP_TOP_NAMESPACE . '\\' . StringHelper::lower2camel($module) . '\\Controller\\' . $controller;
+            $ctrlClass = self::buildControllerPath(StringHelper::lower2camel($module), 'Controller', $controller);
         } else {
-            $ctrlClass = APP_TOP_NAMESPACE . '\\Controller\\' . StringHelper::lower2camel($module) . '\\' . $controller;
+            $ctrlClass = self::buildControllerPath('Cli', $controller);
         }
         if (!class_exists($ctrlClass)) {
             Console::log('控制器不存在:' . $ctrlClass);
