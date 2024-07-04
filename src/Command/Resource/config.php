@@ -4,7 +4,7 @@ return [
     // 应用配置,在运行时赋值
     'app' => [
         'master_host' => '127.0.0.1',
-        'module_style' => APP_MODULE_STYLE_LARGE
+        'module_style' => APP_MODULE_STYLE_MICRO
     ],
     // 第三方非Composer管理的类库
     'namespace_map' => [
