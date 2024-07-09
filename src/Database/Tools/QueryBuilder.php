@@ -273,6 +273,7 @@ trait QueryBuilder {
             // update
             if ($index == 'UPDATE') {
                 $set = [];
+                unset($k);
                 foreach ($data as $k => $v) {
                     if ($v instanceof Calculator) {
                         $c = clone $v;

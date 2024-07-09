@@ -93,12 +93,15 @@ class ArCreater {
      * @return mixed
      */
     protected function setPATH(string $label = '请输入要创建的文件路径'): mixed {
-        $input = Console::input($label, default: $this->getConfig('path'), hint: '路径需严格遵循驼峰命名约定,示范:Demo/Dao/TestDao');
+        $cacheKey = $this->getConfig('db') . '_' . $this->getConfig('table');
+        $cache = Config::getTemp('ar_map', $cacheKey);
+        $input = Console::input($label, default: $this->getConfig('path') ?: $cache, hint: '路径需严格遵循驼峰命名约定,示范:Demo/Dao/TestDao');
         //分析检查路径
         $nameSpaceArr = explode('/', $input);
         if (count($nameSpaceArr) < 2) {
             return $this->setPATH('路径不合法,请严格遵循规范创建');
         }
+        Config::setTemp('ar_map', $cacheKey, $input);
         $this->setConfig('path', $input);
         $pathArr = explode('/', $input);
         $className = $pathArr[count($pathArr) - 1];
@@ -310,12 +313,14 @@ EOF;
             }
         }
         Console::line();
-        $choose = Console::select(['创建其它数据结构文件', '创建管理面板Vue文件', '退出创建工具'], default: 1, label: Color::success('文件创建成功!请选择下一步操作'));
+        $choose = Console::select(['创建其它数据结构文件', '创建管理面板Vue文件', '重新创建', '退出创建工具'], default: 3, label: Color::success('文件创建成功!请选择下一步操作'));
         if ($choose == 2) {
             $cpCreater = new CpCreater();
             return $cpCreater->selectDir(APP_PATH . '/cp/src/views', $nameSpace . '\\' . $className);
-        } elseif ($choose == 3) {
+        } elseif ($choose == 4) {
             $this->exit();
+        } elseif ($choose == 3) {
+            return $this->setPATH();
         } else {
             $this->resetConfig();
             return $this->setDB($db);

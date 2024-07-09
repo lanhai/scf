@@ -14,7 +14,7 @@ use Swoole\Coroutine;
 class SocketMessager extends Component {
     const SWOOLE_MQTT_CONFIG = [
         'open_mqtt_protocol' => true,
-        'package_max_length' => 2 * 1024 * 1024,
+        'package_max_length' => 4 * 1024 * 1024,
         'connect_timeout' => 5.0,
         'write_timeout' => 5.0,
         'read_timeout' => 5.0,

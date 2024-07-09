@@ -133,6 +133,7 @@ class Console {
                 label: $label ?: '请选择要执行的操作',
                 options: $options,
                 default: $default == 0 ? $options[0] : $default,
+                scroll: 20
             );
         }
         $arr = [];
@@ -143,8 +144,9 @@ class Console {
         }
         return select(
             label: $label ?: '请选择要执行的操作',
-            options: $arr,
-            default: $default
+            options: $arr ?: $options,
+            default: $start == 0 ? $options[$default] : $default,
+            scroll: 20
         );
     }
 

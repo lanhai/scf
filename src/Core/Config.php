@@ -3,6 +3,8 @@
 namespace Scf\Core;
 
 use Scf\Util\Arr;
+use Symfony\Component\Yaml\Yaml;
+use Scf\Util\File;
 
 /**
  * 配置管理
@@ -55,6 +57,37 @@ class Config {
     public static function set($path, $value): mixed {
         Arr::setPath(self::$_cache, $path, $value);
         return $value;
+    }
+
+    /**
+     * 读取缓存配置
+     * @param $name
+     * @param string|null $key
+     * @return mixed
+     */
+    public static function getTemp($name, ?string $key = null): mixed {
+        $dir = APP_PATH . '/yml';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+        $cacheFile = $dir . '/' . $name . '.yml';
+        if (!file_exists($cacheFile)) {
+            return null;
+        }
+        return $key ? Yaml::parseFile($cacheFile)[$key] ?? null : Yaml::parseFile($cacheFile);
+    }
+
+    /**
+     * 写入缓存配置
+     * @param string $name
+     * @param string $key
+     * @param string|array $value
+     * @return bool
+     */
+    public static function setTemp(string $name, string $key, string|array $value): bool {
+        $data = self::getTemp($name);
+        $data[$key] = $value;
+        return File::write(APP_PATH . '/yml/' . $name . '.yml', Yaml::dump($data));
     }
 
 }
