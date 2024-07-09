@@ -317,6 +317,7 @@ class Http extends \Scf\Core\Server {
         $os = SERVER_ENV;
         $host = SERVER_HOST;
         $version = swoole_version();
+        $fingerprint = APP_FINGERPRINT;
         $info = <<<INFO
 ---------Server启动完成---------
 内网地址：{$host}
@@ -330,6 +331,7 @@ class Http extends \Scf\Core\Server {
 文件加载：{$files}
 SW版本号：{$version}
 框架版本：{$scfVersion}
+应用指纹：{$fingerprint}
 Worker：{$serverConfig['worker_num']}
 Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid

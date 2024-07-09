@@ -8,6 +8,9 @@ use RecursiveIteratorIterator;
 use Scf\Core\App;
 use Scf\Command\Manager;
 use Scf\Core\Console;
+use Scf\Helper\ArrayHelper;
+use Scf\Util\File;
+use Scf\Util\Random;
 use Scf\Util\Sn;
 use Swoole\Coroutine\System;
 use Swoole\Event;
@@ -40,12 +43,11 @@ class Core {
         }
         $path = $options['app'] ?? ($appDir ?: 'app');
         !defined('APP_RUN_ENV') and define('APP_RUN_ENV', Manager::instance()->issetOpt('dev') ? 'dev' : ($options['env'] ?? ($appEnv ?: 'production')));
-        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . '/' . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
 
         if (App::all() && !isset($options['app']) && !$appDir) {
-            Console::error("请使用'-app'参数指定应用目录");
-            exit(1);
+            $path = Console::select(array_column(App::all(), 'app_path'), start: 0, label: '请选择应用');
         }
+        !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . '/' . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
 
         $app = App::appoint($path);
         $role = Manager::instance()->issetOpt('master') ? 'master' : ($options['role'] ?? ($serverRole ?: ($app->role ?: 'master')));
@@ -96,6 +98,7 @@ class Core {
         !defined('APP_BIN_DIR') and define('APP_BIN_DIR', APP_PATH . '/bin');
         //是否启用自动更新
         !defined('APP_AUTO_UPDATE') and define('APP_AUTO_UPDATE', $options['update'] ?? 0);
+
         if (!file_exists(APP_TMP_PATH)) {
             mkdir(APP_TMP_PATH, 0775, true);
             mkdir(APP_TMP_PATH . '/template', 0775, true);
@@ -118,6 +121,15 @@ class Core {
         if (!file_exists(APP_BIN_DIR)) {
             mkdir(APP_BIN_DIR, 0775, true);
         }
+        //应用硬件指纹
+        !defined('SERVER_APP_FINGERPRINT_FILE') and define('SERVER_APP_FINGERPRINT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.fingerprint');
+        if (!file_exists(SERVER_APP_FINGERPRINT_FILE)) {
+            $fingerprint = Random::makeUUIDV4();
+            File::write(SERVER_APP_FINGERPRINT_FILE, $fingerprint);
+        } else {
+            $fingerprint = File::read(SERVER_APP_FINGERPRINT_FILE);
+        }
+        !defined('APP_FINGERPRINT') and define('APP_FINGERPRINT', $fingerprint);
         // 清理缓存目录
         App::clearTemplateCache();
         if ($mode != MODE_CGI) {

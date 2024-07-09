@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "ce9b8a3a5c17c21bbb1fcde42ba235f4",
+    "content-hash": "02e75faddd1e1894c6aa4604b414ec54",
     "packages": [
         {
             "name": "adbario/php-dot-notation",
@@ -225,16 +225,16 @@
         },
         {
             "name": "alibabacloud/darabonba-openapi",
-            "version": "0.2.11",
+            "version": "0.2.12",
             "source": {
                 "type": "git",
                 "url": "https://github.com/alibabacloud-sdk-php/darabonba-openapi.git",
-                "reference": "1b5c5fc771eaf782cb792f9e975b8247683307c7"
+                "reference": "11617627ba6cf012732e7d9e165328ebaef2bc74"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/alibabacloud-sdk-php/darabonba-openapi/zipball/1b5c5fc771eaf782cb792f9e975b8247683307c7",
-                "reference": "1b5c5fc771eaf782cb792f9e975b8247683307c7",
+                "url": "https://api.github.com/repos/alibabacloud-sdk-php/darabonba-openapi/zipball/11617627ba6cf012732e7d9e165328ebaef2bc74",
+                "reference": "11617627ba6cf012732e7d9e165328ebaef2bc74",
                 "shasum": ""
             },
             "require": {
@@ -264,9 +264,9 @@
             "description": "Alibaba Cloud OpenApi Client",
             "support": {
                 "issues": "https://github.com/alibabacloud-sdk-php/darabonba-openapi/issues",
-                "source": "https://github.com/alibabacloud-sdk-php/darabonba-openapi/tree/0.2.11"
+                "source": "https://github.com/alibabacloud-sdk-php/darabonba-openapi/tree/0.2.12"
             },
-            "time": "2024-05-14T03:00:59+00:00"
+            "time": "2024-06-21T09:46:09+00:00"
         },
         {
             "name": "alibabacloud/endpoint-util",
@@ -792,26 +792,23 @@
         },
         {
             "name": "clagiordano/weblibs-configmanager",
-            "version": "v1.5.0",
+            "version": "v1.2.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/clagiordano/weblibs-configmanager.git",
-                "reference": "8802c7396d61a923c9a73e37ead062b24bb1b273"
+                "reference": "5c8ebcc62782313b1278afe802b120d18c07a059"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/clagiordano/weblibs-configmanager/zipball/8802c7396d61a923c9a73e37ead062b24bb1b273",
-                "reference": "8802c7396d61a923c9a73e37ead062b24bb1b273",
+                "url": "https://api.github.com/repos/clagiordano/weblibs-configmanager/zipball/5c8ebcc62782313b1278afe802b120d18c07a059",
+                "reference": "5c8ebcc62782313b1278afe802b120d18c07a059",
                 "shasum": ""
             },
             "require": {
-                "ext-json": "*",
-                "php": ">=5.4",
-                "symfony/yaml": "^2.8"
+                "php": ">=5.4"
             },
             "require-dev": {
                 "clagiordano/phpunit-result-printer": "^1",
-                "php-coveralls/php-coveralls": "^1.1",
                 "phpunit/phpunit": "^4.8"
             },
             "type": "library",
@@ -841,9 +838,9 @@
             ],
             "support": {
                 "issues": "https://github.com/clagiordano/weblibs-configmanager/issues",
-                "source": "https://github.com/clagiordano/weblibs-configmanager/tree/v1.5.0"
+                "source": "https://github.com/clagiordano/weblibs-configmanager/tree/v1.2.0"
             },
-            "time": "2021-07-12T15:27:21+00:00"
+            "time": "2021-05-18T17:55:57+00:00"
         },
         {
             "name": "dasprid/enum",
@@ -1364,7 +1361,7 @@
         },
         {
             "name": "illuminate/collections",
-            "version": "v10.48.14",
+            "version": "v10.48.15",
             "source": {
                 "type": "git",
                 "url": "https://github.com/illuminate/collections.git",
@@ -1419,7 +1416,7 @@
         },
         {
             "name": "illuminate/conditionable",
-            "version": "v10.48.14",
+            "version": "v10.48.15",
             "source": {
                 "type": "git",
                 "url": "https://github.com/illuminate/conditionable.git",
@@ -1465,7 +1462,7 @@
         },
         {
             "name": "illuminate/contracts",
-            "version": "v10.48.14",
+            "version": "v10.48.15",
             "source": {
                 "type": "git",
                 "url": "https://github.com/illuminate/contracts.git",
@@ -1513,7 +1510,7 @@
         },
         {
             "name": "illuminate/macroable",
-            "version": "v10.48.14",
+            "version": "v10.48.15",
             "source": {
                 "type": "git",
                 "url": "https://github.com/illuminate/macroable.git",
@@ -3683,28 +3680,33 @@
         },
         {
             "name": "symfony/yaml",
-            "version": "v2.8.52",
+            "version": "v6.4.8",
             "source": {
                 "type": "git",
                 "url": "https://github.com/symfony/yaml.git",
-                "reference": "02c1859112aa779d9ab394ae4f3381911d84052b"
+                "reference": "52903de178d542850f6f341ba92995d3d63e60c9"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/symfony/yaml/zipball/02c1859112aa779d9ab394ae4f3381911d84052b",
-                "reference": "02c1859112aa779d9ab394ae4f3381911d84052b",
+                "url": "https://api.github.com/repos/symfony/yaml/zipball/52903de178d542850f6f341ba92995d3d63e60c9",
+                "reference": "52903de178d542850f6f341ba92995d3d63e60c9",
                 "shasum": ""
             },
             "require": {
-                "php": ">=5.3.9",
-                "symfony/polyfill-ctype": "~1.8"
+                "php": ">=8.1",
+                "symfony/deprecation-contracts": "^2.5|^3",
+                "symfony/polyfill-ctype": "^1.8"
             },
+            "conflict": {
+                "symfony/console": "<5.4"
+            },
+            "require-dev": {
+                "symfony/console": "^5.4|^6.0|^7.0"
+            },
+            "bin": [
+                "Resources/bin/yaml-lint"
+            ],
             "type": "library",
-            "extra": {
-                "branch-alias": {
-                    "dev-master": "2.8-dev"
-                }
-            },
             "autoload": {
                 "psr-4": {
                     "Symfony\\Component\\Yaml\\": ""
@@ -3727,12 +3729,26 @@
                     "homepage": "https://symfony.com/contributors"
                 }
             ],
-            "description": "Symfony Yaml Component",
+            "description": "Loads and dumps YAML files",
             "homepage": "https://symfony.com",
             "support": {
-                "source": "https://github.com/symfony/yaml/tree/v2.8.52"
+                "source": "https://github.com/symfony/yaml/tree/v6.4.8"
             },
-            "time": "2018-11-11T11:18:13+00:00"
+            "funding": [
+                {
+                    "url": "https://symfony.com/sponsor",
+                    "type": "custom"
+                },
+                {
+                    "url": "https://github.com/fabpot",
+                    "type": "github"
+                },
+                {
+                    "url": "https://tidelift.com/funding/github/packagist/symfony/symfony",
+                    "type": "tidelift"
+                }
+            ],
+            "time": "2024-05-31T14:49:08+00:00"
         },
         {
             "name": "tencent/tls-sig-api-v2",
@@ -3873,13 +3889,14 @@
         "ext-redis": "*",
         "ext-posix": "*",
         "ext-sockets": "*",
-        "ext-openssl": "*",
-        "ext-pdo": "*",
-        "ext-iconv": "*",
         "ext-simplexml": "*",
         "ext-libxml": "*",
         "ext-dom": "*",
-        "ext-xlswriter": "*"
+        "ext-xlswriter": "*",
+        "ext-curl": "*",
+        "ext-openssl": "*",
+        "ext-pdo": "*",
+        "ext-iconv": "*"
     },
     "platform-dev": [],
     "plugin-api-version": "2.3.0"

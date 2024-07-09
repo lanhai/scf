@@ -2,6 +2,7 @@
 
 namespace Scf\Mode\Web;
 
+use Scf\Core\Config;
 use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\StringHelper;
@@ -180,9 +181,14 @@ class Router {
     public function dispatch($server, $modules): void {
         $pathinfo = $this->_getPath($server);
         $pathinfo = $pathinfo ? explode('/', trim($pathinfo, '/')) : [];
+        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+
         $map = [];
         $this->_partitions = [];
         $this->_module = StringHelper::lower2camel($pathinfo[0] ?? $this->_config['default_module']);
+        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            $this->_module = 'Controller';
+        }
         //检查模块是否存在
         $module = ArrayHelper::findColumn($modules, 'name', $this->_module);
         if (!$module) {

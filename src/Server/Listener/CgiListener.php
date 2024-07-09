@@ -52,6 +52,18 @@ class CgiListener extends Listener {
 //                    break;
 //            }
 //        });
+        // 设置CORS响应头
+        $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
+        $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+
+        // 如果是预检请求，直接返回200 OK
+        if ($request->server['request_method'] == 'OPTIONS') {
+            $response->status(200);
+            $response->end();
+            return;
+        }
+
         if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
             $response->end();
             return;
@@ -93,7 +105,7 @@ class CgiListener extends Listener {
                 $result = $app->run();
                 if ($result instanceof Result) {
                     if ($result->hasError()) {
-                        Response::error($result->getMessage(), $result->getErrCode(), $result->getData());
+                        Response::error($result->getMessage(), $result->getErrCode(), $result->getData(), status: 200);
                     } else {
                         Response::success($result->getData());
                     }
