@@ -72,18 +72,16 @@ class Dashboard {
                 $installServer->on('start', function (Server $server) {
                     Console::info("安装服务器已启动,等待安装完成");
                     App::await();
-                    $server->shutdown();
-                    Console::log("应用安装完成," . Color::red(5) . "秒后关闭安装服务器");
-                    $timeout = 4;
+                    $timeout = 3;
                     Timer::tick(1000, function ($id) use ($server, &$timeout) {
                         if ($timeout == 0) {
                             Timer::clear($id);
+                            $server->shutdown();
                             return;
                         }
                         Console::log("应用安装完成," . Color::red($timeout) . "秒后关闭安装服务器");
                         $timeout--;
                     });
-
                 });
                 $installServer->start();
             } catch (\Throwable $throwable) {
