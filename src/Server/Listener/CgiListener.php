@@ -208,7 +208,7 @@ class CgiListener extends Listener {
                 $response->status(503);
                 $response->end(JsonHelper::toJson([
                     'errCode' => 'SERVICE_UNAVAILABLE',
-                    'message' => "服务不可用,请稍后重试",
+                    'message' => "请求安装服务失败,请稍后重试",
                     'data' => ""
                 ]));
             } else {
