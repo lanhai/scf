@@ -43,12 +43,10 @@ class Core {
         }
         $path = $options['app'] ?? ($appDir ?: 'app');
         !defined('APP_RUN_ENV') and define('APP_RUN_ENV', Manager::instance()->issetOpt('dev') ? 'dev' : ($options['env'] ?? ($appEnv ?: 'production')));
-
         if (App::all() && !isset($options['app']) && !$appDir) {
             $path = Console::select(array_column(App::all(), 'app_path'), start: 0, label: '请选择应用');
         }
         !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . '/' . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
-
         $app = App::appoint($path);
         $role = Manager::instance()->issetOpt('master') ? 'master' : ($options['role'] ?? ($serverRole ?: ($app->role ?: 'master')));
         if (!$app->role) {

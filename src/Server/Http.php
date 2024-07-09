@@ -164,6 +164,8 @@ class Http extends \Scf\Core\Server {
         ]);
         //启动控制面板服务器
         Dashboard::start($this->bindPort + 2);
+        //等待APP安装完成
+        App::await();
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动任务管理进程

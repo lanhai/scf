@@ -132,11 +132,7 @@ class App {
      * @return string
      */
     public static function src(): string {
-        if (defined('APP_SRC_DIR')) {
-            return APP_SRC_DIR;
-        }
-        define('APP_SRC_DIR', self::installer()->src());
-        return APP_SRC_DIR;
+        return self::installer()->src();
     }
 
     /**
@@ -402,6 +398,7 @@ class App {
     protected static function buildControllerPath(string ...$segments): string {
         return APP_TOP_NAMESPACE . '\\' . implode('\\', $segments);
     }
+
     /**
      * 拼接路径
      *
