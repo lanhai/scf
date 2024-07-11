@@ -93,15 +93,22 @@ class ArCreater {
      * @return mixed
      */
     protected function setPATH(string $label = '请输入要创建的文件路径'): mixed {
-        $cacheKey = $this->getConfig('db') . '_' . $this->getConfig('table');
-        $cache = Config::getTemp('ar_map', $cacheKey);
+        //拼接完整表名
+        $tablePrefix = $this->db()->getConfig('prefix');
+        $fileName = $this->getConfig('db') . '_' . $tablePrefix . $this->getConfig('table');
+        $cache = Config::getDbTable($fileName, 'dao');
         $input = Console::input($label, default: $this->getConfig('path') ?: $cache, hint: '路径需严格遵循驼峰命名约定,示范:Demo/Dao/TestDao');
         //分析检查路径
         $nameSpaceArr = explode('/', $input);
         if (count($nameSpaceArr) < 2) {
             return $this->setPATH('路径不合法,请严格遵循规范创建');
         }
-        Config::setTemp('ar_map', $cacheKey, $input);
+        Config::setDbTable($fileName, [
+            'dao' => $input,
+            'db' => $this->getConfig('db'),
+            'table' => $tablePrefix . $this->getConfig('table'),
+            'version' => date('YmdHis')
+        ]);
         $this->setConfig('path', $input);
         $pathArr = explode('/', $input);
         $className = $pathArr[count($pathArr) - 1];
@@ -157,46 +164,52 @@ class ArCreater {
         }
         $dbName = $this->db()->getConfig('name');
         // 获取表结构信息
-//        $query = "DESCRIBE $completeTable";
-//        $result = $this->db()->getDatabase()->exec($query)->get();
-
-        $sql = "SHOW FULL COLUMNS FROM {$completeTable} FROM {$dbName}";
-        $columns = $this->db()->getDatabase()->exec($sql)->get();
-        if (!$columns) {
-            try {
-                $sql = "SHOW FULL COLUMNS FROM {$completeTable} FROM {$dbName}";
-                $columns = $this->db()->getDatabase()->exec($sql)->get();
-            } catch (\PDOException $e) {
-                Console::write('读取数据表失败:' . $e->getMessage() . ',请确认输入无误后重试');
-                Console::line();
-                return $this->setTABLE();
-            }
+        try {
+            $sql = "SHOW FULL COLUMNS FROM {$completeTable} FROM {$dbName}";
+            $columns = $this->db()->getDatabase()->exec($sql)->get();
+            var_dump($columns);
+        } catch (\PDOException $e) {
+            Console::write('读取数据表失败:' . $e->getMessage() . ',请确认输入无误后重试');
+            Console::line();
+            return $this->setTABLE();
+        } catch (Throwable $e) {
+            return $this->setTABLE();
         }
         //拼接字段
         $bodyContent = "";
         $primaryKey = "";
         $columns = ObjectHelper::toArray($columns);
         $primaryKeys = [];
+        $columnMaps = [];
         $createSql = "CREATE TABLE `{$completeTable}` (";
+        $afterField = null;
         foreach ($columns as $v) {
-            $fieldName = $v['Field'];
-            $fieldType = $v['Type'];
-            $skipDefault = ['text', 'blob', 'json', 'geometry'];
-
-            $fieldNull = ($v['Null'] === 'NO') ? 'NOT NULL' : 'NULL';
-            // 对于 float 类型，加入明确的默认值 '0.0'
-            if (str_contains($fieldType, 'float')) {
-                $fieldDefault = "DEFAULT '0.0'";
-            } else {
-                $fieldDefault = ($v['Default'] !== null) && !in_array(strtolower($v['Type']), $skipDefault) ? "DEFAULT '{$v['Default']}'" : '';
+            $attributes = [
+                "`" . $v['Field'] . "`",
+                $v['Type']
+            ];
+            if ($v['Null'] === 'NO') {
+                $attributes[] = "NOT NULL";
             }
-
-            $fieldComment = ($v['Comment'] !== null) ? "COMMENT '{$v['Comment']}'" : '';
+            $skipDefault = ['text', 'blob', 'json', 'geometry'];
+            if ($v['Default'] !== '') {//!in_array(strtolower($v['Type']), $skipDefault)
+                $attributes[] = "DEFAULT '{$v['Default']}'";
+            }
+            if (!empty($v['Extra'])) {
+                $attributes[] = strtoupper($v['Extra']);
+            }
+            if (!empty($v['Comment'])) {
+                $attributes[] = "COMMENT '{$v['Comment']}'";
+            }
+            $attributesStr = implode(' ', $attributes);
+            $columnMaps[$v['Field']] = [
+                'content' => $attributesStr . ($afterField ? " AFTER `{$afterField}`" : ''),
+                'hash' => md5(serialize($attributes))
+            ];
             // 拼接字段信息到 SQL 语句
-            $createSql .= "`$fieldName` $fieldType $fieldNull $fieldDefault $fieldComment, ";
-
-            if ($v['Key'] == 'PRI' && !$primaryKey) {
-                $primaryKey = $v['Field'];
+            $createSql .= $attributesStr . ",";
+            if ($v['Key'] == 'PRI') {
+                !$primaryKey and $primaryKey = $v['Field'];
                 $primaryKeys[] = "`{$v['Field']}`";
             }
             $comment = $v['Comment'] ?: $v['Field'];
@@ -211,14 +224,6 @@ class ArCreater {
                 $isJson = true;
             }
             $rule = $this->transformType($v['Type']);
-//            $isJson = strpos($comment, '{json') !== false;
-//            if ($isJson) {
-//                $comment = str_replace("{json}", "", $comment);
-//            }
-            $nullAble = true;
-            if ($v['Null'] == 'NO' || $v['Key'] == 'PRI') {
-                $nullAble = false;
-            }
             $bodyContent .= '    /**';
             if ($rule['rule'] == 'int' || $rule['rule'] == 'float') {
                 $ruleStr = $rule['rule'] . '|Calculator|null';
@@ -226,11 +231,6 @@ class ArCreater {
                 $ruleStr = '?' . $rule['rule'];
             }
             $bodyContent .= PHP_EOL . '     * @var ' . $ruleStr . ' ' . $comment;
-//            if ($nullAble) {
-//                $bodyContent .= PHP_EOL . '     * @var ?' . $rule['rule'] . ' ' . $comment;
-//            } else {
-//                $bodyContent .= PHP_EOL . '     * @var ' . $rule['rule'] . ' ' . $comment;
-//            }
             if ($rule['max']) {
                 if ($rule['rule'] == 'int' || $rule['rule'] == 'float') {
 //                    $max = 1;
@@ -264,23 +264,50 @@ class ArCreater {
             }
             $bodyContent .= PHP_EOL . '     */';
             $bodyContent .= PHP_EOL . '    public ' . $ruleStr . ' $' . $v['Field'] . ';' . PHP_EOL . PHP_EOL;
-//            if ($nullAble) {
-//                $bodyContent .= PHP_EOL . '    public ?' . $rule['rule'] . ' $' . $v['Field'] . ';' . PHP_EOL . PHP_EOL;
-//            } else {
-//                $bodyContent .= PHP_EOL . '    public ' . $rule['rule'] . ' $' . $v['Field'] . ';' . PHP_EOL . PHP_EOL;
-//            }
-
+            $afterField = $v['Field'];
         }
-
         // 获取表主键信息
         if (count($primaryKeys)) {
             // 拼接主键信息到 SQL 语句
             $createSql .= "PRIMARY KEY (" . implode(',', $primaryKeys) . "), ";
         }
-        // 去除末尾多余的逗号和空格
+        //获取索引字段
+        $indexMaps = [];
+        try {
+            $sql = "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = '{$completeTable}' AND TABLE_SCHEMA = '{$dbName}'";
+            $indexes = $this->db()->getDatabase()->exec($sql)->get();
+            if ($indexes) {
+                foreach ($indexes as $i => $index) {
+                    if ($index['INDEX_NAME'] == 'PRIMARY') {
+                        continue;
+                    }
+                    if (isset($indexMaps[$index['INDEX_NAME']])) {
+                        $indexMaps[$index['INDEX_NAME']]['content'] = str_replace('ASC)', "ASC,`{$index['COLUMN_NAME']}` ASC)", $indexMaps[$index['INDEX_NAME']]['content']);
+                    } else {
+                        $indexMaps[$index['INDEX_NAME']] = [
+                            'content' => ($index['NON_UNIQUE'] != 0 ? "INDEX" : "UNIQUE INDEX") . " `{$index['INDEX_NAME']}`(`{$index['COLUMN_NAME']}` ASC) USING {$index['INDEX_TYPE']}" . ($index['INDEX_COMMENT'] ? " COMMENT '{$index['INDEX_COMMENT']}'" : ""),
+                        ];
+                    }
+                    $indexMaps[$index['INDEX_NAME']]['hash'] = md5($indexMaps[$index['INDEX_NAME']]['content']);
+                }
+            }
+        } catch (\PDOException $e) {
+            Console::write('数据表索引获取失败:' . $e->getMessage() . ',请确认输入无误后重试');
+            Console::line();
+            return $this->setTABLE();
+        } catch (Throwable $e) {
+            return $this->setTABLE();
+        }
+        if ($indexMaps) {
+            foreach ($indexMaps as $indexInfo) {
+                $createSql .= $indexInfo['content'] . ", ";
+            }
+        }
+        //去除末尾多余的逗号和空格
         $createSql = rtrim($createSql, ', ');
         $createSql .= ")";
         $space = 'App\\' . $nameSpace;
+        //    protected string \$_createSql = "{$createSql}";
         $file = <<<EOF
 <?php
 namespace {$space};
@@ -293,7 +320,6 @@ class {$className} extends Dao {
     protected string \$_dbName = "{$db}";
     protected string \$_table = "{$table}";
     protected string \$_primaryKey = "{$primaryKey}";
-    protected string \$_createSql = "{$createSql}";
     
 {$bodyContent}
 }
@@ -313,6 +339,13 @@ EOF;
             }
         }
         Console::line();
+        $table = $this->getConfig('db') . '_' . $completeTable;
+        Config::setDbTable($table, [
+            'create' => $createSql,
+            'columns' => $columnMaps,
+            'primary' => $primaryKeys,
+            'index' => $indexMaps
+        ]);
         $choose = Console::select(['创建其它数据结构文件', '创建管理面板Vue文件', '重新创建', '退出创建工具'], default: 3, label: Color::success('文件创建成功!请选择下一步操作'));
         if ($choose == 2) {
             $cpCreater = new CpCreater();

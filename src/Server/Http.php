@@ -215,7 +215,7 @@ class Http extends \Scf\Core\Server {
                 'open_http2_protocol' => true,
                 'open_websocket_protocol' => true
             ]);
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::log(Color::red('http服务端口监听启动失败:' . $exception->getMessage()));
             exit(1);
         }
@@ -227,7 +227,7 @@ class Http extends \Scf\Core\Server {
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => true
             ]);
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
             exit(1);
         }
@@ -240,7 +240,7 @@ class Http extends \Scf\Core\Server {
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => false
             ]);
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
             exit(1);
         }
@@ -254,8 +254,9 @@ class Http extends \Scf\Core\Server {
         $this->server->on("BeforeReload", function (Server $server) {
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
+            App::updateDatabase();
             //即将重启
-            $clients = $this->server->getClientList(0);
+            $clients = $this->server->getClientList();
             if ($clients) {
                 foreach ($clients as $fd) {
                     if ($server->isEstablished($fd)) {
@@ -274,10 +275,11 @@ class Http extends \Scf\Core\Server {
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             $this->onStart($server, $serverConfig);
+            App::updateDatabase();
         });
         try {
             $this->server->start();
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::error($exception->getMessage());
         }
     }

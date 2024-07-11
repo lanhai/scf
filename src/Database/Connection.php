@@ -88,9 +88,11 @@ class Connection extends AConnection {
      * @throws Throwable
      */
     public function raw(string $sql, ...$values): IConnection {
-        $expr = preg_replace('/((FROM|TABLE|INTO|UPDATE|JOIN|BY)\s*) ([a-zA-Z0-9_\.]+)/i', "$2 `$3`", $sql);
+        if (!str_contains($sql, 'INFORMATION_SCHEMA.STATISTICS')) {
+            $sql = preg_replace('/((FROM|TABLE|INTO|UPDATE|JOIN|BY)\s*) ([a-zA-Z0-9_\.]+)/i', "$2 `$3`", $sql);
+        }
         // 保存SQL
-        $this->sql = $expr;
+        $this->sql = $sql;
         $this->values = $values;
         $this->sqlData = [$this->sql, $this->params, $this->values, 0];
         // 执行

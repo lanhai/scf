@@ -9,6 +9,7 @@ use RecursiveIteratorIterator;
 use Scf\App\Installer;
 use Scf\App\Updater;
 use Scf\Client\Http;
+use Scf\Database\Dao;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
@@ -18,6 +19,7 @@ use Scf\Util\File;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Event;
 use Swoole\Runtime;
+use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
 
 class App {
@@ -157,6 +159,27 @@ class App {
     public static function isMaster(): bool {
         $role = SERVER_ROLE;// self::installer()->role ?: SERVER_ROLE;
         return $role === 'master';
+    }
+
+    /**
+     * 升级数据库
+     * @return void
+     */
+    public static function updateDatabase(): void {
+        //同步数据库表
+        if (self::isMaster()) {
+            $configDir = App::src() . '/config/db';
+            if (is_dir($configDir) && $files = Dir::scan($configDir)) {
+                foreach ($files as $file) {
+                    $table = Yaml::parseFile($file);
+                    $arr = explode("/", $table['dao']);
+                    $cls = self::buildControllerPath(...$arr);
+                    /** @var Dao $cls */
+                    $dao = $cls::factory();
+                    $dao->updateTable($table);
+                }
+            }
+        }
     }
 
     protected static ?string $_authKey = null;

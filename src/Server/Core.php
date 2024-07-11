@@ -107,8 +107,8 @@ class Core {
         if (!file_exists(APP_LOG_PATH)) {
             mkdir(APP_LOG_PATH, 0775, true);
         }
-        if (!file_exists(APP_PATH . '/db')) {
-            mkdir(APP_PATH . '/db', 0775, true);
+        if (!file_exists(APP_PATH . '/db/updates')) {
+            mkdir(APP_PATH . '/db/updates', 0775, true);
         }
         if (!file_exists(APP_UPDATE_DIR)) {
             mkdir(APP_UPDATE_DIR, 0775, true);
