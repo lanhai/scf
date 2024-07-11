@@ -43,7 +43,6 @@ class ExcelHelper {
             ->output();
         $oss = Oss::instance()->uploadFile($filePath, '/upload/excel/' . date('Ymd') . '/' . $fileName);
         @unlink($filePath);
-
         return Result::success($oss->getData());
     }
 }

@@ -167,7 +167,6 @@ class ArCreater {
         try {
             $sql = "SHOW FULL COLUMNS FROM {$completeTable} FROM {$dbName}";
             $columns = $this->db()->getDatabase()->exec($sql)->get();
-            var_dump($columns);
         } catch (\PDOException $e) {
             Console::write('读取数据表失败:' . $e->getMessage() . ',请确认输入无误后重试');
             Console::line();
