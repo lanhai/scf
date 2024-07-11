@@ -152,6 +152,10 @@ class Struct {
      * @param bool $filterNull 是否过滤NULL的数据
      * @return array
      */
+    public function asArray(bool $filterNull = false): array {
+        return $this->toArray($filterNull);
+    }
+
     public function toArray(bool $filterNull = false): array {
         $fields = $this->_getFields();
         $_data = [];

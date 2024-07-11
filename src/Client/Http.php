@@ -88,10 +88,9 @@ class Http {
      * 发送POST请求
      * @param mixed $body
      * @param int $timeout
-     * @param array|null $files
      * @return Result
      */
-    public function post(mixed $body = [], int $timeout = 30, ?array $files = null): Result {
+    public function post(mixed $body = [], int $timeout = 30): Result {
         try {
             $this->headerInit();
             $this->client->setHeaders($this->headers);

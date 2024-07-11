@@ -60,13 +60,13 @@ class Config {
     }
 
     /**
-     * 读取缓存配置
+     * 读取数据库表配置
      * @param $name
      * @param string|null $key
      * @return mixed
      */
-    public static function getTemp($name, ?string $key = null): mixed {
-        $dir = APP_PATH . '/yml';
+    public static function getDbTable($name, ?string $key = null): mixed {
+        $dir = App::src() . '/config/db';
         if (!is_dir($dir)) {
             mkdir($dir, 0777, true);
         }
@@ -80,14 +80,20 @@ class Config {
     /**
      * 写入缓存配置
      * @param string $name
-     * @param string $key
-     * @param string|array $value
+     * @param string|array $key
+     * @param string|array|null $value
      * @return bool
      */
-    public static function setTemp(string $name, string $key, string|array $value): bool {
-        $data = self::getTemp($name);
-        $data[$key] = $value;
-        return File::write(APP_PATH . '/yml/' . $name . '.yml', Yaml::dump($data));
+    public static function setDbTable(string $name, string|array $key, string|array|null $value = null): bool {
+        $data = self::getDbTable($name);
+        if (is_array($key)) {
+            foreach ($key as $k => $v) {
+                $data[$k] = $v;
+            }
+        } else {
+            $data[$key] = $value;
+        }
+        return File::write(App::src() . '/config/db/' . $name . '.yml', Yaml::dump($data, 3));
     }
 
 }

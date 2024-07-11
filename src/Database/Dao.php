@@ -6,6 +6,7 @@ use Co\Channel;
 use JetBrains\PhpStorm\ArrayShape;
 use JetBrains\PhpStorm\Pure;
 use PDOException;
+use Scf\Command\Color;
 use Scf\Component\Cache;
 use Scf\Core\Console;
 use Scf\Core\Log;
@@ -16,7 +17,9 @@ use Scf\Database\Tools\Expr;
 use Scf\Database\Tools\WhereBuilder;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
+use Scf\Util\File;
 use Swoole\Coroutine;
+use Symfony\Component\Yaml\Yaml;
 use Throwable;
 
 /**
@@ -480,22 +483,114 @@ class Dao extends Struct {
 
     /**
      * 创建表
+     * @param string|null $sql
      * @return bool|array
      */
-    public function createTable(): bool|array {
-        if ($this->_createSql) {
+    public function createTable(?string $sql = null): bool|array {
+        $sql = $sql ?: $this->_createSql;
+        if ($sql && !$this->tableExist()) {
             try {
-                Pdo::master($this->getDb())->getDatabase()->exec('DESCRIBE ' . $this->getTable());
+                Pdo::master($this->getDb())->getDatabase()->exec($sql);
             } catch (Throwable) {
-                try {
-                    Pdo::master($this->getDb())->getDatabase()->exec($this->_createSql);
-                } catch (Throwable) {
-                    return false;
-                }
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * 数据表是否存在
+     * @return bool
+     */
+    public function tableExist(): bool {
+        try {
+            $tablePrefix = Pdo::master($this->_dbName)->getConfig('prefix');
+            $completeTable = $tablePrefix . $this->getTable();
+            Pdo::master($this->getDb())->getDatabase()->exec('DESCRIBE ' . $completeTable);
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * 更新数据表结构
+     * @param $latest
+     * @return void
+     */
+    public function updateTable($latest): void {
+        $key = $latest['db'] . '_' . $latest['table'];
+        $versionFile = APP_PATH . '/db/updates/' . $key . '.yml';
+        $current = file_exists($versionFile) ? Yaml::parseFile($versionFile) : null;
+        if (!$current) {
+            if (!$this->createTable($latest['create'])) {
+                Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::red('创建失败'));
+            } else {
+                Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::success('创建成功'));
+                File::write($versionFile, Yaml::dump($latest, 3));
+            }
+        } elseif ($current['version'] !== $latest['version']) {
+            //更新字段
+            Console::info("【Database】{$latest['db']}.{$latest['table']} " . Color::yellow('需要更新'));
+            // 获取当前和新表的字段
+            $fields = array_keys($latest['columns']);
+            $currentFields = array_keys($current['columns']);
+            // 用于存储生成的 SQL 语句
+            $sqlStatements = [];
+            // 处理新增和更新字段
+            foreach ($fields as $field) {
+                if (!in_array($field, $currentFields)) {
+                    // 新增字段
+                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD COLUMN " . $latest['columns'][$field]['content'];
+                } elseif ($current['columns'][$field]['hash'] != $latest['columns'][$field]['hash']) {
+                    // 更新字段
+                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` MODIFY COLUMN " . $latest['columns'][$field]['content'];
+                }
+            }
+            // 处理删除字段
+            $fieldsToRemove = array_diff($currentFields, $fields);
+            foreach ($fieldsToRemove as $cfield) {
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP COLUMN `{$cfield}`";
+            }
+            //更新索引
+            $indexes = array_keys($latest['index']);
+            $currentIndexes = array_keys($current['index']);
+            foreach ($indexes as $index) {
+                if (!in_array($index, $currentIndexes)) {
+                    // 新增字段
+                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
+                } elseif ($current['index'][$index]['hash'] != $latest['index'][$index]['hash']) {
+                    // 更新字段
+                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$index}`";
+                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
+                }
+            }
+            // 删除索引
+            $indexesToRemove = array_diff($currentIndexes, $indexes);
+            foreach ($indexesToRemove as $dindex) {
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$dindex}`";
+            }
+            // 更新主键
+            if ($latest['primary'] !== $current['primary']) {
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP PRIMARY KEY, ADD PRIMARY KEY (" . implode(',', $latest['primary']) . ") USING BTREE";
+            }
+            // 输出所有 SQL 语句
+            $hasError = false;
+            foreach ($sqlStatements as $sql) {
+                try {
+                    Pdo::master($this->getDb())->getDatabase()->exec($sql)->get();
+                    Console::success($sql . "=>执行成功");
+                } catch (Throwable $exception) {
+                    $hasError = true;
+                    Console::error($sql . "=>" . $exception->getMessage());
+                }
+            }
+            if (!$hasError) {
+                File::write($versionFile, Yaml::dump($latest, 3));
+            }
+        } else {
+            Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::success('已是最新版本'));
+        }
     }
 
     /**

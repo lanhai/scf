@@ -241,7 +241,9 @@ abstract class AConnection implements IConnection {
             throw new PDOException("PDO execute Error:" . $error->getMessage());
         } catch (Throwable $ex) {
             $isBeginTransactions and $transactionsManager->addError($pointId, $ex->getMessage());
-            Console::warning("PDO execute Throw:" . $ex->getMessage());
+            if (!str_contains($this->sql, 'DESCRIBE')) {
+                Console::warning("PDO execute Throw:" . $ex->getMessage());
+            }
             throw $ex;
         } finally {
             // 只可执行一次
