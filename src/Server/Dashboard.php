@@ -205,7 +205,7 @@ class Dashboard {
                             $result = $controller->$method();
                             if ($result instanceof Result) {
                                 if ($result->hasError()) {
-                                    Response::interrupt($result->getMessage(), $result->getErrCode(), $result->getData());
+                                    Response::interrupt($result->getMessage(), $result->getErrCode(), $result->getData(), status: 200);
                                 } else {
                                     Response::success($result->getData());
                                 }

@@ -263,7 +263,7 @@ class Request {
         } else {
             $isValid = !is_null($val) && $val != '';
         }
-        !$isValid and Response::interrupt(is_null($message) ? '参数:' . $key . '不能为空' : $message, 'PARAMS_NOT_VAILD');
+        !$isValid and Response::interrupt(is_null($message) ? '参数:' . $key . '不能为空' : $message, 'PARAMS_NOT_VAILD',status: 200);
     }
 
     /**

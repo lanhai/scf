@@ -457,7 +457,7 @@ class DashboardController extends Controller {
                         }
                         $apis[] = array_merge($document, $c);
                     } catch (\Exception $exception) {
-                        Response::interrupt('生成文档数据失败(' . $item . '):' . $exception->getMessage());
+                        Response::interrupt('生成文档数据失败(' . $item . '):' . $exception->getMessage(), status: 200);
                     }
                 }
                 return Result::success($apis);
