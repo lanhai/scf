@@ -47,7 +47,12 @@ class SocketListener extends Listener {
                             continue;
                         }
                         try {
-                            $websocket = SaberGM::websocket('ws://' . $node->ip . ':' . $node->socketPort . '?username=manager&password=' . md5(App::authKey()));
+                            if (SERVER_HOST_IS_IP) {
+                                $socketHost = $node->ip . ':' . $node->socketPort;
+                            } else {
+                                $socketHost = $node->socketPort . '.' . SERVER_HOST;
+                            }
+                            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                             Coroutine::create(function () use ($websocket, $node, $frame, $server) {
                                 $websocket->push('reload');
                                 Coroutine::defer(function () use ($websocket, $frame) {
@@ -56,7 +61,7 @@ class SocketListener extends Listener {
                                 });
                             });
                         } catch (RequestException $exception) {
-                            Console::log(Color::red($node->ip . ":" . $node->socketPort . "连接失败:" . $exception->getMessage()), false);
+                            Console::log(Color::red($socketHost . "连接失败:" . $exception->getMessage()), false);
                         }
                     }
                     break;
@@ -87,7 +92,12 @@ class SocketListener extends Listener {
                                 continue;
                             }
                             try {
-                                $websocket = SaberGM::websocket('ws://' . $node->ip . ':' . $node->socketPort . '?username=manager&password=' . md5(App::authKey()));
+                                if (SERVER_HOST_IS_IP) {
+                                    $socketHost = $node->ip . ':' . $node->socketPort;
+                                } else {
+                                    $socketHost = $node->socketPort . '.' . SERVER_HOST;
+                                }
+                                $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                                 Coroutine::create(function () use ($websocket, $node, $frame, $server) {
                                     $websocket->push('log_subscribe');
                                     while ($server->exist($frame->fd)) {
@@ -114,7 +124,7 @@ class SocketListener extends Listener {
                                     });
                                 });
                             } catch (RequestException $exception) {
-                                Console::log(Color::red($node->ip . ":" . $node->socketPort . "连接失败:" . $exception->getMessage()), false);
+                                Console::log(Color::red($socketHost . "连接失败:" . $exception->getMessage()), false);
                             }
                         }
                     });

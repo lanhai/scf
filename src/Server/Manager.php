@@ -175,11 +175,16 @@ class Manager extends Component {
         if (is_null($master)) {
             return false;
         }
+        if (SERVER_HOST_IS_IP) {
+            $socketHost = $master->ip . ':' . $master->socketPort;
+        } else {
+            $socketHost = $master->socketPort . '.' . SERVER_HOST;
+        }
         try {
-            $websocket = SaberGM::websocket('ws://' . $master->ip . ':' . $master->socketPort . '?username=manager&password=' . md5(App::authKey()));
+            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
             $websocket->push('reload');
         } catch (\Throwable $exception) {
-            Console::log(Color::red("【" . $master->ip . "】" . $master->socketPort . "连接失败:" . $exception->getMessage()), false);
+            Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
             return false;
         }
         return true;

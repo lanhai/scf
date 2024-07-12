@@ -177,7 +177,11 @@ class CgiListener extends Listener {
             $server = Server::instance();
             $port = $server->getPort();
             $masterHost = App::isReady() ? Config::get('app')['master_host'] : '127.0.0.1';
-            $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . ($port + 2);
+            if (SERVER_HOST_IS_IP) {
+                $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . ($port + 2);
+            } else {
+                $dashboardHost = PROTOCOL_HTTP .($port + 2) . '.' . SERVER_HOST;
+            }
             if ($isIndex) {
                 $client = Http::create($dashboardHost . '/dashboard');
             } else {
