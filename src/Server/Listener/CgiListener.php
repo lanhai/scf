@@ -53,9 +53,9 @@ class CgiListener extends Listener {
 //            }
 //        });
         // 设置CORS响应头
-        $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
-        $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-        $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+//        $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
+//        $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+//        $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
 
         // 如果是预检请求，直接返回200 OK
         if ($request->server['request_method'] == 'OPTIONS') {
@@ -68,6 +68,7 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
+
         if (!Server::instance()->isEnable() && !$proxy) {
             $response->status(503);
             $response->end(JsonHelper::toJson([
@@ -204,15 +205,14 @@ class CgiListener extends Listener {
             } else {
                 $result = $client->post(Request::post()->pack());
             }
+            $response->status(200);
             if ($result->hasError()) {
-                $response->status(503);
                 $response->end(JsonHelper::toJson([
                     'errCode' => 'SERVICE_UNAVAILABLE',
-                    'message' => "请求安装服务失败,请稍后重试",
+                    'message' => $result->getMessage(),
                     'data' => ""
                 ]));
             } else {
-                $response->status(200);
                 $headers = $client->responseHeaders();
                 $cookie = $headers['set-cookie'] ?? null;
                 $cookie && $sessionId and File::write($cookieFile, $cookie);

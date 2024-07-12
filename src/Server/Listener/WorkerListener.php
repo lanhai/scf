@@ -24,7 +24,11 @@ class WorkerListener extends Listener {
         //要使用app命名空间必须先加载模块
         App::isReady() and App::mount();
         //添加RPC服务
-        \Scf\Mode\Rpc\App::addService(Http::instance()->getPort() + 5, $workerId);
+        try {
+            \Scf\Mode\Rpc\App::addService(Http::instance()->getPort() + 5, $workerId);
+        } catch (\Exception $e) {
+            Console::error($e->getMessage());
+        }
         if ($workerId == 0) {
             $srcPath = App::src();
             $version = App::version();
@@ -37,6 +41,7 @@ class WorkerListener extends Listener {
 ---------------------------------
 INFO;
             Console::write(Color::green($info));
+            App::updateDatabase();
         }
     }
 

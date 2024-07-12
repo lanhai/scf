@@ -174,9 +174,13 @@ class App {
                     $table = Yaml::parseFile($file);
                     $arr = explode("/", $table['dao']);
                     $cls = self::buildControllerPath(...$arr);
-                    /** @var Dao $cls */
-                    $dao = $cls::factory();
-                    $dao->updateTable($table);
+                    if (!class_exists($cls)) {
+                        Console::error($cls . " not exist");
+                    } else {
+                        /** @var Dao $cls */
+                        $dao = $cls::factory();
+                        $dao->updateTable($table);
+                    }
                 }
             }
         }
@@ -396,6 +400,7 @@ class App {
         $_fileName .= $className . '.php';
         $namespaceInfo = explode('\\', $namespace);
         $fileName = APP_LIB_PATH . '/' . $_fileName;
+
         if ($fileName) {
             $fileName = str_replace('\\', DIRECTORY_SEPARATOR, $fileName);
             if (file_exists($fileName)) {

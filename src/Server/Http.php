@@ -254,7 +254,6 @@ class Http extends \Scf\Core\Server {
         $this->server->on("BeforeReload", function (Server $server) {
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
-            App::updateDatabase();
             //即将重启
             $clients = $this->server->getClientList();
             if ($clients) {
@@ -275,7 +274,6 @@ class Http extends \Scf\Core\Server {
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             $this->onStart($server, $serverConfig);
-            App::updateDatabase();
         });
         try {
             $this->server->start();
