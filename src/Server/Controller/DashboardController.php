@@ -34,8 +34,7 @@ class DashboardController extends Controller {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
             Response::interrupt("应用尚未完成初始化安装", 'APP_NOT_INSTALL_YET', status: 200);
         }
-        $publisPaths = ['/install', '/install_check', '/login', '/install_slave_node', 'check_slave_node'];
-
+        $publisPaths = ['/install', '/install_check', '/login'];
         if (!in_array($path, $publisPaths) && !$this->isLogin()) {
             Response::interrupt("未授权的访问: " . $path, status: 200);
         }
@@ -436,7 +435,7 @@ class DashboardController extends Controller {
                 $dirName = $mode == MODE_CGI ? 'Controller' : 'Service';
                 $dir = $appStyle == APP_MODULE_STYLE_MICRO ? (APP_LIB_PATH . '/' . $dirName . '/' . $module) : (APP_LIB_PATH . '/' . $module . '/' . $dirName);
                 if (!file_exists($dir)) {
-                    Response::interrupt('服务模块不存在:' . $dir);
+                    Response::interrupt('服务模块不存在:' . $dir, status: 200);
                 }
                 $list = [];
                 if ($files = scandir($dir)) {
