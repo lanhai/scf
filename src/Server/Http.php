@@ -24,6 +24,7 @@ use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Symfony\Component\Yaml\Yaml;
 use Throwable;
 
 
@@ -138,8 +139,7 @@ class Http extends \Scf\Core\Server {
      */
     public function start(): void {
         Co::set(['hook_flags' => SWOOLE_HOOK_ALL]);
-        $configFile = App::src() . '/config/server.php';
-        $serverConfig = file_exists($configFile) ? require_once $configFile : [
+        $serverConfig = [
             'port' => 9580,
             'enable_coroutine' => true,
             'worker_num' => 8,
@@ -152,9 +152,9 @@ class Http extends \Scf\Core\Server {
             'max_mysql_execute_limit' => 128 * 20,//每秒最大mysql处理量限制,超过此值将拒绝服务
             'package_max_length' => 10 * 1024 * 1024,//最大请求数据限制 10M
         ];
-        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 128);
+        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
-        $this->bindPort = $this->bindPort ?: $serverConfig['port'] ?? 9580;
+        $this->bindPort = $this->bindPort ?: $serverConfig['port'];
         //初始化内存表格,放在最前面保证所有进程间能共享
         Table::register([
             'Scf\Server\Table\PdoPoolTable',
@@ -166,6 +166,10 @@ class Http extends \Scf\Core\Server {
         Dashboard::start($this->bindPort + 2);
         //等待APP安装完成
         App::await();
+        $serverConfigFile = App::src() . '/config/server.php';
+        is_file($serverConfigFile) and $serverConfig = require $serverConfigFile;
+        $serverConfigYmlFile = App::src() . '/config/server.yml';
+        is_file($serverConfigYmlFile) and $serverConfig = Yaml::parseFile($serverConfigYmlFile);
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动任务管理进程
@@ -183,6 +187,7 @@ class Http extends \Scf\Core\Server {
 //                unlink(SERVER_MASTER_PID_FILE);
 //            }
 //        }
+
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
@@ -468,7 +473,7 @@ INFO;
      * @return void
      */
     protected function reload(): void {
-        $countdown = 5;
+        $countdown = 3;
         Console::log(Color::yellow($countdown) . '秒后重启服务器');
         Timer::tick(1000, function ($id) use (&$countdown) {
             $countdown--;

@@ -3,6 +3,7 @@
 namespace Scf\Command\DefaultCommand;
 
 use ErrorException;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Cache\Redis;
@@ -18,8 +19,10 @@ use Scf\Command\Manager;
 use Scf\Server\Core;
 use Scf\Server\Event;
 use Scf\Util\Auth;
+use Scf\Util\File;
 use Swoole\Coroutine;
 use Swoole\ExitException;
+use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
 
 class Toolbox implements CommandInterface {
@@ -41,6 +44,7 @@ class Toolbox implements CommandInterface {
         $commandHelp->addAction('trans', '字符串翻译&转换');
         $commandHelp->addAction('logs', '日志查看');
         $commandHelp->addAction('nodes', '服务器节点管理');
+        $commandHelp->addAction('config', '配置文件转换');
 
         $commandHelp->addActionOpt('-app', '应用目录');
         return $commandHelp;
@@ -53,6 +57,34 @@ class Toolbox implements CommandInterface {
         }
         $updater = new Updater();
         $updater->run();
+    }
+
+    public function config(): void {
+        if (!App::isDevEnv()) {
+            Console::error('此功能只能在测试环境使用');
+            return;
+        }
+        $serverFile = App::src() . '/config/server';
+        if (file_exists($serverFile . '.php')) {
+            $content = require $serverFile . '.php';
+            File::write($serverFile . '.yml', Yaml::dump($content, 10));
+            unlink($serverFile . '.php');
+            Console::success("server.php 已转换");
+        }
+        $configFile = App::src() . '/config/app';
+        if (file_exists($configFile . '.php')) {
+            $content = require $configFile . '.php';
+            File::write($configFile . '.yml', Yaml::dump($content, 10));
+            unlink($configFile . '.php');
+            Console::success("app.php 已转换");
+        }
+        $envConfig = App::src() . '/config/app_' . strtolower(APP_RUN_ENV);
+        if (file_exists($envConfig . '.php')) {
+            $content = require $envConfig . '.php';
+            File::write($envConfig . '.yml', Yaml::dump($content, 10));
+            unlink($envConfig . '.php');
+            Console::success("app_" . strtolower(APP_RUN_ENV) . ".php 已转换");
+        }
     }
 
     public function cli(): void {

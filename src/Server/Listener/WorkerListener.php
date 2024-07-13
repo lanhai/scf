@@ -9,6 +9,7 @@ use Scf\Server\Http;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Throwable;
 
 class WorkerListener extends Listener {
 
@@ -19,10 +20,13 @@ class WorkerListener extends Listener {
                 Process::kill($server->worker_pid, SIGKILL);
             }
         });
+//        if ($workerId == 0) {
+//            var_dump(get_included_files());
+//        }
+        //要使用app命名空间必须先加载模块
+        App::mount();
         Console::enablePush();
         //Log::instance()->enableTable();
-        //要使用app命名空间必须先加载模块
-        App::isReady() and App::mount();
         //添加RPC服务
         try {
             \Scf\Mode\Rpc\App::addService(Http::instance()->getPort() + 5, $workerId);

@@ -23,10 +23,19 @@ class Config {
      * 加载系统配置,环境配置
      */
     public static function init(): void {
-        self::load(App::src() . '/config/app.php');
-        $file = App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.php';
-        is_file($file) and self::load($file);
-
+        if (is_file(App::src() . '/config/app.yml') && file_get_contents(App::src() . '/config/app.yml')) {
+            $arr = Yaml::parseFile(App::src() . '/config/app.yml');
+            self::load(is_array($arr) ? $arr : []);
+        } else {
+            self::load(App::src() . '/config/app.php');
+        }
+        if (is_file(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml') && file_get_contents(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml')) {
+            $arr = Yaml::parseFile(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml');
+            self::load(is_array($arr) ? $arr : []);
+        } else {
+            $file = App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.php';
+            is_file($file) and self::load($file);
+        }
     }
 
     /**
@@ -34,8 +43,12 @@ class Config {
      * @param array|string $path
      */
     public static function load(array|string $path): void {
-        $config = is_array($path) ? $path : require($path);
-        self::$_cache = Arr::merge(self::$_cache, $config);
+        $config = is_array($path) ? $path : (file_get_contents($path) ? require($path) : []);
+        try {
+            self::$_cache = Arr::merge(self::$_cache, is_array($config) ? $config : []);
+        } catch (\Throwable $e) {
+            Console::error($path . "=>" . $e->getMessage());
+        }
     }
 
     /**
