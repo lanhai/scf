@@ -114,22 +114,22 @@ class Http extends \Scf\Core\Server {
      * @return void
      */
     public static function startMasterProcess(): void {
-        if (App::isMaster()) {
-            $process = new Process(function () {
-                $processId = Counter::instance()->get('_background_process_id_');
-                while (true) {
-                    $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
-                    if ($processId != $latestProcessId) {
-                        $processId = $latestProcessId;
-                        Crontab::startProcess();
-                        RQueue::startProcess();
-                    }
-                    usleep(1000 * 1000 * 5);
+        //if (App::isMaster()) {
+        $process = new Process(function () {
+            $processId = Counter::instance()->get('_background_process_id_');
+            while (true) {
+                $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
+                if ($processId != $latestProcessId) {
+                    $processId = $latestProcessId;
+                    Crontab::startProcess();
+                    RQueue::startProcess();
                 }
-            });
-            $pid = $process->start();
-            Console::success('Background Process PID:' . Color::info($pid));
-        }
+                usleep(1000 * 1000 * 5);
+            }
+        });
+        $pid = $process->start();
+        Console::success('Background Process PID:' . Color::info($pid));
+        //}
     }
 
     /**
