@@ -188,7 +188,12 @@ class Dashboard {
                             if (isset($request->server['query_string'])) {
                                 $path .= '?' . $request->server['query_string'];
                             }
-                            $client = \Scf\Client\Http::create(PROTOCOL_HTTP . 'localhost:' . ($port - 2) . $path);
+                            if (SERVER_HOST_IS_IP) {
+                                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . ($port - 2);
+                            } else {
+                                $dashboardHost = PROTOCOL_HTTP . ($port - 2) . '.' . SERVER_HOST;
+                            }
+                            $client = \Scf\Client\Http::create($dashboardHost . $path);
                             foreach ($request->header as $key => $value) {
                                 $client->setHeader($key, $value);
                             }
