@@ -183,6 +183,8 @@ class CgiListener extends Listener {
                 } else {
                     $dashboardHost = PROTOCOL_HTTP . ($port + 2) . '.' . $masterHost;
                 }
+                var_dump($masterHost);
+                var_dump($dashboardHost);
             } else {
                 $masterHost = '127.0.0.1';
                 $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($port + 2);
@@ -219,7 +221,10 @@ class CgiListener extends Listener {
                 $response->end(JsonHelper::toJson([
                     'errCode' => 'SERVICE_UNAVAILABLE',
                     'message' => $result->getMessage(),
-                    'data' => ""
+                    'data' => [
+                        'master' => $masterHost,
+                        'host' => $dashboardHost
+                    ]
                 ]));
             } else {
                 $headers = $client->responseHeaders();
