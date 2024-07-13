@@ -143,7 +143,7 @@ class NodeManager {
                     if (SERVER_HOST_IS_IP) {
                         $socketHost = $node->ip . ':' . $node->socketPort;
                     } else {
-                        $socketHost = $node->socketPort . '.' . SERVER_HOST . '/dashboard.socket';
+                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                     }
                     $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                     Coroutine::create(function () use ($websocket, $node) {
@@ -186,7 +186,7 @@ class NodeManager {
                     if (SERVER_HOST_IS_IP) {
                         $socketHost = $node->ip . ':' . $node->socketPort;
                     } else {
-                        $socketHost = $node->socketPort . '.' . SERVER_HOST . '/dashboard.socket';
+                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                     }
                     $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                     Coroutine::create(function () use ($websocket, $node) {
@@ -236,7 +236,7 @@ class NodeManager {
                     if (SERVER_HOST_IS_IP) {
                         $socketHost = $node->ip . ':' . $node->socketPort;
                     } else {
-                        $socketHost = $node->socketPort . '.' . SERVER_HOST . '/dashboard.socket';
+                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                     }
                     $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                     $websocket->push('appoint_update:' . $type . '|' . $version);
