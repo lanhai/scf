@@ -238,6 +238,7 @@ class NodeManager {
                     } else {
                         $socketHost = $node->socketPort . '.' . SERVER_HOST;
                     }
+                    var_dump($socketHost);
                     $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                     $websocket->push('appoint_update:' . $type . '|' . $version);
                     while (true) {
