@@ -76,7 +76,6 @@ class App {
             }
             sleep(1);
         }
-        self::mount($mode);
     }
 
     /**

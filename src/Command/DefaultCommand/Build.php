@@ -178,7 +178,6 @@ class Build implements CommandInterface {
             $phar = new \Phar($buildFilePath, 0, 'src');
             $phar->compress(\Phar::GZ);
             $phar->buildFromDirectory(APP_PATH . '/src');
-
             $phar->setDefaultStub('version.php', 'version.php');
             //源代码加密
             $content = File::read($buildFilePath);

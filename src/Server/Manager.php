@@ -210,11 +210,6 @@ class Manager extends Component {
                     MasterDB::delete($key);
                     continue;
                 }
-//                if (time() - $node['heart_beat'] >= 300) {
-//                    MasterDB::sRemove(App::id() . '-nodes', $node['id']);
-//                    MasterDB::delete($key);
-//                    continue;
-//                }
                 $node['tasks'] = Crontab::instance()->getList();
                 $list[] = $node;
             }
