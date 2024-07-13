@@ -85,6 +85,10 @@ class Crontab {
         }
         if ($list) {
             foreach ($list as &$task) {
+                $enableSlave = $task['enable_slave'] ?? false;
+                if (!App::isMaster() && !$enableSlave) {
+                    continue;
+                }
                 $task['id'] = $managerId;
                 $task['created'] = time();
                 $task['expired'] = 0;
