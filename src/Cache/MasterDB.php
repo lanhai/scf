@@ -31,7 +31,7 @@ class MasterDB {
 
     protected function connection(): Redis|NullMasterDb {
         $pool = Redis::instance()->create([
-            'host' => App::isReady() ? Config::get('app')['master_host'] ?? '127.0.0.1' : '127.0.0.1',
+            'host' => App::isMaster() ? '127.0.0.1' : (Config::get('app')['master_host'] ?? '127.0.0.1'),
             'port' => App::isReady() ? Config::get('app')['master_port'] ?? MDB_PORT : MDB_PORT,
             'auth' => '',
             'db_index' => 0,

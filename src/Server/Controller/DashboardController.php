@@ -355,14 +355,7 @@ class DashboardController extends Controller {
         }
         //$socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
-            //$socketHost = $protocol . $this->getDomain($host) . '/server.socket';
             $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
-//            if (str_starts_with($host, Config::get('app')['master_host'])) {
-//                $socketHost = $protocol . Config::get('app')['master_host'] . ':' . ($port - 2) . '/dashboard.socket';
-//            } else {
-//                $socketHost = $protocol . $host . '/dashboard.socket';
-//            }
-//            $socketHost = $protocol . explode(":", $host)[0] . ':' . (Http::instance()->getPort1() + 1);
         } else {
             $socketHost = $protocol . 'localhost:' . (Http::instance()->getPort() + 1);
         }
