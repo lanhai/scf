@@ -188,13 +188,14 @@ class CgiListener extends Listener {
                 $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($port + 2);
             }
             if ($isIndex) {
-                $client = Http::create($dashboardHost . '/dashboard');
+                $url = $dashboardHost . '/dashboard';
             } else {
                 if (isset($request->server['query_string'])) {
                     $path .= '?' . $request->server['query_string'];
                 }
-                $client = Http::create($dashboardHost . $path);
+                $url = $dashboardHost . $path;
             }
+            $client = Http::create($url);
             foreach ($request->header as $key => $value) {
                 $client->setHeader($key, $value);
             }
@@ -218,10 +219,12 @@ class CgiListener extends Listener {
             if ($result->hasError()) {
                 $response->end(JsonHelper::toJson([
                     'errCode' => 'SERVICE_UNAVAILABLE',
-                    'message' => $result->getMessage(),
+                    'message' => "转发请求至控制面板失败:" . $result->getMessage(),
                     'data' => [
                         'master' => $masterHost,
-                        'host' => $dashboardHost
+                        'host' => $dashboardHost,
+                        'url' => $url,
+                        'method' => $request->server['request_method']
                     ]
                 ]));
             } else {

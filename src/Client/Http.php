@@ -256,7 +256,7 @@ class Http {
             return Result::error('请求错误:' . socket_strerror($this->client->errCode) . '(' . $this->client->errMsg . ')', 'REQUEST_FAIL');
         }
         if ($this->client->statusCode != 200) {
-            return Result::error('请求失败:' . $this->client->statusCode, 'REQUEST_ERROR');
+            return Result::error('状态码[' . $this->client->statusCode . ']', 'REQUEST_ERROR');
         }
         $body = $this->client->body;
         $this->client->close();
