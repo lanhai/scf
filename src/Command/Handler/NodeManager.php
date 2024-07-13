@@ -129,7 +129,7 @@ class NodeManager {
      * 日志订阅
      * @return void
      */
-    protected function logSubscribe() {
+    protected function logSubscribe(): void {
         run(function () {
             foreach ($this->nodes as $node) {
                 if (!$node) {
@@ -272,7 +272,12 @@ class NodeManager {
     protected function send($num, $msg): void {
         $node = Node::factory($this->nodes[$num]);
         run(function () use ($node, $msg) {
-            $websocket = SaberGM::websocket('ws://' . $node->ip . ':' . $node->socketPort . '?username=manager&password=' . md5(App::authKey()));
+            if (SERVER_HOST_IS_IP) {
+                $socketHost = $node->ip . ':' . $node->socketPort;
+            } else {
+                $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
+            }
+            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
             Coroutine::create(function () use ($websocket, $msg, $node) {
                 $websocket->push($msg);
                 while (true) {
