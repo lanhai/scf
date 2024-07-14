@@ -182,6 +182,33 @@ class App {
                     }
                 }
             }
+            //同步权限节点
+            $versionFile = App::src() . '/config/access/nodes.yml';
+            if (file_exists($versionFile)) {
+                $latest = Yaml::parseFile($versionFile);
+                $cls = $latest['dao'];
+                $currVersionFile = APP_PATH . '/db/updates/_access_nodes.yml';
+                $current = file_exists($currVersionFile) ? Yaml::parseFile($currVersionFile) : null;
+                if (!$current || $current['version'] != $latest['version']) {
+                    /** @var Dao $cls */
+                    $count = $cls::select()->delete();
+                    if ($count) {
+                        Console::warning("【Database】{$count}条节点数据已删除");
+                    }
+                    foreach ($latest['nodes'] as $node) {
+                        $ar = $cls::factory($node);
+                        if (!$ar->save(forceInsert: true)) {
+                            Console::error($ar->getError());
+                        }
+                    }
+                    Console::log("【Database】" . count($latest['nodes']) . "条权限节点数据已更新至:" . Color::success($latest['version']));
+                    File::write($currVersionFile, Yaml::dump([
+                        'version' => $latest['version']
+                    ]));
+                } else {
+                    Console::log("【Database】权限节点数据已是最新版本:" . Color::success($latest['version']));
+                }
+            }
         }
     }
 
