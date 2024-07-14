@@ -270,9 +270,9 @@ class Http extends \Scf\Core\Server {
                 }
             }
         });
-        $this->server->on("AfterReload", function (Server $server) {
+        $this->server->on("AfterReload", function () {
             Runtime::instance()->set('restart_times', $this->restartTimes);
-            $this->log('第' . $this->restartTimes . '次重启完成');
+            $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
             Counter::instance()->incr('_background_process_id_');
         });

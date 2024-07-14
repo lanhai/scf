@@ -589,7 +589,7 @@ class Dao extends Struct {
                 File::write($versionFile, Yaml::dump($latest, 3));
             }
         } else {
-            Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::success('已是最新版本'));
+            Console::log("【Database】{$latest['db']}.{$latest['table']}已是最新版本:" . Color::success($latest['version']));
         }
     }
 
