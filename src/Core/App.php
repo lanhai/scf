@@ -193,7 +193,7 @@ class App {
                     /** @var Dao $cls */
                     $count = $cls::select()->delete();
                     if ($count) {
-                        Console::warning("【Database】{$count}条节点数据已删除");
+                        Console::warning("【Database】{$count}条权限节点数据已删除");
                     }
                     foreach ($latest['nodes'] as $node) {
                         $ar = $cls::factory($node);
