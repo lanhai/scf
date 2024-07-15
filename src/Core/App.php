@@ -373,9 +373,10 @@ class App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            is_dir(APP_LIB_PATH . '/Controller') and $entryScripts = Dir::scan(APP_LIB_PATH . '/Controller/', 2);
-            is_dir(APP_LIB_PATH . '/Cli') and $mode == MODE_CLI and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Cli/', 2)];
-            is_dir(APP_LIB_PATH . '/Service') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Service/', 2)];
+            is_dir(APP_LIB_PATH . '/Controller') and $entryScripts = Dir::scan(APP_LIB_PATH . '/Controller', 2);
+            is_dir(APP_LIB_PATH . '/Cli') and $mode == MODE_CLI and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Cli', 2)];
+            is_dir(APP_LIB_PATH . '/Service') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Service', 2)];
+            is_dir(APP_LIB_PATH . '/Crontab') and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Crontab', 2)];
         } else {
             $entryScripts = Dir::scan(APP_LIB_PATH, 2);
         }
