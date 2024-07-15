@@ -62,7 +62,7 @@ abstract class Queue {
                 Redis::pool()->lPush(QueueStatus::DELAY->key(), $this->queue->toArray());
                 $timerId = Timer::after($this->queue->try_times * 60 * 1000, function () {
                     Redis::pool()->rPop(QueueStatus::DELAY->key());
-                    if (!(bool)$this->reAdd()) {
+                    if (!$this->reAdd()) {
                         Log::instance()->error('重新加入队列失败:' . JsonHelper::toJson($this->queue->toArray()));
                     }
                 });

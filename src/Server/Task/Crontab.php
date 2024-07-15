@@ -79,8 +79,9 @@ class Crontab {
         }
         $list = [];
         foreach ($modules as $module) {
-            if (isset($module['background_tasks'])) {
-                $list = $list ? [...$list, ...$module['background_tasks']] : $module['background_tasks'];
+            $crontabs = $module['crontabs'] ?? $module['background_tasks'] ?? [];
+            if ($crontabs) {
+                $list = $list ? [...$list, ...$crontabs] : $crontabs;
             }
         }
         if ($list) {
