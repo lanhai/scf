@@ -585,9 +585,9 @@ class Dao extends Struct {
                     Console::error($sql . "=>" . $exception->getMessage());
                 }
             }
-            if (!$hasError) {
-                File::write($versionFile, Yaml::dump($latest, 3));
-            }
+            //if (!$hasError) {
+            File::write($versionFile, Yaml::dump($latest, 3));
+            //}
         } else {
             Console::log("【Database】{$latest['db']}.{$latest['table']}已是最新版本:" . Color::success($latest['version']));
         }
