@@ -797,7 +797,7 @@ class Redis extends Cache {
         if (Env::isDev()) {
             Console::warning("【Redis】Execute Failed:" . $exception->getMessage());
         } else {
-            Log::instance()->error($exception->getMessage());
+            Log::instance()->error("【Redis】" . $exception->getMessage());
         }
     }
 }
