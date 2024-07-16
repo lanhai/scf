@@ -792,9 +792,9 @@ class Redis extends Cache {
         return $this->keyPrefix . '_' . $key;
     }
 
-    protected function onExecuteError(RedisException $exception) {
+    protected function onExecuteError(RedisException $exception): void {
         self::$pools = [];
         !Env::isDev() and Log::instance()->error($exception->getMessage());
-        Env::isDev() and Console::error("【Redis】Execute Failed:" . $exception->getMessage());
+        Env::isDev() and Console::warning("【Redis】Execute Failed:" . $exception->getMessage());
     }
 }
