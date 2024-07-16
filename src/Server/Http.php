@@ -138,7 +138,7 @@ class Http extends \Scf\Core\Server {
      * @throws Exception
      */
     public function start(): void {
-        Co::set(['hook_flags' => SWOOLE_HOOK_ALL]);
+        Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
         $serverConfig = [
             'port' => 9580,
             'enable_coroutine' => true,
@@ -187,7 +187,6 @@ class Http extends \Scf\Core\Server {
 //                unlink(SERVER_MASTER_PID_FILE);
 //            }
 //        }
-
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
@@ -305,16 +304,6 @@ class Http extends \Scf\Core\Server {
         define("SERVER_MANAGER_PID", $managerPid);
         Log::instance()->enableTable();
         $scfVersion = SCF_VERSION;
-//        $cid[] = go(function () use (&$scfVersion) {
-//            $composerOutput = trim(System::exec('composer show --working-dir=' . SCF_ROOT . ' alibabacloud/sts-20150401')['output']);
-//            // 使用正则表达式匹配版本号
-//            preg_match('/versions\s*:\s*\*?\s*([\d.]+)/', $composerOutput, $matches);
-//            if (isset($matches[1])) {
-//                $scfVersion = $matches[1];
-//            }
-//        });
-//        Coroutine::join($cid);
-
         $role = SERVER_ROLE;
         $env = APP_RUN_ENV;
         $mode = APP_RUN_MODE;
@@ -375,7 +364,6 @@ INFO;
                 Counter::instance()->delete('_MYSQL_EXECUTE_COUNT_' . (time() - 5));
                 Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
                 $manager->heartbeat($this->server);
-                //Coroutine::sleep(1);
             });
         });
         $this->log('节点心跳服务启动完成!协程ID:' . $pid);
