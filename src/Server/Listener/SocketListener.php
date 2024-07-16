@@ -23,6 +23,7 @@ use Swoole\Timer;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
 use Swlib\Http\Exception\RequestException;
+use Throwable;
 
 class SocketListener extends Listener {
 
@@ -72,7 +73,7 @@ class SocketListener extends Listener {
                             $status = Manager::instance()->getStatus();
                             try {
                                 $server->push($frame->fd, JsonHelper::toJson($status));
-                            } catch (\Throwable) {
+                            } catch (Throwable) {
                                 $server->close($frame->fd);
                                 Timer::clear($id);
                             }

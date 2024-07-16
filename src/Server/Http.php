@@ -672,7 +672,7 @@ INFO;
      * @return bool
      */
     public function push($fd, $str): bool {
-        if ($this->server->isEstablished($fd)) {
+        if (!$this->server->exist($fd) || !$this->server->isEstablished($fd)) {
             Console::unsubscribe($fd);
             return false;
         }
