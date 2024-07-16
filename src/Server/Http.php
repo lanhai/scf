@@ -672,6 +672,10 @@ INFO;
      * @return bool
      */
     public function push($fd, $str): bool {
+        if ($this->server->isEstablished($fd)) {
+            Console::unsubscribe($fd);
+            return false;
+        }
         try {
             return $this->server->push($fd, $str);
         } catch (Throwable) {
