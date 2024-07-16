@@ -35,8 +35,8 @@ class MasterDB {
             'port' => App::isReady() ? Config::get('app')['master_port'] ?? MDB_PORT : MDB_PORT,
             'auth' => '',
             'db_index' => 0,
-            'time_out' => 1,//连接超时时间
-            'size' => 8,
+            'time_out' => 5,//连接超时时间
+            'size' => 4,
         ]);
         if ($pool instanceof NullPool) {
             Console::error("【MasterDB】连接失败:" . $pool->getError());
