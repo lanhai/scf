@@ -173,7 +173,7 @@ class WhereBuilder {
      */
     #[ArrayShape(['field' => "mixed", 'operator' => "mixed|string", 'value' => "array|mixed|string"])]
     protected function format($key, $value): array {
-        preg_match('/([a-zA-Z0-9_\.]+)(\[(?<operator>\>\=?|\<\=?|\!?|\<\>|\>\<|~|\^|\!\^|%|\!%|REGEXP)\])?/i', $key, $match);
+        preg_match('/([a-zA-Z0-9_\.]+)(\[(?<operator>\>\=?|\<\=?|\!?|\<\>|\>\<|~|\^|\!\^|\>\=\<|\>\!\<|%|\!%|REGEXP)\])?/i', $key, $match);
         $operator = $match['operator'] ?? "=";
         if (!isset($this->operator[$operator])) {
             throw new \PDOException('不合法的比较运算符:' . $operator);
@@ -226,6 +226,8 @@ class WhereBuilder {
             $formattedValue = $orArr['match'];
         } else {
             switch ($operator) {
+                case '>=<':
+                case '>!<':
                 case '^':
                 case '!^':
                     //$formattedValue = "{$value[0]} AND {$value[1]}";
