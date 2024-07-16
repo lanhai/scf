@@ -20,6 +20,10 @@ class MasterDB {
 
     protected static Redis $redisConnection;
     protected ?Redis $connectionPool = null;
+    protected array $latestError = [
+        'time' => 0,
+        'msg' => null
+    ];
 
     public static function __callStatic($method, $args) {
         return self::$redisConnection->$method(...$args);
@@ -28,6 +32,7 @@ class MasterDB {
     public function __call($method, $args) {
         return $this->$method(...$args);
     }
+
 
     protected function connection(): Redis|NullMasterDb {
         $pool = Redis::instance()->create([
@@ -39,7 +44,11 @@ class MasterDB {
             'size' => 4,
         ]);
         if ($pool instanceof NullPool) {
-            Console::error("【MasterDB】连接失败:" . $pool->getError());
+            if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 10) {
+                Console::warning("【MasterDB】连接失败:" . $pool->getError());
+                $this->latestError['time'] = time();
+            }
+            $this->latestError['msg'] = $pool->getError();
             return new NullMasterDb('MasterDB', $pool->getError());
         }
         return $pool;

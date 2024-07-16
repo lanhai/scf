@@ -75,7 +75,7 @@ class Core {
         !defined('SERVER_LOG_REPORT') and define('SERVER_LOG_REPORT', $options['report'] ?? SWITCH_ON);
         //是否开启静态资源服务
         !defined('SERVER_ENABLE_STATIC_HANDER') and define('SERVER_ENABLE_STATIC_HANDER', $staticHandler ?: Manager::instance()->issetOpt('static'));
-        !defined('SERVER_HOST') and define('SERVER_HOST', Env::getIntranetIp());
+        !defined('SERVER_HOST') and define('SERVER_HOST', $options['host'] ?? Env::getIntranetIp());
         !defined('SERVER_HOST_IS_IP') and define('SERVER_HOST_IS_IP', filter_var(SERVER_HOST, FILTER_VALIDATE_IP) !== false);
         !defined('PRINT_MYSQL_LOG') and define('PRINT_MYSQL_LOG', Manager::instance()->issetOpt('print_mysql_logs'));
         !defined('PRINT_REDIS_LOG') and define('PRINT_REDIS_LOG', Manager::instance()->issetOpt('print_redis_logs'));
