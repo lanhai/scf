@@ -30,7 +30,7 @@ class RedisLogger implements LoggerInterface {
             if (Env::isDev()) {
                 Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ")."[{$exception->getMessage()}]");
             } else {
-                Log::instance()->error("【Redis】" . $exception->getMessage());
+                Log::instance()->error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ")."[{$exception->getMessage()}]");
             }
         }
     }

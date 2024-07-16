@@ -794,7 +794,10 @@ class Redis extends Cache {
 
     protected function onExecuteError(RedisException $exception): void {
         self::$pools = [];
-        !Env::isDev() and Log::instance()->error($exception->getMessage());
-        Env::isDev() and Console::warning("【Redis】Execute Failed:" . $exception->getMessage());
+        if (Env::isDev()) {
+            Console::warning("【Redis】Execute Failed:" . $exception->getMessage());
+        } else {
+            Log::instance()->error($exception->getMessage());
+        }
     }
 }
