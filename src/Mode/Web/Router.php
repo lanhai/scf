@@ -210,6 +210,12 @@ class Router {
         $this->_partitions['action'] = $this->_action;
     }
 
+    public function fixPartition($key, $value): void {
+        $this->_partitions[$key] = $value;
+        $property = '_' . $key;
+        $this->$property = $value;
+    }
+
     /**
      * 获取访问路径
      * @param $server
@@ -263,7 +269,6 @@ class Router {
                 $path = array_merge(array_slice($partition, 0, $offset), $path);
             }
         }
-
         $path = array_map('\Scf\Helper\StringHelper::camel2lower', $path);
         return '/' . join('/', $path) . ($params ? '?' . http_build_query($params) : '');
     }
