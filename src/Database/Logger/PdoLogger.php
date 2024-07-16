@@ -49,7 +49,7 @@ class PdoLogger implements ILogger {
         PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql}【{$time}】ms");
         if (!is_null($exception) && !str_starts_with($executeSql, 'DESCRIBE')) {
             Env::isDev() and Console::error("【Mysql】{$executeSql}【{$time}】");
-            Log::instance()->error($exception->getMessage());
+            $executeSql !== 'select 1' and Log::instance()->error($exception->getMessage());
             //throw new AppError($exception->getMessage());
         }
     }
