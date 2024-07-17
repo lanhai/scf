@@ -5,9 +5,10 @@ namespace Scf\Mode\Web\Route;
 use InvalidArgumentException;
 use ReflectionClass;
 use ReflectionMethod;
+use Scf\Core\Component;
 use Scf\Core\Console;
 
-class AnnotationReader {
+class AnnotationReader extends Component {
 
     public function getAnnotations($reflectionClassOrMethod): array {
         $annotations = [];

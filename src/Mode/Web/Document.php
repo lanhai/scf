@@ -5,7 +5,6 @@ namespace Scf\Mode\Web;
 use ReflectionMethod;
 use Scf\Core\Component;
 use Scf\Core\Config;
-use Scf\Core\Console;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Route\AnnotationReader;
 
@@ -45,7 +44,7 @@ class Document extends Component {
             }
         }
         $methods = $cls->getMethods(ReflectionMethod::IS_PUBLIC);
-        $reader = new AnnotationReader();
+        $reader = AnnotationReader::instance();
         foreach ($methods as $k => $method) {
             $annotations = $reader->getAnnotations($method);
             $comment = $method->getDocComment();

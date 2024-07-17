@@ -84,7 +84,7 @@ class AnnotationRouteRegister extends Component {
             $maps = explode(DIRECTORY_SEPARATOR, $classFilePath);
             $maps[count($maps) - 1] = str_replace('.php', '', $fileName);
             $namespace = App::buildControllerPath(...$maps);
-            $reader = new AnnotationReader();
+            $reader = AnnotationReader::instance();
             try {
                 if (!is_subclass_of($namespace, Controller::class)) {
                     continue;
