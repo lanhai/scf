@@ -475,8 +475,7 @@ class DashboardController extends Controller {
         Request::post([
             'password' => Request\Validator::required("密码不能为空")
         ])->assign($password);
-        $configFile = App::src() . '/config/server.php';
-        $serverConfig = file_exists($configFile) ? require $configFile : [];
+        $serverConfig = Config::server();
         $superPassword = $serverConfig['dashboard_password'] ?? null;
         if (App::info()->dashboard_password !== $password && App::info()->app_auth_key !== $password && $superPassword !== $password) {
             return Result::error('密码错误');

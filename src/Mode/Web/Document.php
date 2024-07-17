@@ -2,9 +2,12 @@
 
 namespace Scf\Mode\Web;
 
+use ReflectionMethod;
 use Scf\Core\Component;
 use Scf\Core\Config;
+use Scf\Core\Console;
 use Scf\Helper\StringHelper;
+use Scf\Mode\Web\Route\AnnotationReader;
 
 class Document extends Component {
     protected static array $_retulst_data = [];
@@ -41,8 +44,10 @@ class Document extends Component {
                 }
             }
         }
-        $methods = $cls->getMethods(\ReflectionMethod::IS_PUBLIC);
+        $methods = $cls->getMethods(ReflectionMethod::IS_PUBLIC);
+        $reader = new AnnotationReader();
         foreach ($methods as $k => $method) {
+            $annotations = $reader->getAnnotations($method);
             $comment = $method->getDocComment();
             $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
             if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
@@ -50,7 +55,6 @@ class Document extends Component {
             } else {
                 $path = '/' . StringHelper::camel2lower($classArr[2]) . '/' . StringHelper::camel2lower($classArr[4]) . '/' . StringHelper::camel2lower(str_replace('action', '', $method->getName())) . '/';
             }
-
             if ($method->getName()[0] === '_' || !$comment) {
                 unset($methods[$k]);
                 continue;
@@ -162,9 +166,11 @@ class Document extends Component {
                 }
             }
             $return['data']['fields'] = self::createResultField();
+
             $document['methods'][] = [
                 'name' => $method->getName(),
-                'path' => $path,
+                'path' => $annotations['Route'] ?? $path,
+                'is_annotation_route' => isset($annotations['Route']),
                 'method' => $requestType,
                 'desc' => $desc,
                 'explain' => $explain ? implode("<br>", $explain) : $desc,

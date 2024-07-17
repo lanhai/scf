@@ -13,6 +13,7 @@ use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Command\Color;
 use Scf\Command\Manager;
+use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Root;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
@@ -154,6 +155,9 @@ class Dashboard {
                 }
                 $this->_SERVER->on('WorkerStart', function (Server $server, $workerId) {
                     App::isReady() and App::mount();
+                    if ($workerId == 0) {
+                        AnnotationRouteRegister::instance()->load();
+                    }
                     //Console::info("[Dashboard]worker#" . $workerId . "启动完成");
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {
@@ -237,7 +241,6 @@ class Dashboard {
                         Console::info("[Dashboard]应用安装成功!配置文件加载完成!开始重启");
                         $server->reload();
                     }
-
                 });
                 $this->_SERVER->start();
             } catch (\Throwable $exception) {
