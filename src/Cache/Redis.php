@@ -40,7 +40,7 @@ class Redis extends Cache {
     private static array $pools = [];
 
     /**
-     * 创建一个新的连接,此连接在高并发下存在抢锁可能,只适用于非对外业务场景适用
+     * 创建一个新的连接,此连接在高并发下存在抢锁可能,只适用于非对外业务场景
      * @param string $server
      * @return static
      */
@@ -118,8 +118,8 @@ class Redis extends Cache {
         try {
             $this->connection = new RedisPool($config['host'], $config['port'], $config['auth'], 0);
             $maxIdle = $config['max_idle'] ?? 16;        // 最大闲置连接数
-            $maxLifetime = 3600;  // 连接的最长生命周期
-            $waitTimeout = 0.0;   // 从池获取连接等待的时间, 0为一直等待
+            $maxLifetime = $config['max_life_time'] ?? 3600;  // 连接的最长生命周期
+            $waitTimeout = $config['wait_timeout'] ?? 0.0;   // 从池获取连接等待的时间, 0为一直等待
             $this->connection->start($config['size'], $maxIdle, $maxLifetime, $waitTimeout);
             $logger = new RedisLogger();
             $this->connection->setLogger($logger);
@@ -131,6 +131,13 @@ class Redis extends Cache {
         return $this;
     }
 
+    /**
+     * 获取连接池状态
+     * @return array
+     */
+    public function poolStats(): array {
+        return $this->connection->poolStats();
+    }
 
     /**
      * 获取一个原生驱动连接

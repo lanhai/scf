@@ -44,7 +44,7 @@ class MasterDB {
             'size' => 4,
         ]);
         if ($pool instanceof NullPool) {
-            if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 10) {
+            if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 20) {
                 Console::warning("【MasterDB】连接失败:" . $pool->getError());
                 $this->latestError['time'] = time();
             }
@@ -62,13 +62,11 @@ class MasterDB {
         Timer::tick(1000, function ($id) {
             try {
                 $result = $this->connectionPool->get("___connection_created___");
-                //Console::info('idleCheck:' . $result);
                 if (!$result) {
                     Console::warning("MasterDB连接池失效");
                     $this->connectionPool = null;
                     Timer::clear($id);
                 }
-                //Console::info("MasterDB CHECK:" . $result);
             } catch (\Throwable $exception) {
                 Console::error("MasterDB连接池失效:" . $exception->getMessage());
                 $this->connectionPool = null;
