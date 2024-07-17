@@ -19,6 +19,8 @@ class AnnotationRouteRegister extends Component {
     private function getRegexForType($type): string {
         $patterns = [
             'int' => '\d+',
+            'letter' => '[A-Za-z]+',
+            'mixed' => '[A-Za-z0-9]+',
             'string' => '[^/]+',//\w+
             'email' => '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]+',//[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
             // 添加更多类型及其对应的正则表达式
@@ -29,6 +31,7 @@ class AnnotationRouteRegister extends Component {
     // 匹配路由
     public function match($method, $path): ?array {
         $routes = $this->routes();
+        //TODO 缓存路由不用每次循环
         foreach ($routes as $route) {
             $allowMethods = explode(',', $route['method']);
             if ($route['method'] !== 'all' && !in_array(strtolower($method), $allowMethods)) {

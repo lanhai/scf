@@ -3,6 +3,7 @@
 namespace Scf\Server;
 
 use Scf\App\Updater;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Exception;
 use Scf\Mode\Web\App;
@@ -134,26 +135,9 @@ class Http extends \Scf\Core\Server {
     /**
      * 启动服务
      * @return void
-     * @throws Exception
      */
     public function start(): void {
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
-        $serverConfig = [
-            'port' => 9580,
-            'enable_coroutine' => true,
-            'worker_num' => 8,
-            'max_wait_time' => 60,
-            'task_worker_num' => 8,
-            'max_connection' => 4096,//最大连接数
-            'max_coroutine' => 10240,//最多启动多少个携程
-            'max_concurrency' => 2048,//最高并发
-            'max_request_limit' => 128,//每秒最大请求量限制,超过此值将拒绝服务
-            'max_mysql_execute_limit' => 128 * 20,//每秒最大mysql处理量限制,超过此值将拒绝服务
-            'package_max_length' => 10 * 1024 * 1024,//最大请求数据限制 10M
-        ];
-        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
-        !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
-        $this->bindPort = $this->bindPort ?: $serverConfig['port'];
         //初始化内存表格,放在最前面保证所有进程间能共享
         Table::register([
             'Scf\Server\Table\PdoPoolTable',
@@ -162,14 +146,14 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\Runtime',
             'Scf\Server\Table\RouteTable',
         ]);
+        $this->bindPort = $this->bindPort ?: 9580;
         //启动控制面板服务器
         Dashboard::start($this->bindPort + 2);
         //等待APP安装完成
         App::await();
-        $serverConfigFile = App::src() . '/config/server.php';
-        is_file($serverConfigFile) and $serverConfig = require $serverConfigFile;
-        $serverConfigYmlFile = App::src() . '/config/server.yml';
-        is_file($serverConfigYmlFile) and $serverConfig = Yaml::parseFile($serverConfigYmlFile);
+        $serverConfig = Config::server();
+        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
+        !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动任务管理进程
@@ -189,7 +173,6 @@ class Http extends \Scf\Core\Server {
 //        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
-
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,

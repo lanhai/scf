@@ -3,16 +3,20 @@
 namespace Scf\Mode\Web\Route;
 
 use InvalidArgumentException;
+use ReflectionClass;
+use ReflectionMethod;
+use Scf\Core\Console;
 
 class AnnotationReader {
 
     public function getAnnotations($reflectionClassOrMethod): array {
         $annotations = [];
-        if ($reflectionClassOrMethod instanceof \ReflectionClass) {
+        if ($reflectionClassOrMethod instanceof ReflectionClass) {
             $doc = $reflectionClassOrMethod->getDocComment();
-        } else if ($reflectionClassOrMethod instanceof \ReflectionMethod) {
+        } else if ($reflectionClassOrMethod instanceof ReflectionMethod) {
             $doc = $reflectionClassOrMethod->getDocComment();
         } else {
+            Console::warning('Argument must be a ReflectionClass or ReflectionMethod.');
             throw new InvalidArgumentException('Argument must be a ReflectionClass or ReflectionMethod.');
         }
         preg_match_all('/@(\w+)(?:\s*\(([^)]*)\))?/', $doc, $matches, PREG_SET_ORDER);
@@ -21,7 +25,6 @@ class AnnotationReader {
             $value = isset($match[2]) ? trim($match[2], '"\' ') : null;
             $annotations[$name] = $value;
         }
-
         return $annotations;
     }
 }

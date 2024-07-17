@@ -19,6 +19,34 @@ class Config {
     protected static array $_cache = [];
 
     /**
+     * @return array
+     */
+    public static function server(): array {
+        $serverConfigFile = App::src() . '/config/server.php';
+        $serverConfigYmlFile = App::src() . '/config/server.yml';
+        if (is_file($serverConfigFile)) {
+            $serverConfig = require $serverConfigFile;
+        } elseif (is_file($serverConfigYmlFile)) {
+            $serverConfig = Yaml::parseFile($serverConfigYmlFile);
+        } else {
+            $serverConfig = [
+                'port' => 9580,
+                'enable_coroutine' => true,
+                'worker_num' => 8,
+                'max_wait_time' => 60,
+                'task_worker_num' => 8,
+                'max_connection' => 4096,//最大连接数
+                'max_coroutine' => 10240,//最多启动多少个携程
+                'max_concurrency' => 2048,//最高并发
+                'max_request_limit' => 128,//每秒最大请求量限制,超过此值将拒绝服务
+                'max_mysql_execute_limit' => 128 * 20,//每秒最大mysql处理量限制,超过此值将拒绝服务
+                'package_max_length' => 10 * 1024 * 1024,//最大请求数据限制 10M
+            ];
+        }
+        return $serverConfig;
+    }
+
+    /**
      * 初始化
      * 加载系统配置,环境配置
      */
