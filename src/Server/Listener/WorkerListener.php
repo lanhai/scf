@@ -2,14 +2,14 @@
 
 namespace Scf\Server\Listener;
 
+use Scf\Command\Color;
 use Scf\Core\Console;
 use Scf\Mode\Web\App;
-use Scf\Command\Color;
+use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Server\Http;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
-use Throwable;
 
 class WorkerListener extends Listener {
 
@@ -34,6 +34,7 @@ class WorkerListener extends Listener {
             Console::error($e->getMessage());
         }
         if ($workerId == 0) {
+            AnnotationRouteRegister::instance()->load();
             $srcPath = App::src();
             $version = App::version();
             $publicVersion = App::publicVersion();

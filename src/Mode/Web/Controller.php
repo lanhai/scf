@@ -97,13 +97,6 @@ abstract class Controller {
     }
 
     /**
-     * @return App
-     */
-    protected function app(): App {
-        return App::instance();
-    }
-
-    /**
      * 获取日志记录器
      * @return Log
      */
