@@ -2,7 +2,6 @@
 
 namespace Scf\Server;
 
-use Co;
 use Scf\App\Updater;
 use Scf\Core\Console;
 use Scf\Core\Exception;
@@ -161,6 +160,7 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\LogTable',
             'Scf\Server\Table\Counter',
             'Scf\Server\Table\Runtime',
+            'Scf\Server\Table\RouteTable',
         ]);
         //启动控制面板服务器
         Dashboard::start($this->bindPort + 2);
@@ -189,6 +189,7 @@ class Http extends \Scf\Core\Server {
 //        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
+
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,

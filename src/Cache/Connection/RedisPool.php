@@ -5,7 +5,6 @@ namespace Scf\Cache\Connection;
 use Mix\Redis\Connection;
 use Mix\Redis\Pool\Dialer;
 use Mix\Redis\Redis;
-use Scf\Core\Console;
 use Scf\Database\Pool\ConnectionPool;
 
 class RedisPool extends Redis {

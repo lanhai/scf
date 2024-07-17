@@ -450,7 +450,7 @@ class App {
      * @param string ...$segments
      * @return string
      */
-    protected static function buildControllerPath(string ...$segments): string {
+    public static function buildControllerPath(string ...$segments): string {
         return APP_TOP_NAMESPACE . '\\' . implode('\\', $segments);
     }
 
@@ -460,7 +460,7 @@ class App {
      * @param string ...$segments
      * @return string
      */
-    protected static function buildPath(string ...$segments): string {
+    public static function buildPath(string ...$segments): string {
         return implode(DIRECTORY_SEPARATOR, array_filter($segments));
     }
 }

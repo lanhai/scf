@@ -7,6 +7,7 @@ use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\NotFoundException;
+use Scf\Mode\Web\Route\AnnotationRouteRegister;
 
 class Router {
     use CoroutineSingleton;
@@ -66,6 +67,10 @@ class Router {
      * @var string 控制器访问路径
      */
     protected string $_ctrl_path;
+
+    protected array $_params = [];
+    protected bool $isAnnotationRoute = false;
+    protected array $annotationRoute = [];
 
 //    /**
 //     * 获得单利
@@ -174,11 +179,42 @@ class Router {
         return $this->_config['method_prefix'] . ucfirst($action);
     }
 
+    public function isAnnotationRoute(): bool {
+        return $this->isAnnotationRoute;
+    }
+
+    public function getAnnotationRoute(): array {
+        return $this->annotationRoute;
+    }
+
+    public function matchAnnotationRoute($server): bool {
+        $this->_getPath($server);
+
+        if (!$annotationRoute = AnnotationRouteRegister::instance()->match($server['request_method'], $server['path_info'])) {
+            return false;
+        }
+        $this->isAnnotationRoute = true;
+        $route = $annotationRoute['route'];
+        $this->_module = StringHelper::lower2camel($route['module']);
+        $this->_controller = StringHelper::lower2camel($route['controller']);
+        $this->_action = StringHelper::lower2camel($route['action']);
+        $this->_partitions['module'] = $this->_module;
+        $this->_partitions['controller'] = $this->_controller;
+        $this->_partitions['action'] = $this->_action;
+        $this->_params = $annotationRoute['params'];
+        $this->annotationRoute = $annotationRoute;
+        $this->_path = $route['route'];
+        return true;
+    }
+
     /**
      * 路由调度
+     * @param array $server
+     * @param array $modules
+     * @return void
      * @throws NotFoundException
      */
-    public function dispatch($server, $modules): void {
+    public function dispatch(array $server, array $modules): void {
         $pathinfo = $this->_getPath($server);
         $pathinfo = $pathinfo ? explode('/', trim($pathinfo, '/')) : [];
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;

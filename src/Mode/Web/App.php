@@ -29,13 +29,15 @@ class App extends Lifetime {
     public function init(): void {
         $this->start();
         $modules = self::$_modules[MODE_CGI];
-        $this->router = Router::instance();
+        $this->router = Router::instance();;
         //配置初始化
         try {
-            $this->router->dispatch($this->request()->server(), $modules);
+            if (!$this->router->matchAnnotationRoute($this->request()->server())) {
+                $this->router->dispatch($this->request()->server(), $modules);
+            }
             //创建日志记录
             $this->_logger = Log::instance()->setModule($this->router->getModule());
-        } catch (NotFoundException $exception) {
+        } catch (NotFoundException) {
             $this->_logger = Log::instance()->setModule('server');
             if (str_contains($this->router->getPath(), 'MP_verify_')) {
                 //微信公众号域名接入文件校验特殊处理
@@ -58,6 +60,21 @@ class App extends Lifetime {
      */
     public function run(): string|Result {
         $router = $this->router;
+        //自定义错误处理
+        set_error_handler([$this, 'errorHandler']);
+        //自定义异常处理
+        set_exception_handler([$this, 'exceptionHandler']);
+        $modules = self::$_modules[MODE_CGI];
+        $moduleConfig = ArrayHelper::findColumn($modules, 'name', $router->getModule()) ?: [];
+        if ($router->isAnnotationRoute()) {
+            $route = $router->getAnnotationRoute();
+            $ctrlPath = $router->getController() . '/' . $router->getAction();
+            $router->setCtrlPath($ctrlPath);
+            $class = new $route['route']['space']($moduleConfig);
+            $method = $route['route']['action'];
+            return call_user_func_array([$class, $method], $route['params']);
+            //return $class->$method(...$route['params']);
+        }
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $method = $router->getMethod();
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
@@ -106,20 +123,15 @@ class App extends Lifetime {
             throw new NotFoundException('控制器为抽象类:' . $ctrlClass);
         }
         //实例化控制器
-        $modules = self::$_modules[MODE_CGI];
-        $moduleConfig = ArrayHelper::findColumn($modules, 'name', $router->getModule()) ?: [];
         Config::load($moduleConfig);
         $class = new $ctrlClass($moduleConfig);
-        //自定义错误处理
-        set_error_handler([$this, 'errorHandler']);
-        //自定义异常处理
-        set_exception_handler([$this, 'exceptionHandler']);
         $method = $isSubController ? $router->getMethod(StringHelper::lower2camel($method)) : $router->getMethod();
         if (!method_exists($class, $method)) {
             Response::instance()->setHeader('Error-Info', 'method not exist:' . $ctrlClass);
             throw new NotFoundException('控制器方法不存在:' . $method);
         }
-        return $class->$method();
+        return call_user_func([$class, $method]);
+        //return $class->$method();
     }
 
     /**
