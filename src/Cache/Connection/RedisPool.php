@@ -2,8 +2,10 @@
 
 namespace Scf\Cache\Connection;
 
+use Mix\Redis\Connection;
 use Mix\Redis\Pool\Dialer;
 use Mix\Redis\Redis;
+use Scf\Core\Console;
 use Scf\Database\Pool\ConnectionPool;
 
 class RedisPool extends Redis {
@@ -43,5 +45,15 @@ class RedisPool extends Redis {
             $this->maxLifetime,
             $this->waitTimeout
         );
+    }
+
+    protected function borrow(): Connection {
+        if ($this->pool) {
+            $driver = $this->pool->borrow();
+            $conn = new Connection($driver, $this->logger);
+        } else {
+            $conn = new Connection($this->driver, $this->logger);
+        }
+        return $conn;
     }
 }
