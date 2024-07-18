@@ -154,9 +154,11 @@ class Dashboard {
                     exit(1);
                 }
                 $this->_SERVER->on('WorkerStart', function (Server $server, $workerId) {
-                    App::isReady() and App::mount();
-                    if ($workerId == 0) {
-                        AnnotationRouteRegister::instance()->load();
+                    if (App::isReady()) {
+                        App::mount();
+                        if ($workerId == 0) {
+                            AnnotationRouteRegister::instance()->load();
+                        }
                     }
                     //Console::info("[Dashboard]worker#" . $workerId . "启动完成");
                 });
