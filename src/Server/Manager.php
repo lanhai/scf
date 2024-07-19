@@ -80,6 +80,9 @@ class Manager extends Component {
         $node->http_request_count_today = Counter::instance()->get('_REQUEST_COUNT_' . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get('_REQUEST_PROCESSING_') ?: 0;
         $key = App::id() . '-node-' . SERVER_NODE_ID;
+        if (!MasterDB::sIsMember(App::id() . '-nodes', $node->id)) {
+            MasterDB::sAdd(App::id() . '-nodes', $node->id);
+        }
         return MasterDB::set($key, $node->toArray());
     }
 
@@ -196,7 +199,7 @@ class Manager extends Component {
                     continue;
                 }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] >= 10) {
+                if (time() - $node['heart_beat'] >= 5) {
                     $node['online'] = false;
                     MasterDB::sRemove(App::id() . '-nodes', $node['id']);
                     MasterDB::delete($key);
