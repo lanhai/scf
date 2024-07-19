@@ -802,7 +802,7 @@ class Redis extends Cache {
     protected function onExecuteError(RedisException $exception): void {
         self::$pools = [];
         if (Env::isDev()) {
-            Console::warning("【Redis】Execute Failed:" . $exception->getMessage());
+            Console::warning("【Redis】Execute Failed:" . $exception->getMessage() . ";code:" . $exception->getCode());
         } else {
             Log::instance()->error("【Redis】" . $exception->getMessage());
         }
