@@ -177,16 +177,26 @@ class Dao extends Struct {
      * @return static|array|NullAR|null
      */
     public function random(int $size = 1, bool $asAR = true): static|NullAR|array|null {
+        $where = clone $this->_where;
         //最多取100条
         $size = min($size, 100);
+        $count = static::select($this->getPrimaryKey())->where($where)->count();
+        if ($count == 0) {
+            if ($size == 1 && $asAR) return new NullAR(static::class, $this->whereSql);
+            return null;
+        }
+        if ($size == 1) {
+            $queryResult = $this->where($where)->page(rand(1, $count), 1)->list(total: $count);
+            if ($asAR) {
+                $this->_arExist = true;
+                $this->install($queryResult['list'][0]);
+                return $this;
+            }
+            return $queryResult['list'][0];
+        }
         $cacheKey = '_QUERY_RANDOM_CACHE_' . md5(JsonHelper::toJson($this->_fields) . JsonHelper::toJson($this->_order) . $this->getWhereSql());
         if (!$collections = Cache::instance()->get($cacheKey)) {
             try {
-                $count = static::select($this->getPrimaryKey())->where($this->_where)->count();
-                if (!$count) {
-                    if ($size == 1 && $asAR) return new NullAR(static::class, $this->whereSql);
-                    return null;
-                }
                 $size = min($size, $count);
                 //1000条以内直接读取全部id合集存入缓存
                 if ($count <= 1000) {
@@ -221,22 +231,13 @@ class Dao extends Struct {
                     }
                     $collections = $ids;
                 }
-                //id合集缓存5分钟
-                Cache::instance()->set($cacheKey, $collections, 300);
+                //id合集缓存60秒
+                Cache::instance()->set($cacheKey, $collections, 60);
             } catch (PDOException $exception) {
                 $this->addError($this->_table . '_AR', $exception->getMessage());
                 if ($size == 1 && $asAR) return new NullAR(static::class, $this->whereSql);
                 return null;
             }
-        }
-        if ($size === 1) {
-            shuffle($collections);
-            $primaryValue = $collections[0];
-            if ($asAR) {
-                $this->setPrimaryVal($primaryValue);;
-                return $this->ar();
-            }
-            return $this->where([$this->getPrimaryKey() => $primaryValue])->first();
         }
         $primaryValue = [];
         $size = min($size, count($collections));
@@ -301,15 +302,16 @@ class Dao extends Struct {
     /**
      * 获取列表
      * @param bool $format
+     * @param int $total
      * @return array
      */
     #[ArrayShape(['list' => "array", 'pages' => "int", 'pn' => "int", 'total' => "int", 'primarys' => "array"])]
-    public function list(bool $format = true): array {
+    public function list(bool $format = true, int $total = 0): array {
         $select = self::select($this->_primaryKey)->where($this->_where);
         if ($this->_group) {
             $select->group($this->_group);
         }
-        $total = $select->count();
+        $total = $total ?: $select->count();
         $total = is_array($total) ? count($total) : $total;
         $totalPage = $total ? ceil($total / $this->_pageSize) : 0;
         $page = min($this->_pn, $totalPage) ?: 1;
