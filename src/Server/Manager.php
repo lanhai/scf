@@ -56,39 +56,31 @@ class Manager extends Component {
         return false;
     }
 
-    protected int $appUpdated = 0;
-
     /**
      * 心跳
      * @param Server $server
+     * @param Node $node
      * @return bool
      */
-    public function heartbeat(Server $server): bool {
+    public function heartbeat(Server $server, Node $node): bool {
+        $node->app_version = App::version();
+        $node->public_version = App::publicVersion() ?: '--';
+        $node->heart_beat = time();
+        $node->tables = Table::list();
+        $node->restart_times = Runtime::instance()->get('restart_times') ?: 0;
+        $node->stack_useage = memory_get_usage(true);
+        $node->threads = count(Coroutine::list());
+        $node->thread_status = Coroutine::stats();
+        $node->server_stats = $server->stats();
+        //$node->tasks = Crontab::instance()->stats();
+        $node->mysql_execute_count = Counter::instance()->get('_MYSQL_EXECUTE_COUNT_' . (time() - 1)) ?: 0;
+        $node->http_request_reject = Counter::instance()->get('_REQUEST_REJECT_') ?: 0;
+        $node->http_request_count = Counter::instance()->get('_REQUEST_COUNT_') ?: 0;
+        $node->http_request_count_current = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
+        $node->http_request_count_today = Counter::instance()->get('_REQUEST_COUNT_' . Date::today()) ?: 0;
+        $node->http_request_processing = Counter::instance()->get('_REQUEST_PROCESSING_') ?: 0;
         $key = App::id() . '-node-' . SERVER_NODE_ID;
-        if ($nodeInfo = MasterDB::get($key)) {
-            $node = Node::factory($nodeInfo);
-            $node->appid = App::id();
-            $node->role = App::isMaster() ? 'master' : 'slave';
-            $node->app_version = App::version();
-            $node->public_version = App::publicVersion() ?: '--';
-            $node->scf_version = SCF_VERSION;
-            $node->heart_beat = time();
-            $node->tables = Table::list();
-            $node->restart_times = Runtime::instance()->get('restart_times') ?: 0;
-            $node->stack_useage = memory_get_usage(true);
-            $node->threads = count(Coroutine::list());
-            $node->thread_status = Coroutine::stats();
-            $node->server_stats = $server->stats();
-            //$node->tasks = Crontab::instance()->stats();
-            $node->mysql_execute_count = Counter::instance()->get('_MYSQL_EXECUTE_COUNT_' . (time() - 1)) ?: 0;
-            $node->http_request_reject = Counter::instance()->get('_REQUEST_REJECT_') ?: 0;
-            $node->http_request_count = Counter::instance()->get('_REQUEST_COUNT_') ?: 0;
-            $node->http_request_count_current = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
-            $node->http_request_count_today = Counter::instance()->get('_REQUEST_COUNT_' . Date::today()) ?: 0;
-            $node->http_request_processing = Counter::instance()->get('_REQUEST_PROCESSING_') ?: 0;
-            return MasterDB::set($key, $node->toArray());
-        }
-        return false;
+        return MasterDB::set($key, $node->toArray());
     }
 
     /**

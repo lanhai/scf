@@ -328,29 +328,9 @@ INFO;
         //延迟一秒执行避免和 WorkerStart 事件后的节点报到事件抢redis锁
         Coroutine::sleep(1);
         $this->report();
-        $this->heartbeat($this->server);
         $this->backupLog();
         (Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch') and $this->watchFileChange();
         APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
-    }
-
-    /**
-     * 发送心跳包
-     * @return void
-     */
-    protected function heartbeat(): void {
-        $manager = \Scf\Server\Manager::instance();
-        $pid = Coroutine::create(function () use ($manager) {
-            Timer::tick(1000, function () use ($manager) {
-                if (Counter::instance()->exist('_REQUEST_COUNT_' . Date::leftday(2))) {
-                    Counter::instance()->delete('_REQUEST_COUNT_' . Date::leftday(2));
-                }
-                Counter::instance()->delete('_MYSQL_EXECUTE_COUNT_' . (time() - 5));
-                Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
-                $manager->heartbeat($this->server);
-            });
-        });
-        $this->log('节点心跳服务启动完成!协程ID:' . $pid);
     }
 
     /**
@@ -609,7 +589,7 @@ INFO;
         $node->ip = $this->ip;
         $node->port = $this->bindPort;
         $node->socketPort = $this->bindPort + 1;
-        $node->role = \Scf\Core\App::isMaster() ? 'master' : 'slave';
+        $node->role = App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
         $node->restart_times = $this->restartTimes;
         $node->master_pid = SERVER_MASTER_PID;
@@ -632,6 +612,14 @@ INFO;
                     $this->report();
                 });
             }
+            Timer::tick(1000, function () use ($manager, $node) {
+                if (Counter::instance()->exist('_REQUEST_COUNT_' . Date::leftday(2))) {
+                    Counter::instance()->delete('_REQUEST_COUNT_' . Date::leftday(2));
+                }
+                Counter::instance()->delete('_MYSQL_EXECUTE_COUNT_' . (time() - 5));
+                Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
+                $manager->heartbeat($this->server, $node);
+            });
         } catch (\Exception $exception) {
             $this->log('节点报道失败:' . Color::red($exception->getMessage()));
         }

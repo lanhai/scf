@@ -72,19 +72,6 @@ class MasterDB {
         if (!App::isMaster()) {
             return;
         }
-//        $masterDbPid = 0;
-//        Coroutine::create(function () use (&$masterDbPid) {
-//            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-//        });
-//        Event::wait();
-//        if ($masterDbPid) {
-//            if (!Process::kill($masterDbPid, 0)) {
-//                //Console::log(Color::yellow("MasterDB PID:{$masterDbPid} not exist"));
-//            } else {
-//                Console::log(Color::yellow("MasterDB PID:{$masterDbPid} killed"));
-//                Process::kill($masterDbPid, SIGKILL);
-//            }
-//        }
         try {
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
@@ -283,15 +270,6 @@ class MasterDB {
                 } else {
                     $this->data[md5($fileName)] += 1;
                 }
-//                $logger = $this->getLogger($data[0]);
-//                $logger?->info($data[1]);
-//                if ($data[0] == 'error') {
-//                    $logger = $this->getLogger('error');
-//                    $logger?->error($data[1]);
-//                } else {
-//                    $logger = $this->getLogger($data[0]);
-//                    $logger?->info($data[1]);
-//                }
                 return $server->send($fd, Server::format(Server::STATUS, File::write($fileName, $data[1], true) ? "OK" : "FAIL"));
             });
             $server->setHandler('countLog', function ($fd, $data) use ($server) {
@@ -299,7 +277,7 @@ class MasterDB {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'countLog' command"));
                 }
                 $day = $data[1];
-                $dir = APP_LOG_PATH. '/' . $data[0] . '/';
+                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
                 $fileName = $dir . $day . '.log';
 
                 $line = 0; //初始化行数
@@ -310,42 +288,22 @@ class MasterDB {
                     fclose($fp);//关闭文件
                 }
                 return $server->send($fd, Server::format(Server::INT, $line));
-//                if (!isset($this->data[md5($fileName)])) {
-//                    return $server->send($fd, Server::format(Server::INT, 0));
-//                }
-//                return $server->send($fd, Server::format(Server::INT, $this->data[md5($fileName)]));
-//                if (!file_exists($fileName)) {
-//                    return $server->send($fd, Server::format(Server::INT, 0));
-//                }
-//                return $server->send($fd, Server::format(Server::INT, filesize($fileName)));
             });
             $server->setHandler('getLog', function ($fd, $data) use ($server) {
                 $day = $data[1];
-                $dir = APP_LOG_PATH. '/' . $data[0] . '/';
+                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
                 $start = $data[2];
                 $size = $data[3];
                 $fileName = $dir . $day . '.log';
                 if (!file_exists($fileName)) {
                     return $server->send($fd, Server::format(Server::NIL));
                 }
-                $line = 0;
-                $list = [];
-
                 if ($start < 0) {
                     $size = abs($start);
                     $start = 0;
                 }
                 clearstatcache();
-//                if (file_exists($fileName) && $fp = fopen($fileName, 'r')) {
-//                    while (stream_get_line($fp, 8192, "\n")) {
-//                        $line++;
-//                        var_dump(fgets($fp));
-//                    }
-//                    fclose($fp);//关闭文件
-//                }
-
                 $content = System::readFile($fileName);
-
                 $logs = [];
                 if ($content) {
                     $list = array_reverse(explode("\n", $content));
@@ -393,8 +351,6 @@ class MasterDB {
 
                 return $server->send($fd, Server::format(Server::INT, $count));
             });
-
-
 //            $server->on('Connect', function ($server, int $fd) {
 //                Console::log("【MasterDB】#" . $fd . " Connectted");
 //            });
@@ -402,12 +358,12 @@ class MasterDB {
 //                Console::log("【MasterDB】#" . $fd . " Closed");
 //            });
             $server->on('WorkerStart', function (Server $server) {
+
+            });
+            $server->on('start', function (Server $server) {
                 Timer::tick(3000, function () use ($server) {
                     file_put_contents(APP_RUNTIME_DB, serialize($this->data));
                 });
-            });
-            $server->on('start', function (Server $server) {
-
             });
             $server->start();
         } catch (\Throwable $exception) {
@@ -473,8 +429,8 @@ class MasterDB {
             mkdir($dir, 0775, true);
         }
         $handler = $rotating ?
-            new RotatingFileHandler($dir. '/' . $name . '.log', 100, $level) :
-            new StreamHandler($dir. '/' . $name . '.log', $level);
+            new RotatingFileHandler($dir . '/' . $name . '.log', 100, $level) :
+            new StreamHandler($dir . '/' . $name . '.log', $level);
         $logger = new Logger($name);
         $logger->pushHandler($handler);
 
