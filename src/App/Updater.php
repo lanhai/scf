@@ -106,7 +106,7 @@ class Updater {
             $versionInfo['app_object'] = $latestAppVersion;
         }
         if ($versionInfo['public_object']) {
-            Log::instance()->info("开始下载資源包:" . $versionInfo['server'] . $versionInfo['public_object']);
+            //Log::instance()->info("开始下载資源包:" . $versionInfo['server'] . $versionInfo['public_object']);
             $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
             $port = $versionInfo['port'] ?? 80;
             $client = new Client($versionInfo['server'], $port, $port == 443);
@@ -146,7 +146,7 @@ class Updater {
             }
         }
         if ($versionInfo['app_object']) {
-            Log::instance()->info("开始下载源码包:" . $versionInfo['server'] . $versionInfo['app_object']);
+            //Log::instance()->info("开始下载源码包:" . $versionInfo['server'] . $versionInfo['app_object']);
             $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
             $host = $versionInfo['server'];
             $port = $versionInfo['port'] ?? 80;
@@ -164,7 +164,7 @@ class Updater {
                 Log::instance()->error('升级失败:源码包下载失败:' . $client->errMsg . '(' . $code . ')');
                 return false;
             }
-            Log::instance()->info("开始写入文件:" . $appFile);
+            //Log::instance()->info("开始写入文件:" . $appFile);
             //Log::instance()->info("源码包下载完成:" . $updateFilePath);
             if (file_exists($appFile)) {
                 unlink($appFile);
