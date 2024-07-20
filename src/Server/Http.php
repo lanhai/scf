@@ -111,25 +111,33 @@ class Http extends \Scf\Core\Server {
 
     /**
      * 启动mater节点子进程,跟随manager的重启而重新加载文件重启,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
+     * @param $config
      * @return void
      */
-    public static function startMasterProcess(): void {
-        //if (App::isMaster()) {
-        $process = new Process(function () {
+    public static function startMasterProcess($config): void {
+        $process = new Process(function () use ($config) {
             $processId = Counter::instance()->get('_background_process_id_');
+            $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
+            $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+            $runCrontabInMaster = $config['crontab_in_master'] ?? true;
+            $runCrontabInSlave = $config['crontab_in_slave'] ?? false;
             while (true) {
                 $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
                 if ($processId != $latestProcessId) {
                     $processId = $latestProcessId;
-                    Crontab::startProcess();
-                    RQueue::startProcess();
+                    if (App::isMaster()) {
+                        $runQueueInMaster and RQueue::startProcess();
+                        $runCrontabInMaster and Crontab::startProcess();
+                    } else {
+                        $runQueueInSlave and RQueue::startProcess();
+                        $runCrontabInSlave and Crontab::startProcess();
+                    }
                 }
                 usleep(1000 * 1000 * 5);
             }
         });
         $pid = $process->start();
         Console::success('Background Process PID:' . Color::info($pid));
-        //}
     }
 
     /**
@@ -157,7 +165,7 @@ class Http extends \Scf\Core\Server {
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动任务管理进程
-        self::startMasterProcess();
+        self::startMasterProcess($serverConfig);
         //检查是否存在异常进程
 //        $pid = 0;
 //        Coroutine::create(function () use (&$pid) {

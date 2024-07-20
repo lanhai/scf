@@ -75,7 +75,7 @@ class MasterDB {
         try {
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
-                'worker_num' => 128,
+                'worker_num' => 1,
                 'daemonize' => $daemonize,
                 'pid_file' => SERVER_MASTER_DB_PID_FILE
             ];
