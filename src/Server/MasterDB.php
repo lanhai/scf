@@ -75,7 +75,7 @@ class MasterDB {
         try {
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
-                'worker_num' => 1,
+                'worker_num' => 128,
                 'daemonize' => $daemonize,
                 'pid_file' => SERVER_MASTER_DB_PID_FILE
             ];
@@ -361,7 +361,7 @@ class MasterDB {
 
             });
             $server->on('start', function (Server $server) {
-                Timer::tick(3000, function () use ($server) {
+                Timer::tick(5000, function () use ($server) {
                     file_put_contents(APP_RUNTIME_DB, serialize($this->data));
                 });
             });

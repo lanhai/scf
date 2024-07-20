@@ -110,7 +110,6 @@ class AnnotationRouteRegister extends Component {
                         'space' => $namespace,
 
                     ]);
-                    //MasterDB::set('routes', $this->routes);
                 }
             } catch (Throwable $exception) {
                 Console::error($exception->getMessage());
@@ -120,6 +119,5 @@ class AnnotationRouteRegister extends Component {
 
     public function routes(): array {
         return RouteTable::instance()->rows();
-        //return MasterDB::get('routes');
     }
 }
