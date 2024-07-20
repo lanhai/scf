@@ -73,7 +73,6 @@ class MasterDB {
             return;
         }
         try {
-            ini_set('memory_limit', '512M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
@@ -257,6 +256,7 @@ class MasterDB {
             });
             //写入日志
             $server->setHandler('addLog', function ($fd, $data) use ($server) {
+                ini_set('memory_limit', -1);
                 if (count($data) < 2) {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'addLog' command"));
                 }
@@ -274,6 +274,7 @@ class MasterDB {
                 return $server->send($fd, Server::format(Server::STATUS, File::write($fileName, $data[1], true) ? "OK" : "FAIL"));
             });
             $server->setHandler('countLog', function ($fd, $data) use ($server) {
+                ini_set('memory_limit', -1);
                 if (count($data) < 2) {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'countLog' command"));
                 }
@@ -291,6 +292,7 @@ class MasterDB {
                 return $server->send($fd, Server::format(Server::INT, $line));
             });
             $server->setHandler('getLog', function ($fd, $data) use ($server) {
+                ini_set('memory_limit', -1);
                 $day = $data[1];
                 $dir = APP_LOG_PATH . '/' . $data[0] . '/';
                 $start = $data[2];
