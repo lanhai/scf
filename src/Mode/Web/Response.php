@@ -260,7 +260,7 @@ EOT;
 
     protected function saveSlowLog(): void {
         $consume = App::instance()->consume();
-        if ($consume > 10000) {
+        if ($consume > (defined('SLOW_LOG_TIME') ? SLOW_LOG_TIME : 10000)) {
             $process = ProcessLife::instance()->requestDebugInfo();
             $logger = \Scf\Core\Log::instance();
             go(function () use ($consume, $process, $logger) {
