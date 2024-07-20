@@ -321,7 +321,6 @@ class Crontab {
      */
     public function status(): array {
         $task = $this->sync();
-        //$task['logs'] = MasterDB::getLog(strtolower('crontab' . str_replace("\\", "_", $task['namespace'])), date('Y-m-d'), -10);
         $mode = $task['override']['mode'] ?? $task['mode'];
         if ($mode != Crontab::RUN_MODE_TIMEING && isset($task['interval'])) {
             $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
