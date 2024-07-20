@@ -161,6 +161,7 @@ class Http extends \Scf\Core\Server {
         App::await();
         $serverConfig = Config::server();
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
+        !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);

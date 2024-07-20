@@ -16,5 +16,6 @@ return [
     'redis_queue_in_master' => true,
     'redis_queue_in_slave' => false,
     'crontab_in_master' => true,
-    'crontab_in_slave' => false
+    'crontab_in_slave' => false,
+    'slow_log_time' => 10000
 ];
