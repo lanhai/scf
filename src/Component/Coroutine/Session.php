@@ -48,14 +48,11 @@ class Session extends Component {
         }
         if (is_null($name)) {
             $result = Redis::pool()->hgetAll($this->sessionId);
-            //$result = MasterDB::hgetAll($this->sessionId);
         } else {
             $result = Redis::pool()->hget($this->sessionId, $name);
-            //$result = MasterDB::hget($this->sessionId, $name);
         }
         if ($result) {
             Redis::pool()->expire($this->sessionId, $this->_config['expire'] ?: 1800);
-            //MasterDB::expire($this->sessionId, $this->_config['expire'] ?: 1800);
         }
         return $result;
     }
@@ -72,8 +69,6 @@ class Session extends Component {
         }
         $set = Redis::pool()->hset($this->sessionId, $name, $value);
         Redis::pool()->expire($this->sessionId, $this->_config['expire'] ?: 1800);
-        //$set = MasterDB::hset($this->sessionId, $name, $value);
-        //MasterDB::expire($this->sessionId, $this->_config['expire'] ?: 1800);
         return $set;
     }
 
@@ -87,7 +82,6 @@ class Session extends Component {
             $name = $this->_prefix . $name;
         }
         return Redis::pool()->hdel($this->sessionId, $name);
-        //return MasterDB::hdel($this->sessionId, $name);
     }
 
     /**
@@ -95,7 +89,6 @@ class Session extends Component {
      */
     public function clean(): bool {
         return Redis::pool()->delete($this->sessionId);
-        //return MasterDB::delete($this->sessionId);
     }
 
     /**
