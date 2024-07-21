@@ -419,14 +419,12 @@ class Crontab {
             return;
         }
         $this->processingStart();
-        Console::info("【Crontab】任务开始执行:" . get_called_class());
         try {
             $this->run();
         } catch (Throwable $throwable) {
             Log::instance()->error("【Crontab】任务执行失败:" . $throwable->getMessage());
             $this->log("任务执行失败:" . $throwable->getMessage());
         }
-        Console::info("【Crontab】任务执行完成:" . get_called_class());
         $this->processingFinish(time() + $timeout);
         $timerId = Timer::after($timeout * 1000, function () use ($timeout, $id) {
             $this->loop($timeout, $id);
