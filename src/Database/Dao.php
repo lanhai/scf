@@ -178,7 +178,7 @@ class Dao extends Struct {
      * @return static|array|NullAR|null
      */
     public function random(int $size = 1, bool $asAR = true): static|NullAR|array|null {
-        $where = clone $this->_where;
+        $where = $this->_where ? clone $this->_where : [];
         //最多取100条
         $size = min($size, 100);
         $count = static::select($this->getPrimaryKey())->where($where)->count();

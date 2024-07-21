@@ -4,6 +4,7 @@ namespace Scf\Database\Pool;
 
 use Mix\ObjectPool\AbstractObjectPool;
 use Mix\ObjectPool\Exception\WaitTimeoutException;
+use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Database\Connection;
 use Scf\Database\Driver;
@@ -31,6 +32,7 @@ class ConnectionPool extends AbstractObjectPool {
      * @throws WaitTimeoutException
      */
     public function borrow(): object {
+        //Console::info("连接池数量:" . $this->getTotalNumber() . ',最大数量:' . $this->maxOpen);
         /** @var DriverTrait $driver */
         if ($this->getIdleNumber() > 0 || ($this->maxOpen && $this->getTotalNumber() >= $this->maxOpen)) {
             // 队列有连接，从队列取
@@ -90,7 +92,7 @@ class ConnectionPool extends AbstractObjectPool {
                 $size--;
                 try {
                     $driver = $this->pop();
-                    //Console::success("#" . $connection->id . " 第" . $connection->pingTimes . "次ping,创建时间:" . date('m-d H:i:s', $connection->createTime) . ",最近使用:" . (time() - $connection->lastUseTime) . "秒前@" . date('m-d H:i:s', $connection->lastUseTime));
+                    //Console::info("#" . $driver->id . " 第" . $driver->pingTimes . "次ping,创建时间:" . date('m-d H:i:s', $driver->createTime) . ",最近使用:" . (time() - $driver->lastUseTime) . "秒前@" . date('m-d H:i:s', $driver->lastUseTime));
                     if ($this->idleIimeout > 0 && time() - $driver->lastUseTime >= $this->idleIimeout) {
                         $this->actives[$driver->id] = '';
                         $this->discard($driver);
@@ -98,9 +100,9 @@ class ConnectionPool extends AbstractObjectPool {
                         $driver->pingTimes++;
                         $driver->lastPingTime = time();
                         $this->actives[$driver->id] = '';
-                        $conn = new Connection($driver, $this->logger);
-                        $conn->exec("select 1");
-                        //$this->push($connection);
+                        //$conn = new Connection($driver, $this->logger);
+                        //$conn->exec("select 1");
+                        //$this->push($driver);
                     }
                 } catch (Throwable $exception) {
                     Log::instance()->error("从连接池取出连接错误:" . $exception->getMessage());
