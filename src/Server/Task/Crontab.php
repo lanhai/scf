@@ -120,7 +120,7 @@ class Crontab {
     public function start(): int {
         $members = MasterDB::sMembers(App::id() . '_CRONTABS_');
         if ($members) {
-            MasterDB::sClear(App::id() . '_CRONTABS_');
+            //MasterDB::sClear(App::id() . '_CRONTABS_');
             foreach ($members as $id) {
                 MasterDB::delete('-crontabs-' . $id);
             }
