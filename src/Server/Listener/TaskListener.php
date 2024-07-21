@@ -34,7 +34,7 @@ class TaskListener extends Listener {
      * @return void
      */
     protected function onFinish(Server $server, $taskId, $data): void {
-        Env::isDev() and Console::success("【Task】#" . $taskId . "执行完成:" . JsonHelper::toJson($data));
+        //Env::isDev() and Console::success("【Task】#" . $taskId . "执行完成:" . JsonHelper::toJson($data));
     }
     /**
      * 非协程模式
