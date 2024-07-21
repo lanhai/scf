@@ -166,7 +166,7 @@ class Http extends \Scf\Core\Server {
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动任务管理进程
-        self::startMasterProcess($serverConfig);
+        //self::startMasterProcess($serverConfig);
         //检查是否存在异常进程
 //        $pid = 0;
 //        Coroutine::create(function () use (&$pid) {
@@ -266,7 +266,7 @@ class Http extends \Scf\Core\Server {
             Runtime::instance()->set('restart_times', $this->restartTimes);
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
-            Counter::instance()->incr('_background_process_id_');
+            //Counter::instance()->incr('_background_process_id_');
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {

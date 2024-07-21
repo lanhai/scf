@@ -2,6 +2,7 @@
 
 namespace Scf\Server\Task;
 
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
@@ -36,13 +37,25 @@ class RQueue {
             if ($pool instanceof NullPool) {
                 Console::warning("Redis服务不可用,队列管理未启动");
             } else {
-                self::instance()->watch();
+                $config = Config::server();
+                self::instance()->watch($config['redis_queue_mc'] ?? 512);
                 Event::wait();
             }
         });
         $pid = $process->start();
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
         Console::success('RQueue Manager PID:' . Color::info($pid));
+    }
+
+    public static function startByWorker(): void {
+        $pool = Redis::pool();
+        if ($pool instanceof NullPool) {
+            Console::warning("Redis服务不可用,队列管理未启动");
+        } else {
+            $config = Config::server();
+            self::instance()->watch($config['redis_queue_mc'] ?? 512);
+            Event::wait();
+        }
     }
 
     /**

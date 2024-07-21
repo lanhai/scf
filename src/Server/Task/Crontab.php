@@ -66,6 +66,12 @@ class Crontab {
         Console::success('Crontab Manager PID:' . Color::info($pid));
     }
 
+    public static function startByWorker(): void {
+        if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
+            self::instance()->start();
+        }
+    }
+
     /**
      * 加载定时任务
      * @return bool
@@ -113,6 +119,7 @@ class Crontab {
         return self::hasTask();
     }
 
+
     /**
      * 开始任务
      * @return int
@@ -140,6 +147,7 @@ class Crontab {
         return Counter::instance()->get('_background_process_id_');
     }
 
+
     /**
      * 注册任务
      * @param $task
@@ -153,7 +161,7 @@ class Crontab {
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
             if ($this->attributes['manager_id'] != Counter::instance()->get('_background_process_id_')) {
-                Console::info("【Crontab】#" . $this->attributes['manager_id'] . "已终止运行");
+                Console::info("【Crontab】#" . $this->attributes['manager_id'] . " 已终止运行");
                 Timer::clearAll();
                 return;
             }
@@ -464,7 +472,7 @@ class Crontab {
      */
     public function isAlive(int $id = 1): bool {
         if ($this->isOrphan()) {
-            Console::info("【Crontab】#" . $this->attributes['manager_id'] . "已终止运行");
+            Console::info("【Crontab】#" . $this->attributes['manager_id'] . " 已终止运行");
             Timer::clearAll();
             return false;
         } elseif ($id !== $this->id) {
