@@ -71,7 +71,6 @@ class Crontab {
      * @return bool
      */
     public static function load(): bool {
-        //Counter::instance()->incr('_background_process_id_');
         $managerId = Counter::instance()->get('_background_process_id_');
         if (!$modules = App::getModules()) {
             Console::warning("app模块加载失败");
@@ -83,13 +82,12 @@ class Crontab {
             if ($crontabs) {
                 $list = $list ? [...$list, ...$crontabs] : $crontabs;
             }
+            if (App::isMaster() && $masterContabls = $module['master_crontabs'] ?? null) {
+                $list = $list ? [...$list, ...$masterContabls] : $masterContabls;
+            }
         }
         if ($list) {
             foreach ($list as &$task) {
-                $enableSlave = $task['enable_slave'] ?? false;
-                if (!App::isMaster() && !$enableSlave) {
-                    continue;
-                }
                 $task['id'] = $managerId;
                 $task['created'] = time();
                 $task['expired'] = 0;
@@ -121,7 +119,7 @@ class Crontab {
      */
     public function start(): int {
         $members = MasterDB::sMembers(App::id() . '_CRONTABS_');
-        if ($members && App::isMaster()) {
+        if ($members) {
             MasterDB::sClear(App::id() . '_CRONTABS_');
             foreach ($members as $id) {
                 MasterDB::delete('-crontabs-' . $id);
@@ -567,7 +565,8 @@ class Crontab {
                 return false;
             }
         }
-        return $dir . '/' . strtolower(str_replace("\\", "_", static::class)) . '.override.json';
+        return $dir . '/' . 'CRONTAB_' . md5(str_replace("\\", "_", static::class) . SERVER_NODE_ID) . '.override.json';
+        //return $dir . '/' . strtolower(str_replace("\\", "_", static::class)) . '.override.json';
     }
 
     /**
@@ -600,7 +599,8 @@ class Crontab {
      * @return string
      */
     public function id(): string {
-        return strtolower(str_replace("\\", "_", static::class));
+        return 'CRONTAB_' . md5(str_replace("\\", "_", static::class) . SERVER_NODE_ID);
+        //return strtolower(str_replace("\\", "_", static::class) . SERVER_NODE_ID);
     }
 
     public function run() {

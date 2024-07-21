@@ -2,7 +2,6 @@
 
 namespace Scf\Database;
 
-use Scf\Component\Coroutine\Session;
 use Scf\Core\Config;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Helper\StringHelper;
