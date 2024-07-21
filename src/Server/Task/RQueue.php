@@ -54,7 +54,6 @@ class RQueue {
         } else {
             $config = Config::server();
             self::instance()->watch($config['redis_queue_mc'] ?? 512);
-            Event::wait();
         }
     }
 
