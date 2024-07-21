@@ -8,6 +8,7 @@ use JetBrains\PhpStorm\Pure;
 use PDOException;
 use Scf\Command\Color;
 use Scf\Component\Cache;
+use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Core\Struct;
@@ -532,6 +533,7 @@ class Dao extends Struct {
                 File::write($versionFile, Yaml::dump($latest, 3));
             }
         } elseif ($current['version'] !== $latest['version']) {
+            if (App::isDevEnv()) goto update;
             //更新字段
             Console::info("【Database】{$latest['db']}.{$latest['table']} " . Color::yellow('需要更新'));
             // 获取当前和新表的字段
@@ -587,7 +589,9 @@ class Dao extends Struct {
                     Console::error($sql . "=>" . $exception->getMessage());
                 }
             }
+
             //if (!$hasError) {
+            update:
             File::write($versionFile, Yaml::dump($latest, 3));
             //}
         } else {

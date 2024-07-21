@@ -32,6 +32,9 @@ class SocketMessager extends Component {
      * @return false
      */
     public function publish($type, $content, string $topic = null): bool {
+        if (Coroutine::getCid() == -1) {
+            return false;
+        }
         if (!isset($this->client)) $this->create();
         if (is_null($this->client)) {
             return false;
