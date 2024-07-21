@@ -118,9 +118,9 @@ class Crontab {
      * @return int
      */
     public function start(): int {
-        $members = MasterDB::sMembers(App::id() . '_CRONTABS_');
+        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . $this->id());
         if ($members) {
-            //MasterDB::sClear(App::id() . '_CRONTABS_');
+            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
             foreach ($members as $id) {
                 MasterDB::delete('-crontabs-' . $id);
             }
@@ -146,8 +146,8 @@ class Crontab {
      * @return void
      */
     protected function register($task): void {
-        if (!MasterDB::sIsMember(App::id() . '_CRONTABS_', $this->id())) {
-            MasterDB::sAdd(App::id() . '_CRONTABS_', $this->id());
+        if (!MasterDB::sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
+            MasterDB::sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
         $this->attributes = $task;
         Timer::tick(5000, function () {
@@ -332,7 +332,7 @@ class Crontab {
      * @return array
      */
     public function getList(): array {
-        $ids = MasterDB::sMembers(App::id() . '_CRONTABS_') ?: [];
+        $ids = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_') ?: [];
         $list = [];
         if ($ids) {
             foreach ($ids as $id) {
