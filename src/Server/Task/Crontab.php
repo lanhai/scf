@@ -46,6 +46,7 @@ class Crontab {
      * 严格间隔执行
      */
     const RUN_MODE_INTERVAL = 3;
+    protected int $executeTimeout = 0;
 
     /**
      * @return void
@@ -158,6 +159,7 @@ class Crontab {
             MasterDB::sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
         $this->attributes = $task;
+        $this->executeTimeout = $task['timeout'] ?? 0;
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
             if ($this->attributes['manager_id'] != Counter::instance()->get('_background_process_id_')) {
@@ -174,11 +176,31 @@ class Crontab {
         $this->excute();
     }
 
+    protected function checkAlive(): bool {
+        //检查最近活跃时间判断计时器是否挂掉
+        $latestAlive = $this->attributes['latest_alive'];
+        $duration = time() - $latestAlive;
+        $mode = $this->attributes['override']['mode'] ?? $this->attributes['mode'];
+        $interval = $this->attributes['override']['interval'] ?? $this->attributes['interval'] ?? 0;
+        $isDead = false;
+        switch ($mode) {
+            case self::RUN_MODE_INTERVAL:
+                $isDead = $duration > $interval + 10;
+                break;
+            case self::RUN_MODE_LOOP://循环任务超时3分钟
+                $isDead = $duration > $interval + 180;
+                break;
+        }
+        Console::info(get_called_class() . '最近活跃:' . date('m-d H:i:s', $latestAlive));
+        return $isDead;
+    }
+
     /**
      * 执行任务
      * @return void
      */
     protected function excute(): void {
+        $this->updateTask('latest_alive', time());
         $mode = $this->attributes['override']['mode'] ?? $this->attributes['mode'];
         $interval = $this->attributes['override']['interval'] ?? $this->attributes['interval'] ?? 0;
         $status = $this->attributes['override']['status'] ?? $this->attributes['status'];
@@ -416,6 +438,8 @@ class Crontab {
         ];
     }
 
+    protected int $timerCid = 0;
+
     /**
      * 执行循环任务
      * @param $timeout
@@ -427,11 +451,25 @@ class Crontab {
             return;
         }
         $this->processingStart();
-        try {
-            $this->run();
-        } catch (Throwable $throwable) {
-            Log::instance()->error("【Crontab】任务执行失败:" . $throwable->getMessage());
-            $this->log("任务执行失败:" . $throwable->getMessage());
+        $channel = new Coroutine\Channel(1);
+        $this->timerCid = Coroutine::create(function () use ($channel) {
+            try {
+                $this->run();
+                $channel->push('success');
+            } catch (Throwable $throwable) {
+                Log::instance()->error("【Crontab】任务执行失败:" . $throwable->getMessage());
+                $this->log("任务执行失败:" . $throwable->getMessage());
+                $channel->push('fail');
+            }
+        });
+        while (true) {
+            $result = $channel->pop($this->executeTimeout ?: 600);//单个任务最多等待10分钟
+            if (!$result) {
+                Console::warning("【Crontab】{$this->attributes['name']} 执行超时:" . get_called_class());
+            }
+            if ($channel->isEmpty()) {
+                break;
+            }
         }
         $this->processingFinish(time() + $timeout);
         $timerId = Timer::after($timeout * 1000, function () use ($timeout, $id) {
@@ -447,7 +485,8 @@ class Crontab {
      * @return void
      */
     protected function processingStart(int $nextTime = 0): void {
-        $this->attributes['last_run'] = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3);
+        $lastRun = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3);
+        $this->attributes['last_run'] = $lastRun;
         $this->attributes['run_count'] += 1;
         $this->attributes['is_busy'] = 1;
         $nextTime and $this->attributes['next_run'] = $nextTime;
@@ -478,6 +517,7 @@ class Crontab {
         } elseif ($id !== $this->id) {
             return false;
         }
+        $this->updateTask('latest_alive', time());
         return true;
     }
 
