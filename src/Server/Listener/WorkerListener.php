@@ -49,35 +49,35 @@ INFO;
             Console::write(Color::green($info));
             App::updateDatabase();
             //启动任务管理器
-            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
-            $serverConifg = Config::server();
-            $runQueueInMaster = $serverConifg['redis_queue_in_master'] ?? true;
-            $runQueueInSlave = $serverConifg['redis_queue_in_slave'] ?? false;
-            $runCrontabInMaster = $serverConifg['crontab_in_master'] ?? true;
-            $runCrontabInSlave = $serverConifg['crontab_in_slave'] ?? false;
-            Counter::instance()->incr('_background_process_id_');
-            if (App::isMaster()) {
-                if ($reloadTimes == 0) {
-                    $runCrontabInMaster and Crontab::startByWorker();
-                    $runQueueInMaster and RQueue::startByWorker();
-                } else {
-                    Timer::after(6000, function () use ($server, $workerId, $runCrontabInMaster, $runQueueInMaster) {
-                        $runCrontabInMaster and Crontab::startByWorker();
-                        $runQueueInMaster and RQueue::startByWorker();
-                    });
-                }
-            } else {
-                if ($reloadTimes == 0) {
-                    $runQueueInSlave and RQueue::startByWorker();
-                    $runCrontabInSlave and Crontab::startByWorker();
-                } else {
-                    Timer::after(6000, function () use ($server, $workerId, $runQueueInSlave, $runCrontabInSlave) {
-                        $runQueueInSlave and RQueue::startByWorker();
-                        $runCrontabInSlave and Crontab::startByWorker();
-                    });
-                }
-
-            }
+//            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
+//            $serverConifg = Config::server();
+//            $runQueueInMaster = $serverConifg['redis_queue_in_master'] ?? true;
+//            $runQueueInSlave = $serverConifg['redis_queue_in_slave'] ?? false;
+//            $runCrontabInMaster = $serverConifg['crontab_in_master'] ?? true;
+//            $runCrontabInSlave = $serverConifg['crontab_in_slave'] ?? false;
+//            Counter::instance()->incr('_background_process_id_');
+//            if (App::isMaster()) {
+//                if ($reloadTimes == 0) {
+//                    $runCrontabInMaster and Crontab::startByWorker();
+//                    $runQueueInMaster and RQueue::startByWorker();
+//                } else {
+//                    Timer::after(6000, function () use ($server, $workerId, $runCrontabInMaster, $runQueueInMaster) {
+//                        $runCrontabInMaster and Crontab::startByWorker();
+//                        $runQueueInMaster and RQueue::startByWorker();
+//                    });
+//                }
+//            } else {
+//                if ($reloadTimes == 0) {
+//                    $runQueueInSlave and RQueue::startByWorker();
+//                    $runCrontabInSlave and Crontab::startByWorker();
+//                } else {
+//                    Timer::after(6000, function () use ($server, $workerId, $runQueueInSlave, $runCrontabInSlave) {
+//                        $runQueueInSlave and RQueue::startByWorker();
+//                        $runCrontabInSlave and Crontab::startByWorker();
+//                    });
+//                }
+//
+//            }
         }
     }
 
