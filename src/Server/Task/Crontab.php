@@ -119,6 +119,7 @@ class Crontab {
                 }
                 self::$tasks[substr($task['namespace'], 1)] = $task;
             }
+            //Console::log("【Crontab】成功加载定时任务:" . Color::green(count(self::$tasks)));
         }
         return self::hasTask();
     }
@@ -145,10 +146,11 @@ class Crontab {
                     Log::instance()->error('后台任务' . $task['name'] . '未定义run方法');
                 } else {
                     $worker->register($task);
+                    Console::info("【Crontab】#{$this->attributes['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
                 }
             });
         }
-        return Counter::instance()->get('_background_process_id_');
+        return $managerId;
     }
 
 
@@ -166,7 +168,7 @@ class Crontab {
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
             if ($this->attributes['manager_id'] != Counter::instance()->get('_background_process_id_')) {
-                Console::info("【Crontab】#" . $this->attributes['manager_id'] . " 已终止运行");
+                Console::info("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理器已迭代,已终止运行");
                 Timer::clearAll();
                 return;
             }
@@ -514,7 +516,7 @@ class Crontab {
      */
     public function isAlive(int $id = 1): bool {
         if ($this->isOrphan()) {
-            Console::info("【Crontab】#" . $this->attributes['manager_id'] . " 已终止运行");
+            Console::info("【Crontab】#" . $this->attributes['manager_id'] . "[" . $this->attributes['namespace'] . "]是孤儿进程,已终止");
             Timer::clearAll();
             return false;
         } elseif ($id !== $this->id) {
