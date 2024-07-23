@@ -100,8 +100,8 @@ class ConnectionPool extends AbstractObjectPool {
                         $driver->pingTimes++;
                         $driver->lastPingTime = time();
                         $this->actives[$driver->id] = '';
-                        //$conn = new Connection($driver, $this->logger);
-                        //$conn->exec("select 1");
+                        $conn = new Connection($driver, $this->logger);
+                        $conn->exec("select 1");
                         //$this->push($driver);
                     }
                 } catch (Throwable $exception) {
