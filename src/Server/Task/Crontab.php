@@ -89,8 +89,11 @@ class Crontab {
             if ($crontabs) {
                 $list = $list ? [...$list, ...$crontabs] : $crontabs;
             }
-            if (App::isMaster() && $masterContabls = $module['master_crontabs'] ?? null) {
-                $list = $list ? [...$list, ...$masterContabls] : $masterContabls;
+            if (App::isMaster() && $masterCrontabls = $module['master_crontabs'] ?? null) {
+                $list = $list ? [...$list, ...$masterCrontabls] : $masterCrontabls;
+            }
+            if (!App::isMaster() && $slaveCrontabls = $module['slave_crontabs'] ?? null) {
+                $list = $list ? [...$list, ...$slaveCrontabls] : $slaveCrontabls;
             }
         }
         if ($list) {
