@@ -178,7 +178,7 @@ class Http extends \Scf\Core\Server {
 //            }
 //        }
         //实例化服务器
-        $this->server = new Server($this->bindHost, mode: SWOOLE_BASE);
+        $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
