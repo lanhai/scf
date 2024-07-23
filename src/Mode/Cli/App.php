@@ -32,7 +32,7 @@ class App extends \Scf\Core\App {
             $options[] = ($app['name'] ?? $app);
         }
         if (!$cmdNum) {
-            $cmdNum = Console::select($options, 1, 1, "请选择要执行的操作,当前运行环境:" . (\Scf\Core\App::isDevEnv() ? Color::success('开发环境') : Color::warning('生产环境')));
+            $cmdNum = Console::select($options, 1, 1, "请选择要执行的操作,当前运行环境:" . (\Scf\Core\App::isDevEnv() ? Color::green('开发环境') : Color::yellow('生产环境')));
         }
         $appNum = $cmdNum - 1;
         if (!isset($this->_apps[$appNum])) {
