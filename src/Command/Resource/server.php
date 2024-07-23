@@ -15,8 +15,6 @@ return [
     'dashboard_password' => null,//控制台超级密码
     'redis_queue_in_master' => true,
     'redis_queue_in_slave' => false,
-    'crontab_in_master' => true,
-    'crontab_in_slave' => false,
     'slow_log_time' => 10000,//慢日志时间
     'redis_queue_mc' => 512,//redis队列每次取出上线
 ];

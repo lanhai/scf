@@ -119,18 +119,15 @@ class Http extends \Scf\Core\Server {
             $processId = Counter::instance()->get('_background_process_id_');
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
-            $runCrontabInMaster = $config['crontab_in_master'] ?? true;
-            $runCrontabInSlave = $config['crontab_in_slave'] ?? false;
             while (true) {
                 $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
                 if ($processId != $latestProcessId) {
                     $processId = $latestProcessId;
+                    Crontab::startProcess();
                     if (App::isMaster()) {
                         $runQueueInMaster and RQueue::startProcess();
-                        $runCrontabInMaster and Crontab::startProcess();
                     } else {
                         $runQueueInSlave and RQueue::startProcess();
-                        $runCrontabInSlave and Crontab::startProcess();
                     }
                 }
                 usleep(1000 * 1000 * 5);
@@ -181,7 +178,7 @@ class Http extends \Scf\Core\Server {
 //            }
 //        }
         //实例化服务器
-        $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
+        $this->server = new Server($this->bindHost, mode: SWOOLE_BASE);
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
