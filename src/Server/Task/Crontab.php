@@ -143,7 +143,7 @@ class Crontab {
             $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
                 $worker = $this->createWorker($task['namespace']);
                 if (!method_exists($worker, 'run')) {
-                    Log::instance()->error('后台任务' . $task['name'] . '未定义run方法');
+                    Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
                 } else {
                     $worker->register($task);
                     Console::log("【Crontab】#{$task['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
@@ -167,8 +167,8 @@ class Crontab {
         $this->executeTimeout = $task['timeout'] ?? 0;
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
-            if ($this->attributes['manager_id'] != Counter::instance()->get('_background_process_id_')) {
-                Console::info("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理器已迭代,已终止运行");
+            if ($this->isOrphan()) {
+                Console::warning("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理器已迭代,已终止运行");
                 Timer::clearAll();
                 return;
             }
@@ -179,6 +179,23 @@ class Crontab {
             }
         });
         $this->excute();
+    }
+
+    /**
+     * 是否活着
+     * @param int $id
+     * @return bool
+     */
+    public function isAlive(int $id = 1): bool {
+        if ($this->isOrphan()) {
+            Console::warning("【Crontab】#" . $this->attributes['manager_id'] . "[" . $this->attributes['namespace'] . "]是孤儿进程,已取消执行");
+            //Timer::clearAll();
+            return false;
+        } elseif ($id !== $this->id) {
+            return false;
+        }
+        $this->updateTask('latest_alive', time());
+        return true;
     }
 
     protected function checkAlive(): bool {
@@ -468,7 +485,7 @@ class Crontab {
             }
         });
         while (true) {
-            $result = $channel->pop($this->executeTimeout ?: 600);//单个任务最多等待10分钟
+            $result = $channel->pop($this->executeTimeout ?: 1800);//单个任务最多等待30分钟
             if (!$result) {
                 Console::warning("【Crontab】{$this->attributes['name']} 执行超时:" . get_called_class());
             }
@@ -507,23 +524,6 @@ class Crontab {
         $this->attributes['is_busy'] = 0;
         $nextTime and $this->attributes['next_run'] = $nextTime;
         $this->refreshDB();
-    }
-
-    /**
-     * 是否活着
-     * @param int $id
-     * @return bool
-     */
-    public function isAlive(int $id = 1): bool {
-        if ($this->isOrphan()) {
-            Console::info("【Crontab】#" . $this->attributes['manager_id'] . "[" . $this->attributes['namespace'] . "]是孤儿进程,已终止");
-            Timer::clearAll();
-            return false;
-        } elseif ($id !== $this->id) {
-            return false;
-        }
-        $this->updateTask('latest_alive', time());
-        return true;
     }
 
     /**

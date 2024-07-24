@@ -130,7 +130,7 @@ class Http extends \Scf\Core\Server {
                         $runQueueInSlave and RQueue::startProcess();
                     }
                 }
-                usleep(1000 * 1000 * 5);
+                usleep(1000 * 1000 * 10);
             }
         });
         $pid = $process->start();
