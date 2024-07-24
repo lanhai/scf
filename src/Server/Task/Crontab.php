@@ -146,7 +146,7 @@ class Crontab {
                     Log::instance()->error('后台任务' . $task['name'] . '未定义run方法');
                 } else {
                     $worker->register($task);
-                    Console::info("【Crontab】#{$this->attributes['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
+                    Console::info("【Crontab】#{$task['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
                 }
             });
         }
