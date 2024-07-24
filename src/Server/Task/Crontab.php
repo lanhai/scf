@@ -168,8 +168,9 @@ class Crontab {
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
             if ($this->isOrphan()) {
-                Console::warning("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理器已迭代,已终止运行");
+                Console::warning("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所以定时器已清除");
                 Timer::clearAll();
+                sleep(3);
                 Runtime::instance()->set('_background_process_status_', STATUS_OFF);
                 return;
             }
