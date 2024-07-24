@@ -120,7 +120,7 @@ class Http extends \Scf\Core\Server {
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
             while (true) {
-               // $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
+                // $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
 //                if ($processId != $latestProcessId) {
 //                    $processId = $latestProcessId;
                 if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
@@ -132,7 +132,7 @@ class Http extends \Scf\Core\Server {
                         $runQueueInSlave and RQueue::startProcess();
                     }
                 }
-                usleep(1000 * 1000 * 10);
+                usleep(1000 * 1000 * 30);
             }
         });
         $pid = $process->start();
@@ -266,7 +266,7 @@ class Http extends \Scf\Core\Server {
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
             Counter::instance()->incr('_background_process_id_');
-            Runtime::instance()->set('_background_process_status_', STATUS_OFF);
+            //Runtime::instance()->set('_background_process_status_', STATUS_OFF);
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
