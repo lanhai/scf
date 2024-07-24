@@ -146,7 +146,7 @@ class Crontab {
                     Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
                 } else {
                     $worker->register($task);
-                    Console::log("【Crontab】#{$task['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
+                    Console::info("【Crontab】#{$task['manager_id']} {$task['name']}[{$task['namespace']}]" . Color::green('已注册'));
                 }
             });
         }
@@ -170,6 +170,7 @@ class Crontab {
             if ($this->isOrphan()) {
                 Console::warning("【Crontab】#" . $this->attributes['manager_id'] . " {$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理器已迭代,已终止运行");
                 Timer::clearAll();
+                Runtime::instance()->set('_background_process_status_', STATUS_OFF);
                 return;
             }
             $this->sync();
