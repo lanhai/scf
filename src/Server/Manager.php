@@ -185,6 +185,12 @@ class Manager extends Component {
         return true;
     }
 
+    public function serverFingerPrints(): array {
+        return array_map(function ($value) {
+            return $value['fingerprint'];
+        }, $this->getServers());
+    }
+
     /**
      * 获取服务器列表
      * @return array

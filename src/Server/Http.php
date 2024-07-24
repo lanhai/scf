@@ -593,6 +593,7 @@ INFO;
         $node->id = $this->id;
         $node->name = $this->name;
         $node->ip = $this->ip;
+        $node->fingerprint = APP_FINGERPRINT;
         $node->port = $this->bindPort;
         $node->socketPort = $this->bindPort + 1;
         $node->role = App::isMaster() ? 'master' : 'slave';

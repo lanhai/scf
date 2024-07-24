@@ -56,8 +56,12 @@ class Node extends Struct {
      * @var int 管理进程pid
      */
     public int $manager_pid;
-
     /**
+     * @var string 应用服务器指纹
+     */
+    public string $fingerprint;
+    /**
+     * /**
      * @var string 应用版本号
      */
     public string $app_version;
