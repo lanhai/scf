@@ -19,6 +19,7 @@ use Scf\Util\Date;
 use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\WebSocket\Server;
+use Throwable;
 
 class Manager extends Component {
 
@@ -178,17 +179,31 @@ class Manager extends Component {
         try {
             $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
             $websocket->push('reload');
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
             return false;
         }
         return true;
     }
 
+    /**
+     * 获取所有在线节点的指纹
+     * @return array
+     */
     public function serverFingerPrints(): array {
         return array_map(function ($value) {
             return $value['fingerprint'];
         }, $this->getServers());
+    }
+
+    /**
+     * 根据节点指纹查找节点信息
+     * @param $fingerprint
+     * @return string|null
+     */
+    public function getNodeByFingerprint($fingerprint): ?string {
+        $target = ArrayHelper::findColumn($this->getServers(), 'fingerprint', $fingerprint);
+        return $target ?: null;
     }
 
     /**
@@ -214,11 +229,11 @@ class Manager extends Component {
                 $node['tasks'] = Crontab::instance()->getList();
                 $list[] = $node;
             }
-        }
-        try {
-            ArrayHelper::multisort($list, 'role');
-        } catch (\Throwable) {
-
+            try {
+                ArrayHelper::multisort($list, 'role');
+            } catch (Throwable) {
+                return $list;
+            }
         }
         return $list;
     }
