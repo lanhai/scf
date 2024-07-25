@@ -187,7 +187,14 @@ class Log {
         $count = $table->count();
         for ($id = $start + 1; $id <= $logId; $id++) {
             $row = $table->get($id);
-            MasterDB::addLog($row['type'], $row['log']) !== false and $table->delete($id);
+            if ($row) {
+                if (MasterDB::addLog($row['type'], $row['log']) !== false) {
+                    $table->delete($id);
+                } else {
+                    // 处理添加日志失败的情况
+                    Console::error("Failed to add log with ID $id to MasterDB.");
+                }
+            }
         }
         Counter::instance()->set($this->backupCounterKey, $logId);
         return $count;
