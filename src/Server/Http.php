@@ -116,9 +116,9 @@ class Http extends \Scf\Core\Server {
      */
     public static function startMasterProcess($config): void {
         $process = new Process(function () use ($config) {
-            $processId = Counter::instance()->get('_background_process_id_');
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+            Counter::instance()->incr('_background_process_id_');
             while (true) {
                 // $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
 //                if ($processId != $latestProcessId) {
