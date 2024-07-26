@@ -250,6 +250,7 @@ class Http extends \Scf\Core\Server {
         $this->server->on("BeforeReload", function (Server $server) {
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
+            Counter::instance()->incr('_background_process_id_');
             //即将重启
             $clients = $this->server->getClientList();
             if ($clients) {
@@ -261,11 +262,12 @@ class Http extends \Scf\Core\Server {
                 }
             }
         });
+
         $this->server->on("AfterReload", function () {
             Runtime::instance()->set('restart_times', $this->restartTimes);
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
-            Counter::instance()->incr('_background_process_id_');
+            //Counter::instance()->incr('_background_process_id_');
             //Runtime::instance()->set('_background_process_status_', STATUS_OFF);
         });
         //服务器完成启动

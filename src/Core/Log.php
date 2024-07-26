@@ -192,7 +192,7 @@ class Log {
                     $table->delete($id);
                 } else {
                     // 处理添加日志失败的情况
-                    Console::error("Failed to add log with ID $id to MasterDB.");
+                    Console::warning("Failed to add log with ID $id to MasterDB.");
                 }
             }
         }

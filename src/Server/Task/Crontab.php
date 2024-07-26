@@ -60,6 +60,17 @@ class Crontab {
             if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
                 self::instance()->start();
                 Event::wait();
+            } else {
+                //没有启动也运行一个计时器
+                $managerId = Counter::instance()->get('_background_process_id_');
+                Timer::tick(5000, function () use ($managerId) {
+                    //服务器已重启,终止现有计时器
+                    if ($managerId !== Counter::instance()->get('_background_process_id_')) {
+                        Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
+                        Timer::clearAll();
+                        Runtime::instance()->set('_background_process_status_', STATUS_OFF);
+                    }
+                });
             }
         });
         $pid = $process->start();
@@ -164,11 +175,10 @@ class Crontab {
         }
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 0;
-
         Timer::tick(5000, function () {
             //服务器已重启,终止现有计时器
             if ($this->isOrphan()) {
-                Console::warning("【Crontab#" . $this->attributes['manager_id'] . " 】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
+                Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
                 Timer::clearAll();
                 sleep(5);
                 Runtime::instance()->set('_background_process_status_', STATUS_OFF);

@@ -17,7 +17,6 @@ use Swoole\WebSocket\Server;
 
 class WorkerListener extends Listener {
 
-
     protected function onWorkerStart(Server $server, $workerId): void {
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
