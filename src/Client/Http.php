@@ -104,6 +104,15 @@ class Http {
     }
 
     /**
+     * 参数设置
+     * @param $setting
+     * @return void
+     */
+    public function set($setting): void {
+        $this->client->set($setting);
+    }
+
+    /**
      * 发送JSON POST请求
      * @param mixed $body
      * @param int $timeout
