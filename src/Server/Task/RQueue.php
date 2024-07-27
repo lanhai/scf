@@ -33,6 +33,7 @@ class RQueue {
         }
         $process = new Process(function () {
             App::mount();
+            Console::enablePush();
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
                 Console::warning("Redis服务不可用,队列管理未启动");
