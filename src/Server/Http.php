@@ -112,9 +112,10 @@ class Http extends \Scf\Core\Server {
     /**
      * 启动mater节点子进程,跟随manager的重启而重新加载文件重启,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
      * @param $config
+     * @param Server $server
      * @return void
      */
-    public static function startMasterProcess($config): void {
+    public static function startMasterProcess($config): Process {
         $process = new Process(function () use ($config) {
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
@@ -137,6 +138,7 @@ class Http extends \Scf\Core\Server {
         });
         $pid = $process->start();
         Console::success('Background Process PID:' . Color::info($pid));
+        return $process;
     }
 
     /**
@@ -164,7 +166,7 @@ class Http extends \Scf\Core\Server {
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
-        //启动任务管理进程
+        //启动后台任务管理进程
         self::startMasterProcess($serverConfig);
         //检查是否存在异常进程
 //        $pid = 0;
@@ -181,6 +183,12 @@ class Http extends \Scf\Core\Server {
 //        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
+        //Console::instance()->attachServer($this->server);
+        $this->server->on('receive', function ($server, $fd, $reactor_id, $data) {
+            Console::log('收到管理进程消息', false);
+            // 处理接收到的数据
+            //$server->send($fd, "Server: ".$data);
+        });
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
@@ -262,7 +270,6 @@ class Http extends \Scf\Core\Server {
                 }
             }
         });
-
         $this->server->on("AfterReload", function () {
             Runtime::instance()->set('restart_times', $this->restartTimes);
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
@@ -275,6 +282,7 @@ class Http extends \Scf\Core\Server {
             $this->onStart($server, $serverConfig);
         });
         try {
+
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
