@@ -97,7 +97,7 @@ class CgiListener extends Listener {
         Counter::instance()->incr('_REQUEST_COUNT_' . Date::today());
         Counter::instance()->incr('_REQUEST_PROCESSING_');
 
-        if (!$this->dashboradTakeover($request, $response)) {
+        if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage()) {
             $logger = Log::instance();
             $app = App::instance();
             Env::isDev() and $logger->enableDebug();
@@ -155,6 +155,27 @@ class CgiListener extends Listener {
         Event::defer(function () {
             Counter::instance()->decr('_REQUEST_PROCESSING_');
         });
+    }
+
+    protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
+        if (str_starts_with($request->server['path_info'], '/@@@/',)) {
+            $server = Server::server();
+            //            $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
+//            if ($subscribers && self::$enablePush) {
+//                foreach ($subscribers as $subscriber) {
+//                    try {
+//                        Http::instance()->push($subscriber, $str);
+//                    } catch (Exception $exception) {
+//                        self::log('向socket客户端推送失败:' . $exception->getMessage(), false);
+//                    }
+//                }
+//            }
+            $msg = $request->getContent();
+            var_dump($msg);
+            $response->end('ok');
+            return true;
+        }
+        return false;
     }
 
     /**

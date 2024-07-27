@@ -60,7 +60,7 @@ class Core {
         !defined('SERVER_ROLE') and define('SERVER_ROLE', $role);
         !defined('SERVER_MODE') and define('SERVER_MODE', $mode);
         !defined('SERVER_ALIAS') and define('SERVER_ALIAS', $options['alias'] ?? $app->app_path);
-        !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? 0);
+        !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? 9580);
         !defined('MDB_PORT') and define('MDB_PORT', $options['mport'] ?? 16379);
         !defined('SERVER_NODE_ID') and define('SERVER_NODE_ID', strtolower(SERVER_ROLE) . '-' . $app->node_id);
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');
