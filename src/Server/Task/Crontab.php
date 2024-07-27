@@ -57,6 +57,7 @@ class Crontab {
         }
         $process = new Process(function () {
             App::mount();
+            Console::enablePush();
             if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
                 self::instance()->start();
                 Event::wait();
