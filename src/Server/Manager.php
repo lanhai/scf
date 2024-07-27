@@ -199,9 +199,9 @@ class Manager extends Component {
     /**
      * 根据节点指纹查找节点信息
      * @param $fingerprint
-     * @return string|null
+     * @return array|null
      */
-    public function getNodeByFingerprint($fingerprint): ?string {
+    public function getNodeByFingerprint($fingerprint): ?array {
         $target = ArrayHelper::findColumn($this->getServers(), 'fingerprint', $fingerprint);
         return $target ?: null;
     }
