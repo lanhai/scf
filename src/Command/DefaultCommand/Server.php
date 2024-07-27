@@ -67,10 +67,7 @@ class Server implements CommandInterface {
         return Manager::instance()->displayCommandHelp($this->commandName());
     }
 
-    /**
-     * @throws Exception
-     */
-    protected function start() {
+    protected function start(): void {
         if (!Manager::instance()->issetOpt('d')) {
             $msg = Color::note(Util::logo()) . "\n";
             echo $msg;
@@ -78,7 +75,7 @@ class Server implements CommandInterface {
         Http::create(SERVER_ROLE, '0.0.0.0', SERVER_PORT)->start();
     }
 
-    protected function cmd() {
+    protected function cmd(): void {
         Core::initialize(MODE_CGI);
         App::mount();
 //        \Scf\Mode\Web\App::loadModules();
