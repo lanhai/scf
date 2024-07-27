@@ -19,6 +19,7 @@ use Scf\Server\Controller\DashboardController;
 use Scf\Server\Env;
 use Scf\Server\Http as Server;
 use Scf\Server\Table\Counter;
+use Scf\Server\Table\Runtime;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\Sn;
@@ -27,7 +28,7 @@ use Swoole\ExitException;
 use Throwable;
 
 class CgiListener extends Listener {
-
+    private static string $subscribersTableKey = 'log_subscribers';
 
     /**
      * @param \Swoole\Http\Request $request
@@ -97,7 +98,7 @@ class CgiListener extends Listener {
         Counter::instance()->incr('_REQUEST_COUNT_' . Date::today());
         Counter::instance()->incr('_REQUEST_PROCESSING_');
 
-        if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage()) {
+        if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
             $logger = Log::instance();
             $app = App::instance();
             Env::isDev() and $logger->enableDebug();
@@ -158,20 +159,18 @@ class CgiListener extends Listener {
     }
 
     protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/@@@/',)) {
-            $server = Server::server();
-            //            $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-//            if ($subscribers && self::$enablePush) {
-//                foreach ($subscribers as $subscriber) {
-//                    try {
-//                        Http::instance()->push($subscriber, $str);
-//                    } catch (Exception $exception) {
-//                        self::log('向socket客户端推送失败:' . $exception->getMessage(), false);
-//                    }
-//                }
-//            }
-            $msg = $request->getContent();
-            var_dump($msg);
+        if (str_starts_with($request->server['path_info'], '/@console.message@/',)) {
+            $data = Request::instance()->post()->pack();
+            $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
+            if ($subscribers) {
+                foreach ($subscribers as $subscriber) {
+                    if (!$this->server->exist($subscriber) || !$this->server->isEstablished($subscriber)) {
+                        Console::unsubscribe($subscriber);
+                        continue;
+                    }
+                    $this->server->push($subscriber, $data['message']);
+                }
+            }
             $response->end('ok');
             return true;
         }

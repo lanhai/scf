@@ -3,8 +3,14 @@
 namespace Scf\Server\Listener;
 
 use Scf\Server\Http;
+use Swoole\WebSocket\Server;
 
 class Listener {
+    protected Server $server;
+
+    public function __construct($server) {
+        $this->server = $server;
+    }
 
     public static function register($handlers): void {
         $arr = explode("\\", static::class);
@@ -16,9 +22,9 @@ class Listener {
     }
 
     public static function bind(): void {
-        $handler = new static();
-        $methods = get_class_methods($handler);
         $server = Http::server();
+        $handler = new static($server);
+        $methods = get_class_methods($handler);
         foreach ($methods as $action) {
             if (!str_starts_with($action, 'on')) {
                 continue;

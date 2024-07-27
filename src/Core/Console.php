@@ -3,13 +3,14 @@
 namespace Scf\Core;
 
 use JetBrains\PhpStorm\NoReturn;
+use Scf\Client\Http;
 use Scf\Command\Color;
+use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
-use Scf\Server\Http;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Time;
 use Swoole\Timer;
-use function Co\run;
+use Swoole\Coroutine;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
 use function Laravel\Prompts\confirm;
@@ -18,7 +19,9 @@ use function Laravel\Prompts\confirm;
  * 带推送功能的控制台打印
  */
 class Console {
-    protected static bool $enablePush = false;
+    use Singleton;
+
+    protected static bool $enablePush = true;
     private static string $subscribersTableKey = 'log_subscribers';
 
     /**
@@ -267,23 +270,20 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if ($push) {
-//            \Swoole\Coroutine::create(function () use ($str) {
-//                $client = \Scf\Client\Http::create('http://localhost:' . SERVER_PORT . '/@@@/');
-//                $client->post([
-//                    'message' => $str
-//                ]);
-//            });
-            $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-            if ($subscribers && self::$enablePush) {
-                foreach ($subscribers as $subscriber) {
-                    try {
-                        Http::instance()->push($subscriber, $str);
-                    } catch (Exception $exception) {
-                        self::log('向socket客户端推送失败:' . $exception->getMessage(), false);
-                    }
+        if ($push && Coroutine::getCid() !== -1) {
+            Coroutine::create(function () use ($str) {
+                $port = defined('SERVER_PORT') ? SERVER_PORT : 9580;
+                $client = Http::create('http://localhost:' . $port . '/@console.message@/');
+                $result = $client->post([
+                    'message' => $str
+                ]);
+                if ($result->hasError() && (int)$client->statusCode() !== 503) {
+                    self::warning('向socket客户端推送失败:' . $result->getMessage(), false);
                 }
-            }
+                defer(function () use ($client) {
+                    $client->close();
+                });
+            });
         }
         $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
         fwrite(STDOUT, $str);
