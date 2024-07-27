@@ -27,11 +27,7 @@ class RedisLogger implements LoggerInterface {
         }
         PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         if (!is_null($exception)) {
-            if (Env::isDev()) {
-                Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ")."[{$exception->getMessage()}]");
-            } else {
-                Log::instance()->error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ")."[{$exception->getMessage()}]");
-            }
+            Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]");
         }
     }
 }

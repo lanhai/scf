@@ -106,7 +106,7 @@ class ConnectionPool extends AbstractObjectPool {
                         //$this->push($driver);
                     }
                 } catch (Throwable $exception) {
-                    Log::instance()->error("从连接池取出连接错误:" . $exception->getMessage());
+                    Console::error("从连接池取出连接错误:" . $exception->getMessage());
                 }
             }
         });
