@@ -17,7 +17,7 @@ use function Laravel\Prompts\confirm;
  * 带推送功能的控制台打印
  */
 class Console {
-    protected static bool $enablePush = false;
+    protected static bool $enablePush = true;
     private static string $subscribersTableKey = 'log_subscribers';
 
     /**
