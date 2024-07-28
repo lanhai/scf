@@ -40,10 +40,10 @@ class Http {
     public static function create($url, int $port = 0, array $certificate = null): static {
         $cid = Coroutine::getCid();
         $parsedUrl = parse_url($url);
-        $protocol = $parsedUrl['scheme'];
+        $protocol = $parsedUrl['scheme'] ?? 'http';
         $host = $parsedUrl['host'];
-        $path = $parsedUrl['path'];
-        $port = $parsedUrl['port'];
+        $path = $parsedUrl['path'] ?? '/';
+        $port = $parsedUrl['port'] ?? 80;
         if (!empty($parsedUrl['query'])) {
             $path .= '?' . $parsedUrl['query'];
         }
@@ -57,7 +57,7 @@ class Http {
 //        var_dump($protocol);
 //        var_dump($host);
 //        var_dump($path);
-          //提取URL里的端口号
+        //提取URL里的端口号
 //        if (str_contains($host, ":")) {
 //            $hostArr = explode(":", $host);
 //            $host = $hostArr[0];
