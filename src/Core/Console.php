@@ -285,7 +285,7 @@ class Console {
                     'message' => $str
                 ]);
                 if ($result->hasError() && (int)$client->statusCode() !== 503) {
-                    self::warning('向socket客户端推送失败:' . $result->getMessage(), false);
+                    //self::warning('向socket客户端推送失败:' . $result->getMessage(), false);
                 }
                 defer(function () use ($client) {
                     $client->close();
