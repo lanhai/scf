@@ -2,6 +2,7 @@
 
 namespace Scf\Database\Exception;
 
+use Scf\Core\Console;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Server\Env;
 
@@ -18,21 +19,29 @@ class NullAR {
      * @throws AppError
      */
     public function __get($name) {
-        if (Env::isDev()) {
-            throw new AppError('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
-        } else {
-            throw new AppError('未查询到相关数据');
-        }
+        $this->throwError();
+
     }
 
     /**
      * @throws AppError
      */
     public function __call($name, $args) {
-        if (Env::isDev()) {
-            throw new AppError('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
+        $this->throwError();
+    }
+
+    /**
+     * @throws AppError
+     */
+    protected function throwError(): void {
+        if (defined('IS_CRONTAB_PROCESS') || (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI)) {
+            Console::error('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
         } else {
-            throw new AppError('未查询到相关数据');
+            if (Env::isDev()) {
+                throw new AppError('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
+            } else {
+                throw new AppError('未查询到相关数据');
+            }
         }
     }
 
