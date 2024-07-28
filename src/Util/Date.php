@@ -2,6 +2,7 @@
 
 namespace Scf\Util;
 
+use DateTime;
 use JetBrains\PhpStorm\Pure;
 
 /**
@@ -34,6 +35,55 @@ class Date {
     public static string $timezone;
 
     /**
+     * 返回人性化时间
+     * @param $dateTimeStamp
+     * @return string
+     */
+    public static function humanizedTime($dateTimeStamp): string {
+        if (!$dateTimeStamp || intval($dateTimeStamp) === 0) {
+            return '--';
+        }
+
+        $now = new DateTime();
+        $targetTime = (new DateTime())->setTimestamp(intval($dateTimeStamp));
+        $targetTimeStartOfDay = (clone $targetTime)->setTime(0, 0);
+        $nowStartOfDay = (clone $now)->setTime(0, 0);
+
+        if ($targetTime > $now) {
+            $interval = $now->diff($targetTime);
+            return $interval->format('%a 天 %h 小时 %i 分钟') . '后';
+        }
+
+        $diffInMinutes = $now->getTimestamp() - $targetTime->getTimestamp();
+        $diffInMinutes = floor($diffInMinutes / 60);
+        $diffInHours = floor($diffInMinutes / 60);
+
+        if ($diffInMinutes < 1) {
+            return '刚刚';
+        } elseif ($diffInMinutes < 60) {
+            return $diffInMinutes . '分钟前';
+        } elseif ($diffInHours < 24) {
+            return $diffInHours . '小时前';
+        }
+
+        $isSameYear = $now->format('Y') === $targetTime->format('Y');
+        $formatStr = $isSameYear ? 'm-d H:i' : 'Y-m-d H:i';
+
+        $diffInDays = $nowStartOfDay->diff($targetTimeStartOfDay)->days;
+
+        if ($diffInDays === 1) {
+            return '昨天 ' . $targetTime->format('H:i');
+        } elseif ($diffInDays === 2) {
+            return '前天 ' . $targetTime->format('H:i');
+        } elseif ($diffInDays < 7) {
+            $weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+            return '星期' . $weekDays[$targetTime->format('w')] . ' ' . $targetTime->format('H:i');
+        }
+
+        return $targetTime->format($formatStr);
+    }
+
+    /**
      * Returns the offset (in seconds) between two time zones. Use this to
      * display dates to users in different time zones.
      *
@@ -56,7 +106,7 @@ class Date {
 
         if (is_int($now)) {
             // Convert the timestamp into a string
-            $now = date(\DateTime::RFC2822, $now);
+            $now = date(DateTime::RFC2822, $now);
         }
 
         // Create timezone objects
@@ -64,8 +114,8 @@ class Date {
         $zone_local = new \DateTimeZone($local);
 
         // Create date objects from timezones
-        $time_remote = new \DateTime($now, $zone_remote);
-        $time_local = new \DateTime($now, $zone_local);
+        $time_remote = new DateTime($now, $zone_remote);
+        $time_local = new DateTime($now, $zone_local);
 
         // Find the offset
         $offset = $zone_remote->getOffset($time_remote) - $zone_local->getOffset($time_local);
@@ -506,7 +556,7 @@ class Date {
         $timezone = ($timezone === null) ? Date::$timezone : $timezone;
 
         $tz = new \DateTimeZone($timezone ? $timezone : date_default_timezone_get());
-        $time = new \DateTime($datetime_str, $tz);
+        $time = new DateTime($datetime_str, $tz);
 
         if ($time->getTimeZone()->getName() !== $tz->getName()) {
             $time->setTimeZone($tz);
