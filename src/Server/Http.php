@@ -112,14 +112,14 @@ class Http extends \Scf\Core\Server {
     /**
      * 启动mater节点子进程,跟随manager的重启而重新加载文件重启,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
      * @param $config
-     * @param Server $server
-     * @return void
+     * @return Process
      */
     public static function startMasterProcess($config): Process {
         $process = new Process(function () use ($config) {
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
             Counter::instance()->incr('_background_process_id_');
+            define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 // $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
 //                if ($processId != $latestProcessId) {
