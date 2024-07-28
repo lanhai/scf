@@ -43,7 +43,7 @@ class Http {
         $protocol = $parsedUrl['scheme'] ?? 'http';
         $host = $parsedUrl['host'];
         $path = $parsedUrl['path'] ?? '/';
-        $port = $parsedUrl['port'] ?? 80;
+        $port = $parsedUrl['port'] ?? ($protocol == 'https' ? 443 : 80);
         if (!empty($parsedUrl['query'])) {
             $path .= '?' . $parsedUrl['query'];
         }
