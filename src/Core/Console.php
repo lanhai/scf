@@ -98,7 +98,7 @@ class Console {
             default: $default,
             yes: $yes,
             no: $no,
-            required: $required ?: '',
+            required: $required ?: false,
             hint: $hint ?: ''
         );
     }
@@ -131,7 +131,14 @@ class Console {
 //        !is_null($msg) and self::write($msg ?: '请输入内容', $break);
 //        return self::receive();
 //    }
-    public static function select($options = [], mixed $default = 0, int $start = 1, ?string $label = null): string {
+    /**
+     * @param array $options
+     * @param mixed $default 当start为0时默认值为第n个元素键值;为1时默认值为index:n
+     * @param int $start 0:获取对应的键值;1:获取index
+     * @param string|null $label
+     * @return string
+     */
+    public static function select(array $options = [], mixed $default = 0, int $start = 1, ?string $label = null): string {
         if (ArrayHelper::isAssociative($options)) {
             return select(
                 label: $label ?: '请选择要执行的操作',
@@ -270,7 +277,7 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if ($push && Coroutine::getCid() !== -1) {
+        if (defined('SERVER_MODE') && SERVER_MODE !== MODE_CLI && $push && Coroutine::getCid() !== -1) {
             Coroutine::create(function () use ($str) {
                 $port = defined('SERVER_PORT') ? SERVER_PORT : 9580;
                 $client = Http::create('http://localhost:' . $port . '/@console.message@/');

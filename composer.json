@@ -36,7 +36,8 @@
     "php-mqtt/client": "^2.1",
     "twig/twig": "^3.0",
     "laravel/prompts": "^0.1.24",
-    "symfony/yaml": "6.4.8"
+    "symfony/yaml": "6.4.8",
+    "symfony/console": "^6.4"
   },
   "autoload": {
     "psr-4": {

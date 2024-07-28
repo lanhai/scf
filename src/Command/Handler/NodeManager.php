@@ -17,6 +17,11 @@ use Swoole\Coroutine\Barrier;
 use Swoole\Event;
 use Swoole\Exception;
 use Swoole\Runtime;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Helper\TableCell;
+use Symfony\Component\Console\Helper\TableSeparator;
+use Symfony\Component\Console\Output\ConsoleOutput;
+
 use function Swoole\Coroutine\run;
 
 class NodeManager {
@@ -46,24 +51,41 @@ class NodeManager {
             Console::write("最新APP版本:" . $version['app']['version']);
             //Console::write("最新SCF版本:" . (!is_null($version['scf']) ? $version['scf']['version'] ?? '未知' : '未知'));
         });
-        Console::write('------------------------------------------------------------------------------------------');
-        Console::write(' ID   节点类型   版本      Host             启动时间         心跳时间        重启  状态');
-        Console::write('------------------------------------------------------------------------------------------');
-        if (!$this->nodes) {
-            Console::write('暂无节点');
-        } else {
-            foreach ($this->nodes as $k => $n) {
-                if (!$n) {
-                    continue;
-                }
-                $node = Node::factory($n);
-                $status = (time() - $node->heart_beat) <= 5;
-                Console::write("【" . ($k + 1) . "】【" . $node->role . "】 【v" . $node->app_version . "】 " . $node->ip . ":" . $node->port . "  " . date('m-d H:i:s', $node->started) . "   " . date('m-d H:i:s', $node->heart_beat) . "   " . $node->restart_times . "    " . ($status ? Color::green('活跃') : Color::yellow('停止')));
+        $output = new ConsoleOutput();
+        $table = new Table($output);
+        $rows = [];
+        foreach ($this->nodes as $k => $n) {
+            if (!$n) {
+                continue;
             }
+            $node = Node::factory($n);
+            $status = (time() - $node->heart_beat) <= 5;
+            if (filter_var($node->ip, FILTER_VALIDATE_IP) !== false) {
+                $socketHost = $node->ip . ':' . $node->port;
+            } else {
+                $socketHost = $node->ip;
+            }
+            $rows[] = [
+                $k + 1,
+                $node->role,
+                $node->scf_version,
+                $node->app_version,
+                $socketHost,
+                date('m-d H:i:s', $node->started),
+                date('m-d H:i:s', $node->heart_beat),
+                $node->restart_times . '次',
+                $status ? Color::green('活跃') : Color::yellow('停止')
+            ];
         }
-        Console::write('------------------------------------------------------------------------------------------');
+        $table
+            ->setHeaders(['ID', '节点类型', '框架笨笨', '核心版本', 'Host', '启动时间', '心跳时间', '重启', '状态'])
+            ->setRows($rows);
+        $table->render();
     }
 
+    /**
+     * @throws ErrorException
+     */
     protected function cmd($input): string {
         $arr = explode(" ", $input);
         $cmd = $arr[0] ?? 'status';
@@ -140,14 +162,15 @@ class NodeManager {
                     continue;
                 }
                 try {
-                    if (SERVER_HOST_IS_IP) {
-                        $socketHost = $node->ip . ':' . $node->socketPort;
-                    } else {
-                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
-                    }
-                    $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-                    Coroutine::create(function () use ($websocket, $node) {
+                    Coroutine::create(function () use ($node) {
+                        if (filter_var($node->ip, FILTER_VALIDATE_IP) !== false) {
+                            $socketHost = $node->ip . ':' . $node->socketPort;
+                        } else {
+                            $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
+                        }
+                        $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
                         $websocket->push('log_subscribe');
+                        // 使用 Swoole 定时器定期接收消息
                         while (true) {
                             $reply = $websocket->recv(1);
                             if ($reply) {
