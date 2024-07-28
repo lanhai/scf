@@ -40,28 +40,32 @@ class Http {
     public static function create($url, int $port = 0, array $certificate = null): static {
         $cid = Coroutine::getCid();
         $parsedUrl = parse_url($url);
-        preg_match('~^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?~i', $url, $result);
         $protocol = $parsedUrl['scheme'];
         $host = $parsedUrl['host'];
         $path = $parsedUrl['path'];
+        $port = $parsedUrl['port'];
         if (!empty($parsedUrl['query'])) {
             $path .= '?' . $parsedUrl['query'];
         }
+//        preg_match('~^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?~i', $url, $result);
 //        $protocol = $result[2] ?: 'http';
 //        $host = $result[4];
 //        $path = $result[5] ?: '/';
 //        if (!empty($result[6])) {
 //            $path .= $result[6];
 //        }
+//        var_dump($protocol);
+//        var_dump($host);
+//        var_dump($path);
+          //提取URL里的端口号
+//        if (str_contains($host, ":")) {
+//            $hostArr = explode(":", $host);
+//            $host = $hostArr[0];
+//            $port = $hostArr[1];
+//        }
         $class = static::class;
         $ssl = $protocol == 'https';
         if (!isset(self::$_instances[md5($url) . '_' . $cid])) {
-            //提取URL里的端口号
-            if (str_contains($host, ":")) {
-                $hostArr = explode(":", $host);
-                $host = $hostArr[0];
-                $port = $hostArr[1];
-            }
             self::$_instances[md5($url) . '_' . $cid] = new $class($protocol, $host, $path, $port ?: ($ssl ? 443 : 80), $ssl, $certificate);
         }
         return self::$_instances[md5($url) . '_' . $cid];
