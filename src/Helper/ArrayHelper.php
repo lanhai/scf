@@ -701,7 +701,7 @@ class ArrayHelper {
      * @throws Exception
      * correct number of elements as that of $key.
      */
-    public static function multisort(array &$array, array|\Closure|string $key, int|array $direction = SORT_ASC, int|array $sortFlag = SORT_REGULAR) {
+    public static function multisort(array &$array, array|\Closure|string $key, int|array $direction = SORT_ASC, int|array $sortFlag = SORT_REGULAR): void {
         $keys = is_array($key) ? $key : [$key];
         if (empty($keys) || empty($array)) {
             return;

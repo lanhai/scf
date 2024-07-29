@@ -187,30 +187,56 @@ class Manager extends Component {
     }
 
     /**
-     * 获取所有在线节点的指纹
+     * 获取所有节点的指纹
+     * @param bool $online
      * @return array
      */
-    public function serverFingerPrints(): array {
+    public function serverFingerPrints(bool $online = true): array {
         return array_map(function ($value) {
             return $value['fingerprint'];
-        }, $this->getServers());
+        }, $this->getServers($online));
     }
 
     /**
      * 根据节点指纹查找节点信息
      * @param $fingerprint
+     * @param bool $online
      * @return array|null
      */
-    public function getNodeByFingerprint($fingerprint): ?array {
-        $target = ArrayHelper::findColumn($this->getServers(), 'fingerprint', $fingerprint);
+    public function getNodeByFingerprint($fingerprint, bool $online = false): ?array {
+        $target = ArrayHelper::findColumn($this->getServers($online), 'fingerprint', $fingerprint);
         return $target ?: null;
     }
 
     /**
+     * 根据指纹移除节点
+     * @param $fingerprint
+     * @return bool
+     */
+    public function removeNodeByFingerprint($fingerprint): bool {
+        $node = $this->getNodeByFingerprint($fingerprint);
+        if ($node) {
+            if (time() - $node['heart_beat'] < 5) {
+                return false;
+            }
+            $key = App::id() . '-node-' . $node['id'];
+            try {
+                MasterDB::sRemove(App::id() . '-nodes', $node['id']);
+                MasterDB::delete($key);
+                return true;
+            } catch (Throwable $exception) {
+                Console::log(Color::red("【" . $key . "】" . "删除失败:" . $exception->getMessage()), false);
+            }
+        }
+        return false;
+    }
+
+    /**
      * 获取服务器列表
+     * @param bool $online
      * @return array
      */
-    public function getServers(): array {
+    public function getServers(bool $online = true): array {
         $this->servers = MasterDB::sMembers(App::id() . '-nodes') ?: [];
         $list = [];
         if ($this->servers) {
@@ -220,10 +246,10 @@ class Manager extends Component {
                     continue;
                 }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] >= 5) {
+                if (time() - $node['heart_beat'] >= 5 && $online) {
                     $node['online'] = false;
-                    MasterDB::sRemove(App::id() . '-nodes', $node['id']);
-                    MasterDB::delete($key);
+                    //MasterDB::sRemove(App::id() . '-nodes', $node['id']);
+                    //MasterDB::delete($key);
                     continue;
                 }
                 $node['tasks'] = Crontab::instance()->getList();
