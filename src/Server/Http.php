@@ -183,12 +183,6 @@ class Http extends \Scf\Core\Server {
 //        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
-        //Console::instance()->attachServer($this->server);
-        $this->server->on('receive', function ($server, $fd, $reactor_id, $data) {
-            Console::log('收到管理进程消息', false);
-            // 处理接收到的数据
-            //$server->send($fd, "Server: ".$data);
-        });
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
