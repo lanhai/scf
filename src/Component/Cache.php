@@ -26,7 +26,7 @@ class Cache extends Component {
      * @return bool
      */
     public function set($key, $value, $lifetime = null): bool {
-        return $this->driver->set($key, $value, $lifetime ?: $this->_config['lifetime']);
+        return $this->driver->set($key, $value, $lifetime ?: $this->_config['lifetime']) ?? false;
     }
 
     /**

@@ -246,7 +246,7 @@ class Manager extends Component {
                     continue;
                 }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] >= 5 && $online) {
+                if (time() - $node['heart_beat'] > 5 && $online) {
                     $node['online'] = false;
                     //MasterDB::sRemove(App::id() . '-nodes', $node['id']);
                     //MasterDB::delete($key);
