@@ -136,15 +136,16 @@ class Console {
      * @param mixed $default 当start为0时默认值为第n个元素键值;为1时默认值为index:n
      * @param int $start 0:获取对应的键值;1:获取index
      * @param string|null $label
+     * @param int $scroll
      * @return string
      */
-    public static function select(array $options = [], mixed $default = 0, int $start = 1, ?string $label = null): string {
+    public static function select(array $options = [], mixed $default = 0, int $start = 1, ?string $label = null, int $scroll = 20): string {
         if (ArrayHelper::isAssociative($options)) {
             return select(
                 label: $label ?: '请选择要执行的操作',
                 options: $options,
                 default: $default == 0 ? $options[0] : $default,
-                scroll: 20
+                scroll: $scroll
             );
         }
         $arr = [];
@@ -157,7 +158,7 @@ class Console {
             label: $label ?: '请选择要执行的操作',
             options: $arr ?: $options,
             default: $start == 0 ? $options[$default] : $default,
-            scroll: 20
+            scroll: $scroll
         );
     }
 
