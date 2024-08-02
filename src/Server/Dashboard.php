@@ -56,14 +56,14 @@ class Dashboard {
         if (!App::isReady()) {
             try {
                 $installServer = new Server('0.0.0.0', Http::instance()->getPort());
-                $installServer->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) {
+                $installServer->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) use ($installServer) {
                     if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
                         $response->end();
                         return;
                     }
                     Response::instance()->register($response);
                     Request::instance()->register($request);
-                    $listener = new CgiListener();
+                    $listener = new CgiListener($installServer);
                     App::isReady() and App::mount();
                     if (!$listener->dashboradTakeover($request, $response)) {
                         $response->status(503);
