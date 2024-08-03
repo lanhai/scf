@@ -73,7 +73,7 @@ class MasterDB {
             return;
         }
         try {
-            ini_set('memory_limit', '512M');
+            ini_set('memory_limit', -1);
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
