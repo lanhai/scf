@@ -1,2 +1,0 @@
-#!/bin/bash
-php ../boot server start -env=dev -app=longfu -static=on -role=master -port=80

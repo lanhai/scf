@@ -195,6 +195,20 @@ class Redis extends Cache {
     }
 
     /**
+     * 移除过期时间
+     * @param $key
+     * @return bool
+     */
+    public function persist($key): bool {
+        try {
+            return $this->connection->persist($this->setPrefix($key));
+        } catch (RedisException $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    /**
      * 减少一个数值
      * @param $key
      * @param $value
@@ -326,6 +340,9 @@ class Redis extends Cache {
                 }
                 if (Arr::isArray($value)) {
                     $value = JsonHelper::toJson($value);
+                }
+                if ($timeout == -1) {
+                    return $this->connection->set($this->setPrefix($key), $value);
                 }
                 return $this->connection->set($this->setPrefix($key), $value, $timeout);
             } else {
