@@ -12,6 +12,7 @@ use Scf\Mode\Web\App;
 use Scf\Command\Color;
 use Scf\Command\Manager;
 use Scf\Util\File;
+use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Process;
@@ -60,6 +61,16 @@ class MasterDB {
         } else {
             Console::success("MasterDB服务启动完成!PID:" . $masterDbPid);
         }
+    }
+
+    protected function countFileLines($file): int {
+        $line = 0; //初始化行数
+        if (file_exists($file)) {
+            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
+            $arr = explode(' ', $output);
+            $line = (int)$arr[0];
+        }
+        return $line;
     }
 
     /**
@@ -279,14 +290,13 @@ class MasterDB {
                 $day = $data[1];
                 $dir = APP_LOG_PATH . '/' . $data[0] . '/';
                 $fileName = $dir . $day . '.log';
-
-                $line = 0; //初始化行数
-                if (file_exists($fileName) && $fp = fopen($fileName, 'r')) {
-                    while (stream_get_line($fp, 102400, "\n")) {
-                        $line++;
-                    }
-                    fclose($fp);//关闭文件
-                }
+                $line = $this->countFileLines($fileName);
+//                if (file_exists($fileName) && $fp = fopen($fileName, 'r')) {
+//                    while (stream_get_line($fp, 102400, "\n")) {
+//                        $line++;
+//                    }
+//                    fclose($fp);//关闭文件
+//                }
                 return $server->send($fd, Server::format(Server::INT, $line));
             });
             $server->setHandler('getLog', function ($fd, $data) use ($server) {
@@ -303,35 +313,64 @@ class MasterDB {
                     $start = 0;
                 }
                 clearstatcache();
-                $content = System::readFile($fileName);
+                // 使用 sed 命令读取指定行数的内容
                 $logs = [];
-                if ($content) {
-                    $list = array_reverse(explode("\n", $content));
-                    if ($start < 0) {
-                        //$list = array_reverse($list);
-                        $size = abs($start);
-                        $start = 0;
-                    }
-                    foreach ($list as $index => $c) {
-                        if (!trim($c)) {
-                            continue;
-                        }
-                        if ($size != -1) {
-                            if ($index < $start) {
-                                continue;
-                            }
-                            if (count($logs) >= $size) {
-                                break;
-                            }
-                        }
-                        if (!$log = JsonHelper::recover($c)) {
-                            continue;
-                        }
+                $command = sprintf('sed -n %d,%dp %s', $start + 1, $start + $size - 1, escapeshellarg($fileName));
+                $result = System::exec($command);
+                if ($result === false) {
+                    return $server->send($fd, Server::format(Server::NIL));
+                }
+                $lines = explode("\n", $result['output']);
+                foreach ($lines as $line) {
+                    if (trim($line) && ($log = JsonHelper::recover($line))) {
                         $logs[] = $log;
                     }
                 }
                 return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
             });
+//            $server->setHandler('getLog', function ($fd, $data) use ($server) {
+//                $day = $data[1];
+//                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
+//                $start = $data[2];
+//                $size = $data[3];
+//                $fileName = $dir . $day . '.log';
+//                if (!file_exists($fileName)) {
+//                    return $server->send($fd, Server::format(Server::NIL));
+//                }
+//                if ($start < 0) {
+//                    $size = abs($start);
+//                    $start = 0;
+//                }
+//                clearstatcache();
+//                $content = System::readFile($fileName);
+//                $logs = [];
+//                if ($content) {
+//                    $list = array_reverse(explode("\n", $content));
+//                    if ($start < 0) {
+//                        //$list = array_reverse($list);
+//                        $size = abs($start);
+//                        $start = 0;
+//                    }
+//                    foreach ($list as $index => $c) {
+//                        if (!trim($c)) {
+//                            continue;
+//                        }
+//                        if ($size != -1) {
+//                            if ($index < $start) {
+//                                continue;
+//                            }
+//                            if (count($logs) >= $size) {
+//                                break;
+//                            }
+//                        }
+//                        if (!$log = JsonHelper::recover($c)) {
+//                            continue;
+//                        }
+//                        $logs[] = $log;
+//                    }
+//                }
+//                return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
+//            });
             $server->setHandler('sAdd', function ($fd, $data) use ($server) {
                 if (count($data) < 2) {
                     return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'sAdd' command"));

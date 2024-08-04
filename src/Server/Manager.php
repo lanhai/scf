@@ -130,15 +130,15 @@ class Manager extends Component {
             'logs' => [
                 'error' => [
                     'total' => MasterDB::countLog('error', date('Y-m-d')),
-                    'list' => MasterDB::getLog('error', date('Y-m-d'), 0, 2)
+                    'list' => [],// MasterDB::getLog('error', date('Y-m-d'), 0, 1)
                 ],
                 'info' => [
                     'total' => MasterDB::countLog('info', date('Y-m-d')),
-                    'list' => MasterDB::getLog('info', date('Y-m-d'), 0, 2)
+                    'list' => [],// MasterDB::getLog('info', date('Y-m-d'), 0, 1)
                 ],
                 'slow' => [
                     'total' => MasterDB::countLog('slow', date('Y-m-d')),
-                    'list' => MasterDB::getLog('slow', date('Y-m-d'), 0, 2)
+                    'list' => [],// MasterDB::getLog('slow', date('Y-m-d'), 0, 1)
                 ]
             ]
         ];

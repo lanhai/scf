@@ -61,6 +61,21 @@ class Log {
         return $msg;
     }
 
+    protected function formatBackTrace($backTrace): array {
+        $backTraceList = [];
+        foreach ($backTrace as $item) {
+            $backTraceList[] = [
+                'file' => $item['file'] ?? '--',
+                'line' => $item['line'] ?? '--',
+                'class' => $item['class'] ?? '--',
+                'function' => $item['function'] ?? '--',
+                'type' => $item['type'] ?? '--',
+                'object' => $item['object'] ?? []
+            ];
+        }
+        return $backTraceList;
+    }
+
     /**
      * 保存错误记录
      * @param Throwable|string|AppError $msg
@@ -91,7 +106,7 @@ class Log {
         $error['time'] = date('Y-m-d H:i:s');
         $error['ip'] = App::id() . '@' . SERVER_HOST;
         //推送到控制台
-        $log = ['message' => $error['error'], 'file' => $error['file'] . ':' . $error['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'backtrace' => $backTrace, 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
+        $log = ['message' => $error['error'], 'file' => $error['file'] . ':' . $error['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'backtrace' => $this->formatBackTrace($backTrace), 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
         //存到节点内存等待转存
         $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
@@ -106,6 +121,7 @@ class Log {
         }
 
     }
+
 
     /**
      * 保存信息日志
