@@ -11,8 +11,6 @@ use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
-use Scf\Mode\Web\Log;
-use Scf\Server\Env;
 use Scf\Server\Worker\ProcessLife;
 use Scf\Util\Arr;
 use Throwable;
@@ -126,7 +124,6 @@ class Redis extends Cache {
         } catch (RedisException $exception) {
             $msg = '【Redis】[' . $config['host'] . ':' . $config['port'] . ']创建连接池失败：' . $exception->getMessage();
             throw new AppError($msg);
-            //die('Redis连接失败：' . $exception->getMessage());
         }
         return $this;
     }
@@ -804,9 +801,8 @@ class Redis extends Cache {
             try {
                 $this->connection->close();
             } catch (RedisException $exception) {
-                Log::instance()->error("【Reids】Execute Failed:" . $exception->getMessage());
+                $this->onExecuteError($exception);
             }
-
         }
     }
 
@@ -819,6 +815,6 @@ class Redis extends Cache {
 
     protected function onExecuteError(RedisException $exception): void {
         self::$pools = [];
-        Console::error("【Redis】Execute Failed:" . $exception->getMessage() . ";code:" . $exception->getCode());
+        Console::error("【Redis】Execute Error:" . $exception->getMessage() . ";code:" . $exception->getCode() . ";file:" . $exception->getLine() . "@" . $exception->getFile());
     }
 }

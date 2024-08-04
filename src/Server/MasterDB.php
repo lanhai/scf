@@ -12,7 +12,6 @@ use Scf\Mode\Web\App;
 use Scf\Command\Color;
 use Scf\Command\Manager;
 use Scf\Util\File;
-use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Process;
@@ -358,9 +357,9 @@ class MasterDB {
 //            $server->on('Close', function ($server, int $fd) {
 //                Console::log("【MasterDB】#" . $fd . " Closed");
 //            });
-            $server->on('WorkerStart', function (Server $server) {
-
-            });
+//            $server->on('WorkerStart', function (Server $server) {
+//
+//            });
             $server->on('start', function (Server $server) {
                 Timer::tick(5000, function () use ($server) {
                     file_put_contents(APP_RUNTIME_DB, serialize($this->data));

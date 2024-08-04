@@ -4,10 +4,6 @@ namespace Scf\Cache\Logger;
 
 use Mix\Redis\LoggerInterface;
 use Scf\Core\Console;
-use Scf\Core\Log;
-use Scf\Mode\Web\Exception\AppError;
-use Scf\Mode\Web\Request;
-use Scf\Server\Env;
 use Scf\Server\Http;
 use Scf\Server\Worker\ProcessLife;
 use Throwable;
@@ -25,9 +21,9 @@ class RedisLogger implements LoggerInterface {
         if (!is_null(Http::server())) {
             ProcessLife::instance()->addRedis("{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         }
-        PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
+        PRINT_REDIS_LOG and Console::info("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         if (!is_null($exception)) {
-            Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]");
+            Console::error("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile());
         }
     }
 }

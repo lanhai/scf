@@ -22,7 +22,6 @@ class Log {
 
     protected string $_module = '';
     protected array $_config = [
-        'enable_save_to_table' => true,
         'enable_sql' => true,
         'enable_error' => true,
         'enable_message' => true,
@@ -93,15 +92,10 @@ class Log {
         $error['ip'] = App::id() . '@' . SERVER_HOST;
         //推送到控制台
         $log = ['message' => $error['error'], 'file' => $error['file'] . ':' . $error['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'backtrace' => $backTrace, 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
-        if ($this->_config['enable_save_to_table']) {
-            //存到节点内存等待转存
-            $table = LogTable::instance();
-            $logId = Counter::instance()->incr($this->idCounterKey);
-            $table->set($logId, ['type' => 'error', 'log' => $log]);
-        } else {
-            //保存日志到Redis&日志文件
-            MasterDB::addLog('error', $log);
-        }
+        //存到节点内存等待转存
+        $table = LogTable::instance();
+        $logId = Counter::instance()->incr($this->idCounterKey);
+        $table->set($logId, ['type' => 'error', 'log' => $log]);
         //推送到控制台
         Console::push(Color::red($log['message'] . ' @ ' . $log['file']));
         //通知机器人
@@ -124,15 +118,11 @@ class Log {
             'line' => !empty($backTrace[0]['line']) ? $backTrace[0]['line'] : '--',
         ];
         $log = ['message' => $msg, 'file' => $m['file'] . ':' . $m['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
-        if ($this->_config['enable_save_to_table']) {
-            //存到节点内存等待转存
-            $table = LogTable::instance();
-            $logId = Counter::instance()->incr($this->idCounterKey);
-            $table->set($logId, ['type' => 'info', 'log' => $log]);
-        } else {
-            //储存到master节点
-            MasterDB::addLog('info', $log);
-        }
+        //存到节点内存等待转存
+        $table = LogTable::instance();
+        $logId = Counter::instance()->incr($this->idCounterKey);
+        $table->set($logId, ['type' => 'info', 'log' => $log]);
+
         //推送到控制台
         Console::push(Color::notice(JsonHelper::toJson($msg)));
         //通知机器人
@@ -162,15 +152,11 @@ class Log {
             'host' => SERVER_HOST,
             'node_id' => SERVER_NODE_ID
         ];
-        if ($this->_config['enable_save_to_table']) {
-            //存到节点内存等待转存
-            $table = LogTable::instance();
-            $logId = Counter::instance()->incr($this->idCounterKey);
-            $table->set($logId, ['type' => 'slow', 'log' => $log]);
-        } else {
-            //储存到master节点
-            MasterDB::addLog('slow', $log);
-        }
+        //存到节点内存等待转存
+        $table = LogTable::instance();
+        $logId = Counter::instance()->incr($this->idCounterKey);
+        $table->set($logId, ['type' => 'slow', 'log' => $log]);
+
     }
 
     /**
@@ -178,38 +164,30 @@ class Log {
      * @return int
      */
     public function backup(): int {
-        if (!$this->tableCount() || !$this->_config['enable_save_to_table']) {
+        if (!$this->tableCount()) {
             return 0;
         }
         $start = Counter::instance()->get($this->backupCounterKey);
-        $logId = Counter::instance()->get($this->idCounterKey);
+        $maxLogId = Counter::instance()->get($this->idCounterKey);
         $table = LogTable::instance();
         $count = $table->count();
-        for ($id = $start + 1; $id <= $logId; $id++) {
+        $logId = $maxLogId;
+        for ($id = $start + 1; $id <= $maxLogId; $id++) {
             $row = $table->get($id);
             if ($row) {
                 if (MasterDB::addLog($row['type'], $row['log']) !== false) {
                     $table->delete($id);
+                    $logId = $id;
                 } else {
                     // 处理添加日志失败的情况
-                    Console::warning("Failed to add log with ID $id to MasterDB.");
+                    //Console::warning("Failed to add log with ID $id to MasterDB.");
+                    break;
                 }
             }
         }
         Counter::instance()->set($this->backupCounterKey, $logId);
         return $count;
     }
-
-    /**
-     * 开启共享内存储存
-     * @param bool $status
-     * @return $this
-     */
-    public function enableTable(bool $status = true): static {
-        $this->_config['enable_save_to_table'] = $status;
-        return $this;
-    }
-
 
     /**
      * 设置写入模块文件夹
@@ -226,9 +204,6 @@ class Log {
      * @return int
      */
     public function tableCount(): int {
-        if (!$this->_config['enable_save_to_table']) {
-            return 0;
-        }
         return LogTable::instance()->count();
     }
 

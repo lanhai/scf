@@ -1,14 +1,11 @@
 <?php
 $scfVersion = 'development';
-
 // 要检查的包名
 $packageName = 'lhai/scf';
 // 读取 composer.json 文件
 $composerJson = file_get_contents(SCF_ROOT . '/composer.json');
-
 // 解析 JSON 数据
 $composerData = json_decode($composerJson, true);
-
 if (json_last_error() == JSON_ERROR_NONE) {
     // 检查包是否存在于 require 或 require-dev 中
     $requires = $composerData['require'] ?? [];
@@ -25,7 +22,6 @@ if (json_last_error() == JSON_ERROR_NONE) {
         }
     }
 }
-
 define("SCF_VERSION", $scfVersion);
 const APP_MODULE_STYLE_MICRO = 1;
 const NETWORK_MODE_SINGLE = 'single';

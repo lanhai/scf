@@ -5,7 +5,6 @@ namespace Scf\Server;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
-use Scf\Core\Exception;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
@@ -24,7 +23,6 @@ use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
-use Symfony\Component\Yaml\Yaml;
 use Throwable;
 
 
@@ -299,7 +297,6 @@ class Http extends \Scf\Core\Server {
         $managerPid = $server->manager_pid;
         define("SERVER_MASTER_PID", $masterPid);
         define("SERVER_MANAGER_PID", $managerPid);
-        Log::instance()->enableTable();
         $scfVersion = SCF_VERSION;
         $role = SERVER_ROLE;
         $env = APP_RUN_ENV;
@@ -525,7 +522,7 @@ INFO;
     protected function backupLog(): void {
         $pid = Coroutine::create(function () {
             $logger = Log::instance();
-            Timer::tick(5000, function () use ($logger) {
+            Timer::tick(3000, function () use ($logger) {
                 $logger->backup();
             });
         });
