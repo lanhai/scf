@@ -11,11 +11,10 @@ class LogTable extends Table {
      * @var array
      */
     protected array $_config = [
-        'size' => 1024,
+        'size' => 512,
         'colums' => [
             'type' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 32],
-            'log' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 102400],
+            'log' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 512000],
         ]
     ];
-
 }
