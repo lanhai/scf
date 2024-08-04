@@ -1,2 +1,0 @@
-#!/bin/bash
-php ../boot server start -env=dev -app=event -static=on -role=master -port=1080
