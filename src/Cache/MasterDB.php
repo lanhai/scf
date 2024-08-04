@@ -19,7 +19,6 @@ class MasterDB {
     use ComponentTrait, Singleton;
 
     protected static Redis $redisConnection;
-    protected ?Redis $connectionPool = null;
     protected array $latestError = [
         'time' => 0,
         'msg' => null
@@ -40,11 +39,11 @@ class MasterDB {
             'port' => App::isReady() ? Config::get('app')['master_port'] ?? MDB_PORT : MDB_PORT,
             'auth' => '',
             'db_index' => 0,
-            'time_out' => 5,//连接超时时间
-            'size' => 4,
+            'time_out' => 10,//连接超时时间
+            'size' => 2,
         ]);
         if ($pool instanceof NullPool) {
-            if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 20) {
+            if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 30) {
                 Console::warning("【MasterDB】连接失败:" . $pool->getError());
                 $this->latestError['time'] = time();
             }
@@ -53,28 +52,6 @@ class MasterDB {
         }
         return $pool;
     }
-
-    /**
-     * @return void
-     */
-    protected function idleCheck(): void {
-        self::set("___connection_created___", date('Y-m-d H:i:s'));
-        Timer::tick(1000, function ($id) {
-            try {
-                $result = $this->connectionPool->get("___connection_created___");
-                if (!$result) {
-                    Console::warning("MasterDB连接池失效");
-                    $this->connectionPool = null;
-                    Timer::clear($id);
-                }
-            } catch (\Throwable $exception) {
-                Console::error("MasterDB连接池失效:" . $exception->getMessage());
-                $this->connectionPool = null;
-                Timer::clear($id);
-            }
-        });
-    }
-
 
     private static function getConnection(): Redis|NullMasterDb {
         return self::instance()->connection();

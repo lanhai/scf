@@ -3,7 +3,6 @@
 namespace Scf\Server\Runtime;
 
 use Scf\Core\Console;
-use Scf\Core\Log;
 use Scf\Helper\JsonHelper;
 use Scf\Util\Arr;
 
@@ -150,9 +149,7 @@ class Table {
      */
     public function set($rowKey, $datas): bool {
         if (!$this->exist($rowKey) && $this->count() > $this->size()) {
-            $logger = Log::instance();
-            $logger->enableTable(false);
-            $logger->error("内存表:" . get_called_class() . "已满,请检查配置");
+            Console::error("内存表:" . get_called_class() . "已满,请检查配置");
             return false;
         }
         if (isset($this->_config['colums']['_value']) && !isset($datas['_value'])) {
@@ -178,9 +175,7 @@ class Table {
      */
     public function incr(string $key, string $colum = '_value', int $incrby = 1): int {
         if (!$this->exist($key) && $this->count() > $this->size()) {
-            $logger = Log::instance();
-            $logger->enableTable(false);
-            $logger->error("内存表:" . get_called_class() . "已满,请检查配置");
+            Console::error("内存表:" . get_called_class() . "已满,请检查配置");
             return 0;
         }
         return $this->table->incr($key, $colum, $incrby);
