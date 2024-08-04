@@ -217,12 +217,13 @@ class Redis extends Cache {
      */
     public function decrementBy($key, $value, int $timeout = 0): int|bool {
         try {
-            if ($timeout == -1) {
-                $timeout = 0;
-            } elseif ($timeout == 0) {
+            if ($timeout == 0) {
                 $timeout = $this->_config['ttl'];
             }
             if (!$newValue = $this->connection->decrBy($this->setPrefix($key), $value)) {
+                if ($timeout == -1) {
+                    return $this->connection->set($this->setPrefix($key), 0);
+                }
                 return $this->connection->set($this->setPrefix($key), 0, $timeout);
             }
             return $newValue;
@@ -245,6 +246,9 @@ class Redis extends Cache {
                 $timeout = $this->_config['ttl'];
             }
             if (!$newValue = $this->connection->incrBy($this->setPrefix($key), $value)) {
+                if ($timeout == -1) {
+                    return $this->connection->set($this->setPrefix($key), 0);
+                }
                 return $this->connection->set($this->setPrefix($key), $value, $timeout);
             }
             return $newValue;
