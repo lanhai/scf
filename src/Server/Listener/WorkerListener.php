@@ -5,6 +5,7 @@ namespace Scf\Server\Listener;
 use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Server\Http;
@@ -47,6 +48,12 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
             App::updateDatabase();
+            $serverConfig = Config::server();
+            //升级/创建统计数据表
+            $enableStatistics = $serverConfig['enable_db_statistics'] ?? false;
+            if ($enableStatistics && App::isMaster()) {
+                StatisticModel::instance()->updateDB();
+            }
             //启动任务管理器
 //            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
 //            $serverConifg = Config::server();

@@ -1,0 +1,48 @@
+dao: Scf/Database/Statistics/Dao/StatisticsArchiveDAO
+db: statistics
+table: statistics_archive
+version: '20240807182509'
+create: "CREATE TABLE `statistics_archive` (`id` int NOT NULL AUTO_INCREMENT,`search_key` varchar(32),`type` tinyint(1) DEFAULT '0' COMMENT '数据类型 1:count 2:sum',`date_type` tinyint(1) DEFAULT '0' COMMENT '时间类型 1:minute 2:hour 3:day 4:month',`db` varchar(255),`where` varchar(255),`date` varchar(255),`value` double(10,2) DEFAULT '0.00',`day` int DEFAULT '0',`hour` tinyint DEFAULT '0',`key` varchar(32),`updated` int DEFAULT '0' COMMENT '创建时间',PRIMARY KEY (`id`), UNIQUE INDEX `key`(`search_key` ASC) USING BTREE)"
+columns:
+    id:
+        content: '`id` int NOT NULL AUTO_INCREMENT'
+        hash: b3ba00e355cbb0ab647b8d3f4e94636a
+    search_key:
+        content: '`search_key` varchar(32) AFTER `id`'
+        hash: e0afe9e9d67b7362523ead79ed4c4276
+    type:
+        content: "`type` tinyint(1) DEFAULT '0' COMMENT '数据类型 1:count 2:sum' AFTER `search_key`"
+        hash: 5470f124157a588d704d1d28388b1ea6
+    date_type:
+        content: "`date_type` tinyint(1) DEFAULT '0' COMMENT '时间类型 1:minute 2:hour 3:day 4:month' AFTER `type`"
+        hash: b315ebba10a92544955408e36580cc5f
+    db:
+        content: '`db` varchar(255) AFTER `date_type`'
+        hash: 521cd2ed807c64e857eaa29a3dcc5c0f
+    where:
+        content: '`where` varchar(255) AFTER `db`'
+        hash: 3b1329e6f5ba8e6a4487d842c547aa8c
+    date:
+        content: '`date` varchar(255) AFTER `where`'
+        hash: e6bd8d4a27e376033927eb0438144a66
+    value:
+        content: "`value` double(10,2) DEFAULT '0.00' AFTER `date`"
+        hash: 91838170187ce98b21f953313fc8b757
+    day:
+        content: "`day` int DEFAULT '0' AFTER `value`"
+        hash: fca264c48961006a768a1e1cf8520e47
+    hour:
+        content: "`hour` tinyint DEFAULT '0' AFTER `day`"
+        hash: de4ae0e324b6db9ad228fb5f3adbd775
+    key:
+        content: '`key` varchar(32) AFTER `hour`'
+        hash: afad01157d7b1f1d0fb2a1c87f67e174
+    updated:
+        content: "`updated` int DEFAULT '0' COMMENT '创建时间' AFTER `key`"
+        hash: f47d2f811e860c82586a9cac479c9285
+primary:
+    - '`id`'
+index:
+    key:
+        content: 'UNIQUE INDEX `key`(`search_key` ASC) USING BTREE'
+        hash: 3841cd4cb92afc4104cd4d15c2101540

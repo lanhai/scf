@@ -1,0 +1,48 @@
+dao: Scf/Database/Statistics/Dao/StatisticsTotalDAO
+db: statistics
+table: statistics_total
+version: '20240807182550'
+create: "CREATE TABLE `statistics_total` (`id` int NOT NULL AUTO_INCREMENT,`mch_id` int COMMENT '商户ID',`scene` varchar(50) COMMENT '模块',`data_id` varchar(32) COMMENT '模块数据ID',`uv` int COMMENT '独立用户访问数',`pv` int COMMENT '页面访问次数',`value` double(10,2) DEFAULT '0.00' COMMENT '相关数值',`updated` int COMMENT '最近一次更新时间',PRIMARY KEY (`id`), UNIQUE INDEX `id`(`id` ASC) USING BTREE, INDEX `index_item_id`(`data_id` ASC) USING BTREE, INDEX `index_mch_id`(`mch_id` ASC) USING BTREE, INDEX `index_module`(`scene` ASC) USING BTREE, INDEX `index_updated`(`updated` ASC) USING BTREE)"
+columns:
+    id:
+        content: '`id` int NOT NULL AUTO_INCREMENT'
+        hash: b3ba00e355cbb0ab647b8d3f4e94636a
+    mch_id:
+        content: "`mch_id` int COMMENT '商户ID' AFTER `id`"
+        hash: 0ec17fffcabe4bb59062d666ccf8b523
+    scene:
+        content: "`scene` varchar(50) COMMENT '模块' AFTER `mch_id`"
+        hash: a25132164b42e1d441fa903f39d7e46d
+    data_id:
+        content: "`data_id` varchar(32) COMMENT '模块数据ID' AFTER `scene`"
+        hash: ba5df52dd432c66338b0aa12f4abdf77
+    uv:
+        content: "`uv` int COMMENT '独立用户访问数' AFTER `data_id`"
+        hash: 2ac15ee2016821a1847fe80c50880433
+    pv:
+        content: "`pv` int COMMENT '页面访问次数' AFTER `uv`"
+        hash: df3a74c6aff5639b4e2c98456a3099da
+    value:
+        content: "`value` double(10,2) DEFAULT '0.00' COMMENT '相关数值' AFTER `pv`"
+        hash: d19aeabdf95ad940a82b0d801b7b73eb
+    updated:
+        content: "`updated` int COMMENT '最近一次更新时间' AFTER `value`"
+        hash: a0f35acc60faf1a6d416c84f1f273a17
+primary:
+    - '`id`'
+index:
+    id:
+        content: 'UNIQUE INDEX `id`(`id` ASC) USING BTREE'
+        hash: 8f8a959359f1a8028baecdd95e0c3cdb
+    index_item_id:
+        content: 'INDEX `index_item_id`(`data_id` ASC) USING BTREE'
+        hash: 71b3eeb75298cf4f72c69e5c10076b83
+    index_mch_id:
+        content: 'INDEX `index_mch_id`(`mch_id` ASC) USING BTREE'
+        hash: 5c4ac265acb73a0a96160adcf3f2a81a
+    index_module:
+        content: 'INDEX `index_module`(`scene` ASC) USING BTREE'
+        hash: 4eef87e28b294cb92f780ffbd219a6a0
+    index_updated:
+        content: 'INDEX `index_updated`(`updated` ASC) USING BTREE'
+        hash: 972c70aabebbb337e943949d409c18fe

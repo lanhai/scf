@@ -525,7 +525,7 @@ class Dao extends Struct {
         $key = $latest['db'] . '_' . $latest['table'];
         $versionFile = APP_PATH . '/db/updates/' . $key . '.yml';
         $current = file_exists($versionFile) ? Yaml::parseFile($versionFile) : null;
-        if (!$current) {
+        if (!$current || !$this->tableExist()) {
             if (!$this->createTable($latest['create'])) {
                 Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::red('创建失败'));
             } else {

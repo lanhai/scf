@@ -68,7 +68,7 @@ class ArCreater {
         //拼接完整表名
         $tablePrefix = $this->db()->getConfig('prefix');
         $completeTable = $tablePrefix . $input;
-        //验证表明
+        //验证表名
         $dbName = $this->db()->getConfig('name');
         Console::line();
         try {

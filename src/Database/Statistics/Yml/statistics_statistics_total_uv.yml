@@ -1,0 +1,33 @@
+dao: Scf/Database/Statistics/Dao/StatisticsTotalUvDAO
+db: statistics
+table: statistics_total_uv
+version: '20240807182612'
+create: "CREATE TABLE `statistics_total_uv` (`id` int NOT NULL AUTO_INCREMENT,`mch_id` int COMMENT '商户ID',`scene` varchar(50) COMMENT '模块',`data_id` varchar(32) COMMENT '模块数据ID',`user_key` varchar(32) COMMENT '用户标识',`created` int COMMENT '创建时间',PRIMARY KEY (`id`), UNIQUE INDEX `id`(`id` ASC) USING BTREE, UNIQUE INDEX `key`(`user_key` ASC) USING BTREE)"
+columns:
+    id:
+        content: '`id` int NOT NULL AUTO_INCREMENT'
+        hash: b3ba00e355cbb0ab647b8d3f4e94636a
+    mch_id:
+        content: "`mch_id` int COMMENT '商户ID' AFTER `id`"
+        hash: 0ec17fffcabe4bb59062d666ccf8b523
+    scene:
+        content: "`scene` varchar(50) COMMENT '模块' AFTER `mch_id`"
+        hash: a25132164b42e1d441fa903f39d7e46d
+    data_id:
+        content: "`data_id` varchar(32) COMMENT '模块数据ID' AFTER `scene`"
+        hash: ba5df52dd432c66338b0aa12f4abdf77
+    user_key:
+        content: "`user_key` varchar(32) COMMENT '用户标识' AFTER `data_id`"
+        hash: 0e15499dfa78aa9dd396fd918d3184b0
+    created:
+        content: "`created` int COMMENT '创建时间' AFTER `user_key`"
+        hash: d8eeacc7ef155a878b06f1de57c6d5bf
+primary:
+    - '`id`'
+index:
+    id:
+        content: 'UNIQUE INDEX `id`(`id` ASC) USING BTREE'
+        hash: 8f8a959359f1a8028baecdd95e0c3cdb
+    key:
+        content: 'UNIQUE INDEX `key`(`user_key` ASC) USING BTREE'
+        hash: a725c865353521452ff6126234f3ef0b
