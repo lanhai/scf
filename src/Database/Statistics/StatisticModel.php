@@ -628,8 +628,8 @@ class StatisticModel {
                             $m['total'] += $computeResult;
                             continue;
                         }
-                        $scenes[$k]['series'][] = $sum ? $result[$i]['sum'] : $result[$i]['count'];
-                        $scenes[$k]['total'] += $sum ? $result[$i]['sum'] : $result[$i]['count'];
+                        $scenes[$k]['series'][] = $sum ? $result[$i]['sum'] ?? 0 : $result[$i]['count'] ?? 0;
+                        $scenes[$k]['total'] += $sum ? $result[$i]['sum'] ?? 0 : $result[$i]['count'] ?? 0;
                     }
                 }
                 break;
@@ -764,8 +764,8 @@ class StatisticModel {
                             $m['total'] += $computeResult;
                             continue;
                         }
-                        $m['series'][] = $sum ? $result[$i]['sum'] : $result[$i]['count'];
-                        $m['total'] += $sum ? $result[$i]['sum'] : $result[$i]['count'];
+                        $m['series'][] = $sum ? $result[$i]['sum'] ?? 0 : $result[$i]['count'] ?? 0;
+                        $m['total'] += $sum ? $result[$i]['sum'] ?? 0 : $result[$i]['count'] ?? 0;
                     }
                 }
                 break;
@@ -936,9 +936,9 @@ class StatisticModel {
                             }
                             continue;
                         }
-                        $m['day_series'][] = $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
-                        $m['total'] += $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
-                        $item['result'] = $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
+                        $m['day_series'][] = $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
+                        $m['total'] += $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
+                        $item['result'] = $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
                         $j++;
                         if ($cycle == 'week') {
                             $weeks[intval(ceil(($dn + 1) / 7)) - 1]['result'] += $item['result'];
@@ -956,14 +956,14 @@ class StatisticModel {
                         }
                     }
                     if ($cycle == 'week') {
-                        foreach ($weeks as $wk => $week) {
+                        foreach ($weeks as $week) {
                             if (!in_array($week['name'], $axis)) {
                                 $axis[] = $week['name'];
                             }
                             $m['series'][] = $week['result'];
                         }
                     } elseif ($cycle == 'month') {
-                        foreach ($months as $mk => $month) {
+                        foreach ($months as $month) {
                             if (!in_array($month['name'], $axis)) {
                                 $axis[] = $month['name'];
                             }
@@ -1138,9 +1138,9 @@ class StatisticModel {
                             }
                             continue;
                         }
-                        $m['day_series'][] = $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
-                        $m['total'] += $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
-                        $item['result'] = $sum ? $result[$dn]['sum'] : $result[$dn]['count'];
+                        $m['day_series'][] = $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
+                        $m['total'] += $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
+                        $item['result'] = $sum ? $result[$dn]['sum'] ?? 0 : $result[$dn]['count'] ?? 0;
                         $j++;
                         if ($cycle == 'week') {
                             $weeks[intval(ceil(($dn + 1) / 7)) - 1]['result'] += $item['result'];
@@ -1158,14 +1158,14 @@ class StatisticModel {
                         }
                     }
                     if ($cycle == 'week') {
-                        foreach ($weeks as $wk => $week) {
+                        foreach ($weeks as $week) {
                             if (!in_array($week['name'], $axis)) {
                                 $axis[] = $week['name'];
                             }
                             $m['series'][] = $week['result'];
                         }
                     } elseif ($cycle == 'month') {
-                        foreach ($months as $mk => $month) {
+                        foreach ($months as $month) {
                             if (!in_array($month['name'], $axis)) {
                                 $axis[] = $month['name'];
                             }
