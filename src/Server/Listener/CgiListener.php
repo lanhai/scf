@@ -159,7 +159,7 @@ class CgiListener extends Listener {
     }
 
     protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/@console.message@/',)) {
+        if (str_starts_with($request->server['path_info'], '/@console.message@/')) {
             $data = Request::instance()->post()->pack();
             $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
             if ($subscribers) {

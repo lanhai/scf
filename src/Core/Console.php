@@ -68,6 +68,10 @@ class Console {
         return true;
     }
 
+    public static function clearAllSubscribe(): bool {
+        return Runtime::instance()->delete(self::$subscribersTableKey);
+    }
+
     /**
      * 判断是否存在日志监听
      * @return bool

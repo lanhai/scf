@@ -19,6 +19,7 @@ use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Date;
 use Scf\Util\Dir;
+use Scf\Util\File;
 use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
@@ -108,35 +109,47 @@ class Http extends \Scf\Core\Server {
     }
 
     /**
-     * 启动mater节点子进程,跟随manager的重启而重新加载文件重启,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
+     * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
      * @param $config
-     * @return Process
      */
-    public static function startMasterProcess($config): Process {
+//    public static function startMasterProcess($config) {
+//        $process = new Process(function () use ($config) {
+//            $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
+//            $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+//            Counter::instance()->incr('_background_process_id_');
+//            define('IS_CRONTAB_PROCESS', true);
+//            while (true) {
+//                if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
+//                    Runtime::instance()->set('_background_process_status_', STATUS_ON);
+//                    Crontab::startProcess();
+//                    if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
+//                        $runQueueInMaster and RQueue::startProcess();
+//                    }
+//                }
+//                usleep(1000 * 1000 * 30);
+//            }
+//        });
+//        $pid = $process->start();
+//        Console::success('Background Process PID:' . Color::info($pid));
+//    }
+    protected function addCrontabProcess($config): void {
         $process = new Process(function () use ($config) {
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
             Counter::instance()->incr('_background_process_id_');
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
-                // $latestProcessId = Counter::instance()->get('_background_process_id_') ?: Counter::instance()->incr('_background_process_id_');
-//                if ($processId != $latestProcessId) {
-//                    $processId = $latestProcessId;
                 if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
                     Runtime::instance()->set('_background_process_status_', STATUS_ON);
                     Crontab::startProcess();
-                    if (App::isMaster()) {
+                    if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
                         $runQueueInMaster and RQueue::startProcess();
-                    } else {
-                        $runQueueInSlave and RQueue::startProcess();
                     }
                 }
                 usleep(1000 * 1000 * 30);
             }
         });
-        $pid = $process->start();
-        Console::success('Background Process PID:' . Color::info($pid));
-        return $process;
+        $this->server->addProcess($process);
     }
 
     /**
@@ -144,8 +157,9 @@ class Http extends \Scf\Core\Server {
      * @return void
      */
     public function start(): void {
+        //一键协程化
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
-        //初始化内存表格,放在最前面保证所有进程间能共享
+        //初始化内存表,放在最前面保证所有进程间能共享
         Table::register([
             'Scf\Server\Table\PdoPoolTable',
             'Scf\Server\Table\LogTable',
@@ -154,33 +168,36 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\RouteTable',
         ]);
         $this->bindPort = $this->bindPort ?: 9580;
-        //启动控制面板服务器
+        //启动master节点管理面板服务器
         Dashboard::start($this->bindPort + 2);
         //等待APP安装完成
         App::await();
+        //加载服务器配置
         $serverConfig = Config::server();
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
+        //检查是否存在异常进程
+        $pid = 0;
+        Coroutine::create(function () use (&$pid) {
+            $pid = File::read(SERVER_MANAGER_PID_FILE);
+        });
+        \Swoole\Event::wait();
+        if ($pid) {
+            if (Process::kill($pid, 0)) {
+                Console::log(Color::yellow("Server Manager PID:{$pid} killed"));
+                Process::kill($pid, SIGKILL);
+                unlink(SERVER_MANAGER_PID_FILE);
+            }
+        }
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动后台任务管理进程
-        self::startMasterProcess($serverConfig);
-        //检查是否存在异常进程
-//        $pid = 0;
-//        Coroutine::create(function () use (&$pid) {
-//            $pid = File::read(SERVER_MASTER_PID_FILE);
-//        });
-//        Event::wait();
-//        if ($pid) {
-//            if (Process::kill($pid, 0)) {
-//                Console::log(Color::yellow("Server PID:{$pid} killed"));
-//                Process::kill($pid, SIGKILL);
-//                unlink(SERVER_MASTER_PID_FILE);
-//            }
-//        }
+        //self::startMasterProcess($serverConfig);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
+        //添加一个后台任务管理进程
+        $this->addCrontabProcess($serverConfig);
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 60,
@@ -227,7 +244,7 @@ class Http extends \Scf\Core\Server {
             Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
             exit(1);
         }
-        //监听RPC
+        //监听RPC服务(tcp)请求
         try {
             /** @var Server $rpcPort */
             $rpcPort = $this->server->listen($this->bindHost, ($this->bindPort + 5), SWOOLE_SOCK_TCP);
@@ -248,23 +265,25 @@ class Http extends \Scf\Core\Server {
             'TaskListener'
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
+            //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
+            //后台定时任务进程ID迭代
             Counter::instance()->incr('_background_process_id_');
-            //即将重启
+            //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {
                 foreach ($clients as $fd) {
                     if ($server->isEstablished($fd)) {
                         $server->disconnect($fd);
-                        Console::unsubscribe($fd);
                     }
                 }
+                Console::clearAllSubscribe();
             }
         });
         $this->server->on("AfterReload", function () {
-            Runtime::instance()->set('restart_times', $this->restartTimes);
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
+            //重置执行中的请求数统计
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
             //Counter::instance()->incr('_background_process_id_');
             //Runtime::instance()->set('_background_process_status_', STATUS_OFF);
@@ -274,7 +293,6 @@ class Http extends \Scf\Core\Server {
             $this->onStart($server, $serverConfig);
         });
         try {
-
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -297,6 +315,7 @@ class Http extends \Scf\Core\Server {
         $managerPid = $server->manager_pid;
         define("SERVER_MASTER_PID", $masterPid);
         define("SERVER_MANAGER_PID", $managerPid);
+        File::write(SERVER_MANAGER_PID_FILE, $managerPid);
         $scfVersion = SCF_VERSION;
         $role = SERVER_ROLE;
         $env = APP_RUN_ENV;
@@ -310,14 +329,14 @@ class Http extends \Scf\Core\Server {
         $fingerprint = APP_FINGERPRINT;
         $info = <<<INFO
 ---------Server启动完成---------
-内网地址：{$host}
+主机地址：{$host}
 运行系统：{$os}
 节点名称：{$alias}
 运行环境：{$env}
 运行模式：{$mode}
 节点角色：{$role}
 监听地址：{$this->bindHost}:{$port}
-管理进程：{$masterPid}
+管理进程：{$managerPid}
 文件加载：{$files}
 SW版本号：{$version}
 框架版本：{$scfVersion}
@@ -325,16 +344,10 @@ SW版本号：{$version}
 Worker：{$serverConfig['worker_num']}
 Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid
-Manager:$managerPid
 --------------------------------
 INFO;
         Console::write(Color::info($info));
         $this->enable();
-//        if (\Scf\Core\App::isMaster()) {
-//            Coroutine\go(function () {
-//                Coroutine\System::exec("php " . SCF_ROOT . "/boot server cmd -app=" . APP_DIR_NAME . " -env=" . APP_RUN_ENV . " -role=master");
-//            });
-//        }
         //延迟一秒执行避免和 WorkerStart 事件后的节点报到事件抢redis锁
         Coroutine::sleep(1);
         $this->report();
@@ -536,12 +549,16 @@ INFO;
      */
     protected function watchFileChange(): void {
         $pid = Coroutine::create(function () {
-            if (APP_RUN_MODE == 'src') {
-                $appFiles = Dir::scan(APP_PATH . '/src');
-            } else {
-                $appFiles = [];
-            }
-            $files = [...$appFiles, ...Dir::scan(Root::dir())];
+            $scanDirectories = function () {
+                if (APP_RUN_MODE == 'src') {
+                    $appFiles = Dir::scan(APP_PATH . '/src');
+                } else {
+                    $appFiles = [];
+                }
+                return [...$appFiles, ...Dir::scan(Root::dir())];
+            };
+
+            $files = $scanDirectories();
             $fileList = [];
             foreach ($files as $path) {
                 $fileList[] = [
@@ -549,9 +566,27 @@ INFO;
                     'md5' => md5_file($path)
                 ];
             }
+
             while (true) {
                 $changed = false;
                 $changedFiles = [];
+
+                // Rescan directories to find new files
+                $currentFiles = $scanDirectories();
+                $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
+
+                // Check for new files
+                foreach ($currentFilePaths as $path) {
+                    if (!in_array($path, array_column($fileList, 'path'))) {
+                        $fileList[] = [
+                            'path' => $path,
+                            'md5' => md5_file($path)
+                        ];
+                        $changed = true;
+                        $changedFiles[] = $path;
+                    }
+                }
+
                 foreach ($fileList as $key => &$file) {
                     if (!file_exists($file['path'])) {
                         $changed = true;
@@ -566,14 +601,15 @@ INFO;
                         $changedFiles[] = $file['path'];
                     }
                 }
+
                 if ($changed) {
-                    Console::write('---------以下文件发生变动,即将重启---------');
+                    Console::warning('---------以下文件发生变动,即将重启---------');
                     foreach ($changedFiles as $f) {
                         Console::write($f);
                     }
-                    Console::write('-------------------------------------------');
+                    Console::warning('-------------------------------------------');
                     $this->server->reload();
-                    //Console::info("重启状态:" . $this->server->reload());
+                    // Console::info("重启状态:" . $this->server->reload());
                     if (App::isMaster()) {
                         $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($this->bindPort + 2) . '/reload';
                         $client = \Scf\Client\Http::create($dashboardHost);
@@ -602,7 +638,7 @@ INFO;
         $node->socketPort = $this->bindPort + 1;
         $node->role = App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
-        $node->restart_times = $this->restartTimes;
+        $node->restart_times = 0;
         $node->master_pid = SERVER_MASTER_PID;
         $node->manager_pid = SERVER_MANAGER_PID;
         $node->swoole_version = swoole_version();
@@ -652,13 +688,6 @@ INFO;
         } catch (Throwable) {
             return false;
         }
-    }
-
-    /**
-     * @return int
-     */
-    public function getReloadTimes(): int {
-        return Runtime::instance()->get('restart_times');
     }
 
 

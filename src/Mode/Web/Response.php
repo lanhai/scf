@@ -239,12 +239,16 @@ EOT;
     }
 
     public function write($content): void {
-        $this->response->write($content);
+        if ($this->response->isWritable()) {
+            $this->response->write($content);
+        }
     }
 
     public function end($content): void {
-        $this->saveSlowLog();
-        $this->response->end($content);
+        if ($this->response->isWritable()) {
+            $this->saveSlowLog();
+            $this->response->end($content);
+        }
     }
 
 
