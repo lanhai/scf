@@ -68,7 +68,7 @@ class Manager extends Component {
         $node->public_version = App::publicVersion() ?: '--';
         $node->heart_beat = time();
         $node->tables = Table::list();
-        $node->restart_times = Runtime::instance()->get('restart_times') ?: 0;
+        $node->restart_times = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?: 0;
         $node->stack_useage = memory_get_usage(true);
         $node->threads = count(Coroutine::list());
         $node->thread_status = Coroutine::stats();

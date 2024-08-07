@@ -62,7 +62,7 @@ class Crontab {
                 self::instance()->start();
                 Event::wait();
             } else {
-                //没有启动也运行一个计时器
+                //没有定时任务也启动一个计时器
                 $managerId = Counter::instance()->get('_background_process_id_');
                 Timer::tick(5000, function () use ($managerId) {
                     //服务器已重启,终止现有计时器

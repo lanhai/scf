@@ -64,6 +64,7 @@ class Core {
         !defined('MDB_PORT') and define('MDB_PORT', $options['mport'] ?? 16379);
         !defined('SERVER_NODE_ID') and define('SERVER_NODE_ID', strtolower(SERVER_ROLE) . '-' . $app->node_id);
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');
+        !defined('SERVER_MANAGER_PID_FILE') and define('SERVER_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_manager.pid');
         !defined('SERVER_MASTER_DB_PID_FILE') and define('SERVER_MASTER_DB_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_master_db.pid');
         !defined('SERVER_RPC_PID_FILE') and define('SERVER_RPC_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_rpc.pid');
         !defined('SERVER_DASHBOARD_PID_FILE') and define('SERVER_DASHBOARD_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_dashboard.pid');
