@@ -15,6 +15,7 @@ use Scf\Util\Date;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Barrier;
 use Swoole\Exception;
+use Throwable;
 
 class StatisticsComponent extends Component {
     protected string $dbName;
@@ -106,9 +107,6 @@ class StatisticsComponent extends Component {
             $timelines = ArrayHelper::removeDuplicatesByKey($timelines, 'key');
             $barrier = Barrier::make();
             foreach ($timelines as $index => $timeline) {
-                if (!Redis::instance()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
-                    continue;
-                }
                 $where = clone $this->where();
                 Coroutine::create(function () use ($barrier, $dateNow, $primaryKey, $timeline, $index, $where, &$list) {
                     $result = [
@@ -126,7 +124,7 @@ class StatisticsComponent extends Component {
                             $count = Pdo::slave($this->dbName)->getDatabase()->table($this->tableName)->select($primaryKey)->where($build['sql'], ...$build['match'])->count();
                             $result['count'] = $count;
                             //保存历史数据
-                            if ($timeline['date'] != $dateNow) {
+                            if ($timeline['date'] != $dateNow && Redis::pool()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
                                 $cacheData = [
                                     'search_key' => $timeline['key'],
                                     'type' => 1,
@@ -143,7 +141,7 @@ class StatisticsComponent extends Component {
                                 $cache = StatisticsArchiveDAO::factory($cacheData);
                                 $cache->save();
                             }
-                        } catch (\Throwable $exception) {
+                        } catch (Throwable $exception) {
                             $result['count'] = 0;
                             Log::instance()->error('统计出错:' . $exception->getMessage());
                         }
@@ -187,7 +185,7 @@ class StatisticsComponent extends Component {
                 $count = $cache->value;
             }
             return Result::success(intval($count));
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             return Result::error('统计出错:' . $exception->getMessage());
         }
 
@@ -250,9 +248,6 @@ class StatisticsComponent extends Component {
         if ($timelines) {
             $barrier = Barrier::make();
             foreach ($timelines as $index => $timeline) {
-                if (!Redis::instance()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
-                    continue;
-                }
                 $where = clone $this->where();
                 Coroutine::create(function () use ($barrier, $thisTime, $key, $timeline, &$list, $index, $where) {
                     $result = [
@@ -270,7 +265,7 @@ class StatisticsComponent extends Component {
                             $sum = Pdo::slave($this->dbName)->getDatabase()->table($this->tableName)->select()->where($build['sql'], ...$build['match'])->sum($key);
                             $result['sum'] = $sum;
                             //保存历史数据
-                            if ($timeline['date'] != $thisTime) {
+                            if ($timeline['date'] != $thisTime && Redis::pool()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
                                 $cacheData = [
                                     'search_key' => $timeline['key'],
                                     'type' => 2,
@@ -287,7 +282,7 @@ class StatisticsComponent extends Component {
                                 $cache = StatisticsArchiveDAO::factory($cacheData);
                                 $cache->save();
                             }
-                        } catch (\Throwable $exception) {
+                        } catch (Throwable $exception) {
                             $result['sum'] = 0;
                             Log::instance()->error('统计出错:' . $exception->getMessage());
                             //return Result::error('统计出错:' . $exception->getMessage());
@@ -332,7 +327,7 @@ class StatisticsComponent extends Component {
                 $sum = $cache->value;
             }
             return Result::success($sum);
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             return Result::error('统计出错:' . $exception->getMessage());
         }
     }

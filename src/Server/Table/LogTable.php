@@ -11,7 +11,7 @@ class LogTable extends Table {
      * @var array
      */
     protected array $_config = [
-        'size' => 512,
+        'size' => 1024,
         'colums' => [
             'type' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 32],
             'log' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 512000],

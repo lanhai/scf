@@ -5,7 +5,6 @@ namespace Scf\Server;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
-use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
