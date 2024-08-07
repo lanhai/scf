@@ -304,15 +304,16 @@ class Dao extends Struct {
      * 获取列表
      * @param bool $format
      * @param int $total
+     * @param string|null $countField
      * @return array
      */
     #[ArrayShape(['list' => "array", 'pages' => "int", 'pn' => "int", 'total' => "int", 'primarys' => "array"])]
-    public function list(bool $format = true, int $total = 0): array {
+    public function list(bool $format = true, int $total = 0, ?string $countField = null): array {
         $select = self::select($this->_primaryKey)->where($this->_where);
         if ($this->_group) {
             $select->group($this->_group);
         }
-        $total = $total ?: $select->count();
+        $total = $total ?: $select->count($countField);
         $total = is_array($total) ? count($total) : $total;
         $totalPage = $total ? ceil($total / $this->_pageSize) : 0;
         $page = min($this->_pn, $totalPage) ?: 1;
