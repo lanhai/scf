@@ -285,6 +285,25 @@ class Redis extends Cache {
     }
 
     /**
+     * 实现分布式锁或确保某些操作只执行一次
+     * @param $key
+     * @param int $expire
+     * @return bool
+     */
+    public function lock($key, int $expire = 5): bool {
+        try {
+            if ($this->connection->get($key) || $this->connection->setNX($key, time()) === false) {
+                return false;
+            }
+            $this->connection->expire($key, $expire);
+            return true;
+        } catch (RedisException $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    /**
      * 锁写入
      * @param $key
      * @param mixed $value
