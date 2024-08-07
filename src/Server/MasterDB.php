@@ -313,9 +313,14 @@ class MasterDB {
                     $start = 0;
                 }
                 clearstatcache();
-                // 使用 sed 命令读取指定行数的内容
                 $logs = [];
-                $command = sprintf('sed -n %d,%dp %s', $start + 1, $start + $size - 1, escapeshellarg($fileName));
+                // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
+                $command = sprintf(
+                    'tac %s | sed -n %d,%dp',
+                    escapeshellarg($fileName),
+                    $start + 1,
+                    $start + $size
+                );
                 $result = System::exec($command);
                 if ($result === false) {
                     return $server->send($fd, Server::format(Server::NIL));
@@ -328,6 +333,7 @@ class MasterDB {
                 }
                 return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
             });
+
 //            $server->setHandler('getLog', function ($fd, $data) use ($server) {
 //                $day = $data[1];
 //                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
