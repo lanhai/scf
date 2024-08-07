@@ -49,8 +49,8 @@ class PdoLogger implements ILogger {
         PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql}【{$time}】ms");
         if (!is_null($exception) && !str_starts_with($executeSql, 'DESCRIBE')) {
             $backTrace = $exception->getTrace();
-            $file = $backTrace[2]['file'] ?? null;
-            $line = $backTrace[2]['line'] ?? null;
+            $file = $backTrace[count($backTrace) - 2]['file'] ?? null;
+            $line = $backTrace[count($backTrace) - 2]['line'] ?? null;
             $executeSql !== 'select 1' and Log::instance()->error($exception->getMessage() . ';SQL:' . $executeSql, file: $file, line: $line);
             //throw new AppError($exception->getMessage());
         }

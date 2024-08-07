@@ -65,8 +65,8 @@ class Log {
         $backTraceList = [];
         foreach ($backTrace as $item) {
             $backTraceList[] = [
-                'file' => $item['file'] ?? '--',
-                'line' => $item['line'] ?? '--',
+                'file' => $item['file'] ?? $item['class'],
+                'line' => $item['line'] ?? $item['function'],
                 'class' => $item['class'] ?? '--',
                 'function' => $item['function'] ?? '--',
                 'type' => $item['type'] ?? '--',
@@ -119,7 +119,6 @@ class Log {
         } catch (\Exception $exception) {
             Console::warning("机器人推送错误日志失败:" . $exception->getMessage());
         }
-
     }
 
 
