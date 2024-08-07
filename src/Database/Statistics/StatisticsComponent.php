@@ -2,6 +2,7 @@
 
 namespace Scf\Database\Statistics;
 
+use Scf\Cache\Redis;
 use Scf\Core\Coroutine\Component;
 use Scf\Core\Log;
 use Scf\Core\Result;
@@ -105,6 +106,9 @@ class StatisticsComponent extends Component {
             $timelines = ArrayHelper::removeDuplicatesByKey($timelines, 'key');
             $barrier = Barrier::make();
             foreach ($timelines as $index => $timeline) {
+                if (!Redis::instance()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
+                    continue;
+                }
                 $where = clone $this->where();
                 Coroutine::create(function () use ($barrier, $dateNow, $primaryKey, $timeline, $index, $where, &$list) {
                     $result = [
@@ -246,6 +250,9 @@ class StatisticsComponent extends Component {
         if ($timelines) {
             $barrier = Barrier::make();
             foreach ($timelines as $index => $timeline) {
+                if (!Redis::instance()->lock('_STATISTICS_LOCK_' . $timeline['key'], 10)) {
+                    continue;
+                }
                 $where = clone $this->where();
                 Coroutine::create(function () use ($barrier, $thisTime, $key, $timeline, &$list, $index, $where) {
                     $result = [
