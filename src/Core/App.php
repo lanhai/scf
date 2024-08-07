@@ -446,7 +446,6 @@ class App {
 
     /**
      * 拼接控制器路径
-     *
      * @param string ...$segments
      * @return string
      */

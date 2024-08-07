@@ -5,6 +5,7 @@ namespace Scf\Server;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
@@ -178,18 +179,18 @@ class Http extends \Scf\Core\Server {
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
         //检查是否存在异常进程
-        $pid = 0;
-        Coroutine::create(function () use (&$pid) {
-            $pid = File::read(SERVER_MANAGER_PID_FILE);
-        });
-        \Swoole\Event::wait();
-        if ($pid) {
-            if (Process::kill($pid, 0)) {
-                Console::log(Color::yellow("Server Manager PID:{$pid} killed"));
-                Process::kill($pid, SIGKILL);
-                unlink(SERVER_MANAGER_PID_FILE);
-            }
-        }
+//        $serverPid = 0;
+//        Coroutine::create(function () use (&$serverPid) {
+//            $serverPid = File::read(SERVER_MASTER_PID_FILE);
+//        });
+//        \Swoole\Event::wait();
+//        if ($serverPid) {
+//            if (Process::kill($serverPid, 0)) {
+//                Console::log(Color::yellow("Server Manager PID:{$serverPid} killed"));
+//                Process::kill($serverPid, SIGKILL);
+//                unlink(SERVER_MASTER_PID_FILE);
+//            }
+//        }
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
         //启动后台任务管理进程

@@ -7,6 +7,28 @@ use Exception;
 
 class ArrayHelper {
     /**
+     * 去除重复的数据
+     * @param $list
+     * @param $key
+     * @return array
+     */
+    public static function removeDuplicatesByKey($list, $key): array {
+        $seen = [];
+        $result = [];
+        foreach ($list as $item) {
+            if (!isset($item[$key])) {
+                // 如果键不存在，跳过这个项目
+                continue;
+            }
+            if (!in_array($item[$key], $seen)) {
+                $result[] = $item;
+                $seen[] = $item[$key];
+            }
+        }
+        return $result;
+    }
+
+    /**
      * 将数字类一维数组转换为整型数组
      * @param $array
      * @return array|mixed
