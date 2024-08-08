@@ -40,7 +40,7 @@ abstract class AbstractServiceModule {
         }
     }
 
-    abstract public function moduleName(): string;
+//    abstract public function moduleName(): string;
 
     protected function request(): Request {
         return $this->request;

@@ -3,12 +3,10 @@
 namespace Scf\Command\DefaultCommand;
 
 use ErrorException;
-use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Cache\Redis;
 use Scf\Mode\Cli\App;
-use Scf\Mode\Web\Lifetime;
 use Scf\Rpc\Updater;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
@@ -17,10 +15,8 @@ use Scf\Command\Handler\NodeManager;
 use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Server\Core;
-use Scf\Server\Event;
 use Scf\Util\Auth;
 use Scf\Util\File;
-use Swoole\Coroutine;
 use Swoole\ExitException;
 use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
