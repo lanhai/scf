@@ -7,6 +7,9 @@ use Scf\Core\Console;
 use Scf\Mode\Rpc\Document;
 use Scf\Command\Color;
 use Swoole\Event;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Output\ConsoleOutput;
+use Throwable;
 
 class Updater {
 
@@ -22,12 +25,13 @@ class Updater {
             Console::error("未查询到RPC客户端服务配置");
             exit();
         }
-        Console::write('----------------------------------------------------------------------------------------------------');
-        Console::write('序号  命名空间                    服务器                远程服务        appid    远程版本     本地版本');
-        Console::write('----------------------------------------------------------------------------------------------------');
+        $output = new ConsoleOutput();
+        $table = new Table($output);
         $i = 1;
         $list = [];
-        foreach ($services as $name => $service) {
+        $renderData = [];
+        //Console::startLoading("正在查询远程服务版本", function ($tid) use ($services, $servers, &$renderData, &$list, &$i) {
+        foreach ($services as $name => &$service) {
             $server = $servers[$service['server']];
             $remoteVersion = null;
             //查询远程版本
@@ -45,20 +49,36 @@ class Updater {
                 try {
                     $local = Document::instance()->local($name);
                     $versionLocal = $local['version'];
-                } catch (\Throwable $exception) {
+                } catch (Throwable $exception) {
                     $versionLocal = $exception->getMessage();
                 }
             } else {
                 $versionLocal = "未安装";
             }
-            Console::write("#{$i}    " . $name . "         {$service['server']}    {$service['service']}        {$service['appid']}    【" . $remoteVersion . "】      【" . ($remoteVersion == $versionLocal ? Color::green($versionLocal) : Color::red($versionLocal)) . "】");
-            $i++;
+            //Console::endLoading($tid);
+            $renderData[] = [
+                $i,
+                $name,
+                $service['server'],
+                $service['service'],
+                $service['appid'],
+                $remoteVersion,
+                $remoteVersion == $versionLocal ? Color::green($versionLocal) : Color::red($versionLocal)
+            ];
             $service['namespace'] = $name;
+            $i++;
             $list[] = [
                 'service' => $service,
                 'server' => $server
             ];
         }
+        //});
+
+        $table
+            ->setHeaders([Color::notice('序号'), Color::notice('命名空间'), Color::notice('服务器'), Color::notice('远程服务'), Color::notice('appid'), Color::notice('远程版本'), Color::notice('本地版本')])
+            ->setRows($renderData);
+        $table->render();
+
         Console::write('----------------------------------------------------------------------------------------------------');
         $choice = Console::input("请输入要更新的服务序号:", false);
         if (!$choice || !is_numeric($choice)) {
@@ -100,10 +120,10 @@ class Updater {
         $paths = explode("\\", $service['service']['namespace']);
         $appMode = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($appMode == APP_MODULE_STYLE_LARGE) {
-            $fileDir = APP_LIB_PATH. '/' . $paths[1] . '/' . $paths[2];
+            $fileDir = APP_LIB_PATH . '/' . $paths[1] . '/' . $paths[2];
             $clientFile = $fileDir . '/' . $paths[3] . '.php';
         } else {
-            $fileDir = APP_LIB_PATH. '/' . '/' . $paths[1];
+            $fileDir = APP_LIB_PATH . '/' . '/' . $paths[1];
             $clientFile = $fileDir . '/' . $paths[2] . '.php';
         }
         if (!is_dir($fileDir) && !mkdir($fileDir, 0775, true)) {

@@ -106,7 +106,8 @@ class Client {
             $ret = $response->__toString();
         });
         $client->exec();
-        $result = JsonHelper::recover($ret);
+
+        $result = $ret ? JsonHelper::recover($ret) : [];
         $code = $result['status'] ?? 500;
         $msg = $result['msg'] ?? '服务端系统错误,请确实服务端是否启动';
         if ((int)$code === 0) {
@@ -118,7 +119,7 @@ class Client {
         //App::isDevEnv() and Log::instance()->error('[' . $serviceName . ']服务请求错误:' . $msg);
         return match ((int)$code) {
             403 => Result::error('[' . $serviceName . ']无权访问,请检查签名', $code, $msg),
-            500 => Result::error('[' . $serviceName . ']系统繁忙,请稍后重试', $code, $msg),
+            500 => Result::error('[' . $serviceName . ']请求失败,请稍后重试', $code, $msg),
             1001 => Result::error('[' . $serviceName . ']获取不到服务端可用节点', $code, $msg),
             1002 => Result::error('[' . $serviceName . ']连接服务端节点超时', $code, $msg),
             1003 => Result::error('[' . $serviceName . ']服务端响应超时', $code, $msg),

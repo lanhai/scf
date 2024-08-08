@@ -36,7 +36,7 @@ class App extends \Scf\Core\App {
         foreach (self::$_modules[MODE_RPC] as $conf) {
             $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
             if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                $cls = self::buildControllerPath('Service', 'service');
+                $cls = self::buildControllerPath('Rpc', 'service');
             } else {
                 $cls = self::buildControllerPath($conf['name'], 'service');
             }
@@ -52,7 +52,7 @@ class App extends \Scf\Core\App {
                 }
                 $serviceManager->addService($service);
                 if ($workerId == 0) {
-                    Console::info("RPC服务【{$service->serviceName()}】" . Color::success('注册成功'));
+                    Console::log("【RPC】服务" . Color::notice($service->serviceName()) . Color::success('注册成功'));
 //                    //注册服务
 //                    $nodeId = md5(SERVER_HOST . $port);
 //                    $serviceNode = new ServiceNode();
@@ -74,11 +74,8 @@ class App extends \Scf\Core\App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            $serviceDir = self::buildPath(self::src(), 'lib', 'Controller', $service);
+            $serviceDir = self::buildPath(self::src(), 'lib', 'Rpc');
             is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
-            $serviceDir = self::buildPath(self::src(), 'lib', 'Service');
-            is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
-
         } else {
             $entryScripts = Dir::scan(self::buildPath(self::src(), 'lib', $service, 'Service'), 1);
         }
@@ -92,7 +89,7 @@ class App extends \Scf\Core\App {
                 }
                 $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
                 if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                    $cls = self::buildControllerPath('Service', $name);
+                    $cls = self::buildControllerPath('Rpc', $name);
                 } else {
                     $cls = self::buildControllerPath($service, 'Service', $name);
                 }

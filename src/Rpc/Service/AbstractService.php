@@ -27,7 +27,9 @@ abstract class AbstractService {
 
 
     public function addModule(AbstractServiceModule $module): AbstractService {
-        $this->modules[$module->moduleName()] = $module;
+        $classMap = explode("\\", get_class($module));
+        $moduleName = array_pop($classMap);
+        $this->modules[$moduleName] = $module;
         return $this;
     }
 
