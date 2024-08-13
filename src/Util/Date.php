@@ -35,7 +35,7 @@ class Date {
     public static string $timezone;
 
     /**
-     * 返回人性化时间
+     * 人性化时间
      * @param $dateTimeStamp
      * @return string
      */
@@ -48,12 +48,11 @@ class Date {
         $targetTime = (new DateTime())->setTimestamp(intval($dateTimeStamp));
         $targetTimeStartOfDay = (clone $targetTime)->setTime(0, 0);
         $nowStartOfDay = (clone $now)->setTime(0, 0);
-
         if ($targetTime > $now) {
-            $interval = $now->diff($targetTime);
-            return $interval->format('%a 天 %h 小时 %i 分钟') . '后';
+            return '刚刚';
+            //$interval = $now->diff($targetTime);
+            //return $interval->format('%a 天 %h 小时 %i 分钟') . '后';
         }
-
         $diffInMinutes = $now->getTimestamp() - $targetTime->getTimestamp();
         $diffInMinutes = floor($diffInMinutes / 60);
         $diffInHours = floor($diffInMinutes / 60);
