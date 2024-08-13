@@ -227,6 +227,13 @@ class Http {
         return $this->client->headers;
     }
 
+    public function requestHeaders() {
+        return $this->client->requestHeaders;
+    }
+
+    public function getHeaders(): mixed {
+        return $this->client->headers;
+    }
 
     /**
      * 设置header
@@ -264,9 +271,6 @@ class Http {
         return $this->client->body;
     }
 
-    public function getHeaders(): mixed {
-        return $this->client->headers;
-    }
 
     /**
      * @return Result

@@ -105,18 +105,16 @@ class Client {
         $ctx->setOnFail(function (Response $response) use (&$ret) {
             $ret = $response->__toString();
         });
-        $client->exec();
-
+        $client->exec(60);
         $result = $ret ? JsonHelper::recover($ret) : [];
         $code = $result['status'] ?? 500;
-        $msg = $result['msg'] ?? '服务端系统错误,请确实服务端是否启动';
+        $msg = $result['msg'] ?? '请求服务端失败';
         if ((int)$code === 0) {
             if (isset($result['result']['errCode']) && isset($result['result']['message']) && isset($result['result']['data'])) {
                 return Result::factory($result['result']);
             }
             return Result::success($result['result'] ?? "");
         }
-        //App::isDevEnv() and Log::instance()->error('[' . $serviceName . ']服务请求错误:' . $msg);
         return match ((int)$code) {
             403 => Result::error('[' . $serviceName . ']无权访问,请检查签名', $code, $msg),
             500 => Result::error('[' . $serviceName . ']请求失败,请稍后重试', $code, $msg),
