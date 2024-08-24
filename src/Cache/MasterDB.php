@@ -146,7 +146,7 @@ class MasterDB {
      * @return bool|array
      */
     public static function lRange($k, $start, $end): bool|array {
-        $result = self::getConnection()->command('listRange', $k, $start, $end);
+        $result = self::getConnection()->command('lRange', $k, $start, $end);
         $list = [];
         if ($result) {
             $result = JsonHelper::recover($result);

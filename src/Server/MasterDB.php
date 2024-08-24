@@ -83,7 +83,7 @@ class MasterDB {
             return;
         }
         try {
-            ini_set('memory_limit', -1);
+            ini_set('memory_limit', '128M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
@@ -114,7 +114,7 @@ class MasterDB {
                 array_unshift($this->data[$key], $data[1]);
                 return $server->send($fd, Server::format(Server::STATUS, "OK"));
             });
-            $server->setHandler('listRange', function ($fd, $data) use ($server) {
+            $server->setHandler('lRange', function ($fd, $data) use ($server) {
                 $key = $data[0];
                 if (empty($this->data[$key])) {
                     return $server->send($fd, Server::format(Server::NIL));
@@ -223,6 +223,21 @@ class MasterDB {
                 $arr = $this->data[$key] ?? [];
                 return $server->send($fd, Server::format(Server::NIL, isset($arr[$member])));
             });
+            $server->setHandler('sAdd', function ($fd, $data) use ($server) {
+                if (count($data) < 2) {
+                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'sAdd' command"));
+                }
+                $key = $data[0];
+                $count = 0;
+                for ($i = 1; $i < count($data); $i++) {
+                    $value = $data[$i];
+                    if (!isset($this->data[$key][$value])) {
+                        $this->data[$key][$value] = 1;
+                        $count++;
+                    }
+                }
+                return $server->send($fd, Server::format(Server::INT, $count));
+            });
             $server->setHandler('sRemove', function ($fd, $data) use ($server) {
                 if (count($data) < 2) {
                     return $server->send($fd, Server::format(Server::ERROR, "sRemove 至少需要2个参数"));
@@ -257,11 +272,9 @@ class MasterDB {
                 }
                 return $server->send($fd, Server::format(Server::SET, array_keys($this->data[$key])));
             });
-            //incr
             $server->setHandler('incr', function ($fd, $data) use ($server) {
                 return $server->send($fd, Server::format(Server::STATUS, "OK"));
             });
-            //decrement
             $server->setHandler('decrement', function ($fd, $data) use ($server) {
                 return $server->send($fd, Server::format(Server::STATUS, "OK"));
             });
@@ -333,7 +346,6 @@ class MasterDB {
                 }
                 return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
             });
-
 //            $server->setHandler('getLog', function ($fd, $data) use ($server) {
 //                $day = $data[1];
 //                $dir = APP_LOG_PATH . '/' . $data[0] . '/';
@@ -377,25 +389,7 @@ class MasterDB {
 //                }
 //                return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
 //            });
-            $server->setHandler('sAdd', function ($fd, $data) use ($server) {
-                if (count($data) < 2) {
-                    return $server->send($fd, Server::format(Server::ERROR, "ERR wrong number of arguments for 'sAdd' command"));
-                }
-                $key = $data[0];
-                if (!isset($this->data[$key])) {
-                    $array[$key] = array();
-                }
-                $count = 0;
-                for ($i = 1; $i < count($data); $i++) {
-                    $value = $data[$i];
-                    if (!isset($this->data[$key][$value])) {
-                        $this->data[$key][$value] = 1;
-                        $count++;
-                    }
-                }
 
-                return $server->send($fd, Server::format(Server::INT, $count));
-            });
 //            $server->on('Connect', function ($server, int $fd) {
 //                Console::log("【MasterDB】#" . $fd . " Connectted");
 //            });

@@ -87,11 +87,9 @@ class Server implements CommandInterface {
             Console::log('MasterDB PID:' . Color::green($masterDbPid));
         });
         Event::wait();
-        Http::startMasterProcess();
-
     }
 
-    protected function bgs() {
+    protected function bgs(): void {
         Http::bgs();
     }
 

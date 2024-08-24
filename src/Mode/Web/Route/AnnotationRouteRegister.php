@@ -8,6 +8,7 @@ use Scf\Core\Component;
 use Scf\Core\Console;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Controller;
+use Scf\Mode\Native\Controller as NativeController;
 use Scf\Server\Table\RouteTable;
 use Scf\Util\Dir;
 use Throwable;
@@ -86,7 +87,7 @@ class AnnotationRouteRegister extends Component {
             $namespace = App::buildControllerPath(...$maps);
             $reader = AnnotationReader::instance();
             try {
-                if (!is_subclass_of($namespace, Controller::class)) {
+                if (!is_subclass_of($namespace, Controller::class) && !is_subclass_of($namespace, NativeController::class)) {
                     continue;
                 }
                 $cls = new ReflectionClass($namespace);

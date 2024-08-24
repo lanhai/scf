@@ -28,7 +28,7 @@ class App extends \Scf\Core\App {
 
     public function ready($cmdNum = 0): float|int|string {
         $options = [];
-        foreach ($this->_apps as $k => $app) {
+        foreach ($this->_apps as $app) {
             $options[] = ($app['name'] ?? $app);
         }
         if (!$cmdNum) {
