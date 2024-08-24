@@ -398,9 +398,9 @@ class MasterDB {
 //            $server->on('WorkerStart', function (Server $server) {
 //
 //            });
-            $server->on('WorkerStart', function ($server) {
-                $server->tick(5000, function () use ($server) {
-                    file_put_contents(APP_RUNTIME_DB, serialize($server->data));
+            $server->on('WorkerStart', function (Server $server) {
+                Timer::tick(5000, function () use ($server) {
+                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
                 });
             });
 //            $server->on('start', function (Server $server) {
