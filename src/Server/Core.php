@@ -78,7 +78,6 @@ class Core {
         !defined('PRINT_REDIS_LOG') and define('PRINT_REDIS_LOG', Manager::instance()->issetOpt('print_redis_logs'));
         !defined('APP_DIR_NAME') and define('APP_DIR_NAME', $path);
         !defined('APP_PATH') and define('APP_PATH', SCF_APPS_ROOT . '/' . $path);
-
         !defined('APP_PUBLIC_PATH') and define('APP_PUBLIC_PATH', APP_PATH . '/' . $app->public_path);
         !defined('APP_AUTH_KEY') and define('APP_AUTH_KEY', $app->app_auth_key);
         //APP DB

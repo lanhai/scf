@@ -130,7 +130,7 @@ class Updater {
                 $this->clearPublic();
                 $stream = File::read($publicFilePath);
                 $zipFile->openFromString($stream)->setReadPassword($app->app_auth_key)->extractTo(APP_PUBLIC_PATH);
-                Log::instance()->info("资源包解压成功");
+                //Log::instance()->info("资源包解压成功");
             } catch (ZipException $e) {
                 Log::instance()->error("资源包解压失败:" . Color::red($e->getMessage()));
                 return false;
@@ -178,7 +178,7 @@ class Updater {
                 Log::instance()->error('升级失败:更新写入失败');
                 return false;
             }
-            Log::instance()->info("源码包更新成功");
+            //Log::instance()->info("源码包更新成功");
             //更新本地配置文件
             $app = App::installer();
             $app->version = $version;
@@ -194,7 +194,7 @@ class Updater {
             'remark' => $versionInfo['remark']
         ];
         File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
-        //Log::instance()->info("已更新至版本:" . $version);
+        Log::instance()->info("已更新至版本:" . $version);
         clearstatcache();
         return true;
     }
