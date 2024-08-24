@@ -17,6 +17,7 @@ use Scf\Command\Manager;
 use Scf\Server\Core;
 use Scf\Util\Auth;
 use Scf\Util\File;
+use Swoole\Event;
 use Swoole\ExitException;
 use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
@@ -92,9 +93,9 @@ class Toolbox implements CommandInterface {
 //                Console::line();
                 $app->ready(Manager::instance()->getArg(1) ?: 0);
             } catch (ExitException) {
-                \Swoole\Event::exit();
+                Event::exit();
             }
-            \Swoole\Event::exit();
+            Event::exit();
         });
     }
 
@@ -122,9 +123,9 @@ class Toolbox implements CommandInterface {
                 $arCreater = new ArCreater();
                 $arCreater->run();
             } catch (ExitException) {
-                \Swoole\Event::exit();
+                Event::exit();
             }
-            \Swoole\Event::exit();
+            Event::exit();
 //            Coroutine::defer(function () {
 //                echo "Coroutine End\n";
 //            });

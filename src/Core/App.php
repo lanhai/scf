@@ -29,7 +29,8 @@ class App {
     protected static array $_modules = [
         MODE_CGI => [],
         MODE_RPC => [],
-        MODE_CLI => []
+        MODE_CLI => [],
+        MODE_NATIVE => []
     ];
     protected static ?string $appid = null;
     protected static string $path;

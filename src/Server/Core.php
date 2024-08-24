@@ -2,13 +2,9 @@
 
 namespace Scf\Server;
 
-use FilesystemIterator;
-use RecursiveDirectoryIterator;
-use RecursiveIteratorIterator;
 use Scf\Core\App;
 use Scf\Command\Manager;
 use Scf\Core\Console;
-use Scf\Helper\ArrayHelper;
 use Scf\Util\File;
 use Scf\Util\Random;
 use Scf\Util\Sn;
@@ -60,7 +56,7 @@ class Core {
         !defined('SERVER_ROLE') and define('SERVER_ROLE', $role);
         !defined('SERVER_MODE') and define('SERVER_MODE', $mode);
         !defined('SERVER_ALIAS') and define('SERVER_ALIAS', $options['alias'] ?? $app->app_path);
-        !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? 9580);
+        !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? ($mode == MODE_NATIVE ? 9501 : 9580));
         !defined('MDB_PORT') and define('MDB_PORT', $options['mport'] ?? 16379);
         !defined('SERVER_NODE_ID') and define('SERVER_NODE_ID', strtolower(SERVER_ROLE) . '-' . $app->node_id);
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');
@@ -98,32 +94,31 @@ class Core {
         !defined('APP_BIN_DIR') and define('APP_BIN_DIR', APP_PATH . '/bin');
         //是否启用自动更新
         !defined('APP_AUTO_UPDATE') and define('APP_AUTO_UPDATE', $options['update'] ?? 0);
-
-        if (!file_exists(APP_TMP_PATH)) {
+        if (!file_exists(APP_TMP_PATH) && $mode != MODE_NATIVE) {
             mkdir(APP_TMP_PATH, 0775, true);
             mkdir(APP_TMP_PATH . '/template', 0775, true);
         }
-        if (!file_exists(dirname(SCF_ROOT) . '/var')) {
+        if (!file_exists(dirname(SCF_ROOT) . '/var') && $mode != MODE_NATIVE) {
             mkdir(dirname(SCF_ROOT) . '/var', 0775, true);
         }
-        if (!file_exists(APP_LOG_PATH)) {
+        if (!file_exists(APP_LOG_PATH) && $mode != MODE_NATIVE) {
             mkdir(APP_LOG_PATH, 0775, true);
         }
-        if (!file_exists(APP_PATH . '/db/updates')) {
+        if (!file_exists(APP_PATH . '/db/updates') && $mode != MODE_NATIVE) {
             mkdir(APP_PATH . '/db/updates', 0775, true);
         }
-        if (!file_exists(APP_UPDATE_DIR)) {
+        if (!file_exists(APP_UPDATE_DIR) && $mode != MODE_NATIVE) {
             mkdir(APP_UPDATE_DIR, 0775, true);
         }
-        if (!file_exists(APP_PUBLIC_PATH)) {
+        if (!file_exists(APP_PUBLIC_PATH) && $mode != MODE_NATIVE) {
             mkdir(APP_PUBLIC_PATH, 0775, true);
         }
-        if (!file_exists(APP_BIN_DIR)) {
+        if (!file_exists(APP_BIN_DIR) && $mode != MODE_NATIVE) {
             mkdir(APP_BIN_DIR, 0775, true);
         }
         //应用硬件指纹
         !defined('SERVER_APP_FINGERPRINT_FILE') and define('SERVER_APP_FINGERPRINT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.fingerprint');
-        if (!file_exists(SERVER_APP_FINGERPRINT_FILE)) {
+        if (!file_exists(SERVER_APP_FINGERPRINT_FILE) && $mode != MODE_NATIVE) {
             $fingerprint = Random::makeUUIDV4();
             File::write(SERVER_APP_FINGERPRINT_FILE, $fingerprint);
         } else {
@@ -132,7 +127,7 @@ class Core {
         !defined('APP_FINGERPRINT') and define('APP_FINGERPRINT', $fingerprint);
         // 清理缓存目录
         App::clearTemplateCache();
-        if ($mode != MODE_CGI) {
+        if ($mode != MODE_CGI && $mode != MODE_NATIVE) {
             App::mount($mode);
         }
     }

@@ -9,13 +9,16 @@ use Scf\Command\DefaultCommand\Bot;
 use Scf\Command\DefaultCommand\Build;
 use Scf\Command\DefaultCommand\Install;
 use Scf\Command\DefaultCommand\Server;
+use Scf\Command\DefaultCommand\Native;
 use Scf\Command\DefaultCommand\Toolbox;
 use Scf\Command\DefaultCommand\Run;
+
 class Runner {
     use Singleton;
 
     public function __construct() {
         Manager::instance()->addCommand(new Server());
+        Manager::instance()->addCommand(new Native());
         Manager::instance()->addCommand(new Install());
         Manager::instance()->addCommand(new Build());
         Manager::instance()->addCommand(new Toolbox());

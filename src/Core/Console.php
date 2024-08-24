@@ -282,7 +282,7 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if (defined('SERVER_MODE') && SERVER_MODE !== MODE_CLI && $push && Coroutine::getCid() !== -1) {
+        if (defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
             Coroutine::create(function () use ($str) {
                 $port = defined('SERVER_PORT') ? SERVER_PORT : 9580;
                 $client = Http::create('http://localhost:' . $port . '/@console.message@/');
@@ -297,7 +297,11 @@ class Console {
                 });
             });
         }
-        $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
+        if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
+            $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
+        } else {
+            $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
+        }
         fwrite(STDOUT, $str);
         flush();
     }
