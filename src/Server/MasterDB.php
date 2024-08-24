@@ -83,7 +83,7 @@ class MasterDB {
             return;
         }
         try {
-            ini_set('memory_limit', '128M');
+            ini_set('memory_limit', '256M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
@@ -389,7 +389,6 @@ class MasterDB {
 //                }
 //                return $server->send($fd, Server::format(Server::STRING, JsonHelper::toJson($logs)));
 //            });
-
 //            $server->on('Connect', function ($server, int $fd) {
 //                Console::log("【MasterDB】#" . $fd . " Connectted");
 //            });
@@ -399,11 +398,16 @@ class MasterDB {
 //            $server->on('WorkerStart', function (Server $server) {
 //
 //            });
-            $server->on('start', function (Server $server) {
-                Timer::tick(5000, function () use ($server) {
-                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
+            $server->on('WorkerStart', function ($server) {
+                $server->tick(5000, function () use ($server) {
+                    file_put_contents(APP_RUNTIME_DB, serialize($server->data));
                 });
             });
+//            $server->on('start', function (Server $server) {
+//                Timer::tick(5000, function () use ($server) {
+//                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
+//                });
+//            });
             $server->start();
         } catch (\Throwable $exception) {
             Console::log('【MasterDB】服务启动失败:' . Color::red($exception->getMessage()));

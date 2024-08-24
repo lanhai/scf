@@ -461,7 +461,6 @@ INFO;
                     $client = \Scf\Client\Http::create($dashboardHost);
                     $client->get();
                 }
-                Log::instance()->info('已更新至版本:' . $version['remote']['app']['version']);
                 $this->enable();
             } else {
                 Console::log(Color::yellow($countdown) . '秒后重启服务器');
