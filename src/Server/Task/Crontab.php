@@ -408,7 +408,7 @@ class Crontab {
     protected function timing(int $id): void {
         $times = $this->attributes['override']['times'] ?? $this->attributes['times'];
         $nextRun = $this->getNextRunTime($times);
-        $this->log('【' . $this->attributes['name'] . '】下次运行时间(' . Date::secondsHumanize($nextRun['after']) . '后):' . $nextRun['date']);
+        $this->log('下次运行时间(' . Date::secondsHumanize($nextRun['after']) . '后):' . $nextRun['date']);
         $this->processingFinish(time() + $nextRun['after']);
         $timerId = Timer::after($nextRun['after'] * 1000, function () use ($id) {
             if ($this->isAlive($id)) {

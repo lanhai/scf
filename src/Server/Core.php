@@ -92,7 +92,7 @@ class Core {
         !defined('APP_UPDATE_DIR') and define('APP_UPDATE_DIR', APP_PATH . '/update');
         !defined('APP_BIN_DIR') and define('APP_BIN_DIR', APP_PATH . '/bin');
         //是否启用自动更新
-        !defined('APP_AUTO_UPDATE') and define('APP_AUTO_UPDATE', $options['update'] ?? 0);
+        !defined('APP_AUTO_UPDATE') and define('APP_AUTO_UPDATE', $options['update'] ?? STATUS_OFF);
         if (!file_exists(APP_TMP_PATH) && $mode != MODE_NATIVE) {
             mkdir(APP_TMP_PATH, 0775, true);
             mkdir(APP_TMP_PATH . '/template', 0775, true);
