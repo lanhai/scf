@@ -12,12 +12,12 @@ use Scf\Mode\Web\App;
 use Scf\Command\Color;
 use Scf\Command\Manager;
 use Scf\Util\File;
-use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Process;
 use Swoole\Redis\Server;
 use Swoole\Timer;
+use Throwable;
 
 class MasterDB {
     use Singleton;
@@ -46,7 +46,7 @@ class MasterDB {
         $process = new Process(function () use ($port) {
             try {
                 MasterDB::instance()->create(Manager::instance()->issetOpt('d'), $port);
-            } catch (\Throwable $exception) {
+            } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
         });
@@ -63,15 +63,6 @@ class MasterDB {
         }
     }
 
-    protected function countFileLines($file): int {
-        $line = 0; //初始化行数
-        if (file_exists($file)) {
-            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
-            $arr = explode(' ', $output);
-            $line = (int)$arr[0];
-        }
-        return $line;
-    }
 
     /**
      * @param bool $daemonize
@@ -79,9 +70,6 @@ class MasterDB {
      * @return void
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
-        if (!App::isMaster()) {
-            return;
-        }
         try {
             ini_set('memory_limit', '256M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
@@ -409,10 +397,25 @@ class MasterDB {
 //                });
 //            });
             $server->start();
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             Console::log('【MasterDB】服务启动失败:' . Color::red($exception->getMessage()));
             exit();
         }
+    }
+
+    /**
+     * 统计日志文件行数
+     * @param $file
+     * @return int
+     */
+    protected function countFileLines($file): int {
+        $line = 0; //初始化行数
+        if (file_exists($file)) {
+            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
+            $arr = explode(' ', $output);
+            $line = (int)$arr[0];
+        }
+        return $line;
     }
 
     /**
@@ -458,6 +461,7 @@ class MasterDB {
         }
         return $this->_loggers[$name] ?: null;
     }
+
 
     /**
      * 创建日志记录器
