@@ -13,7 +13,6 @@ use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Util\Arr;
 use Scf\Util\Time;
-use Swoole\Timer;
 
 class MasterDB {
     use ComponentTrait, Singleton;
@@ -40,7 +39,7 @@ class MasterDB {
             'auth' => '',
             'db_index' => 0,
             'time_out' => 10,//连接超时时间
-            'size' => 2,
+            'size' => 1,
         ]);
         if ($pool instanceof NullPool) {
             if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 30) {

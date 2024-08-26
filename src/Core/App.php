@@ -206,8 +206,6 @@ class App {
                     File::write($currVersionFile, Yaml::dump([
                         'version' => $latest['version']
                     ]));
-                } else {
-                    Console::log("【Database】权限节点数据已是最新版本:" . Color::success($latest['version']));
                 }
             }
         }
