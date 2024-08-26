@@ -2,6 +2,7 @@
 
 namespace Scf\Server;
 
+use Exception;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -346,14 +347,17 @@ Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid
 --------------------------------
 INFO;
-        Console::write(Color::info($info));
+        Console::info($info);
         $this->enable();
         //延迟一秒执行避免和 WorkerStart 事件后的节点报到事件抢redis锁
         Coroutine::sleep(1);
         $this->report();
         $this->backupLog();
-        (Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch') and $this->watchFileChange();
-        APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
+        if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
+            $this->watchFileChange();
+        }
+        //自动更新
+        //APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
     }
 
     /**
@@ -666,7 +670,7 @@ INFO;
                 Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
                 $manager->heartbeat($this->server, $node);
             });
-        } catch (\Exception $exception) {
+        } catch (Exception $exception) {
             $this->log('节点报道失败:' . Color::red($exception->getMessage()));
         }
     }
@@ -696,7 +700,7 @@ INFO;
      */
     protected function enable(): void {
         $this->serviceEnable = true;
-        Runtime::instance()->set('_SERVER_STATUS_', 1);
+        Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
 
     }
 
@@ -706,7 +710,7 @@ INFO;
      */
     protected function disable(): void {
         $this->serviceEnable = false;
-        Runtime::instance()->set('_SERVER_STATUS_', 0);
+        Runtime::instance()->set('_SERVER_STATUS_', STATUS_OFF);
     }
 
     /**
@@ -715,7 +719,7 @@ INFO;
      */
     public function isEnable(): bool {
         $status = Runtime::instance()->get('_SERVER_STATUS_');
-        $this->serviceEnable = $status == 1;
+        $this->serviceEnable = $status == STATUS_ON;
         return $this->serviceEnable;
     }
 
