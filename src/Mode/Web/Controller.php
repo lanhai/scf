@@ -50,6 +50,7 @@ abstract class Controller {
     protected function display($theme = 'default'): void {
         //TODO 根据应用规模(module_style)变更模板路径目录
         $tplPath = App::src() . '/template/' . (StringHelper::camel2lower($this->request()->getModuleName())) . '/' . $theme . '/' . (StringHelper::camel2lower($this->request()->getControllerName())) . '/';
+
         $tplFile = StringHelper::camel2lower($this->request()->getActionName()) . '.html';
         if (!file_exists($tplPath . $tplFile) && $theme == 'default') {
             //尝试查找非主题目录

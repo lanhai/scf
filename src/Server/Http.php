@@ -142,9 +142,10 @@ class Http extends \Scf\Core\Server {
             while (true) {
                 if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
                     Runtime::instance()->set('_background_process_status_', STATUS_ON);
-                    Crontab::startProcess();
+                    $pid = Crontab::startProcess();
+                    Console::info('【Server】定时任务PID:' . $pid);
                     if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-                        $runQueueInMaster and RQueue::startProcess();
+                        RQueue::startProcess();
                     }
                 }
                 usleep(1000 * 1000 * 30);
@@ -193,8 +194,6 @@ class Http extends \Scf\Core\Server {
 //        }
         //启动masterDB(redis)服务器
         MasterDB::start(MDB_PORT);
-        //启动后台任务管理进程
-        //self::startMasterProcess($serverConfig);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         //添加一个后台任务管理进程
@@ -269,7 +268,7 @@ class Http extends \Scf\Core\Server {
             //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
-            //后台定时任务进程ID迭代
+            //后台定时任务ID迭代
             Counter::instance()->incr('_background_process_id_');
             //断开所有客户端连接
             $clients = $this->server->getClientList();
@@ -286,14 +285,20 @@ class Http extends \Scf\Core\Server {
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
             //重置执行中的请求数统计
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
-            //Counter::instance()->incr('_background_process_id_');
-            //Runtime::instance()->set('_background_process_status_', STATUS_OFF);
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             $this->onStart($server, $serverConfig);
         });
         try {
+            //日志备份进程
+            $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
+            //心跳进程
+            $this->addHeartbeatProcess();
+            //启动文件监听进程
+            if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
+                $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
+            }
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -307,11 +312,6 @@ class Http extends \Scf\Core\Server {
      * @return void
      */
     protected function onStart(Server $server, $serverConfig): void {
-        if (!App::isReady()) {
-            Console::info("等待安装配置文件就绪...");
-            $this->waittingInstall();
-        }
-        App::mount();
         $masterPid = $server->master_pid;
         $managerPid = $server->manager_pid;
         define("SERVER_MASTER_PID", $masterPid);
@@ -330,58 +330,57 @@ class Http extends \Scf\Core\Server {
         $fingerprint = APP_FINGERPRINT;
         $info = <<<INFO
 ---------Server启动完成---------
+监听地址：{$this->bindHost}:{$port}
 主机地址：{$host}
+应用指纹：{$fingerprint}
 运行系统：{$os}
 节点名称：{$alias}
-运行环境：{$env}
-运行模式：{$mode}
 节点角色：{$role}
-监听地址：{$this->bindHost}:{$port}
+应用环境：{$env}
+运行模式：{$mode}
 管理进程：{$managerPid}
 文件加载：{$files}
 SW版本号：{$version}
 框架版本：{$scfVersion}
-应用指纹：{$fingerprint}
 Worker：{$serverConfig['worker_num']}
 Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid
 --------------------------------
 INFO;
-        Console::info($info);
+        Console::write(Color::info($info));
         $this->enable();
-        //延迟一秒执行避免和 WorkerStart 事件后的节点报到事件抢redis锁
-        Coroutine::sleep(1);
-        $this->report();
-        $this->backupLog();
-        if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
-            $this->watchFileChange();
-        }
         //自动更新
-        //APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
+        APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
     }
 
     /**
-     * 等待安装
+     * 创建心跳进程
      * @return void
      */
-    protected function waittingInstall(): void {
-        while (true) {
-            $app = App::installer();
-            if ($app->readyToInstall()) {
-                $updater = Updater::instance();
-                $version = $updater->getVersion();
-                $this->disable();
-                Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
-                if ($updater->updateApp()) {
-                    App::mount();
-                    $this->reload();
-                    break;
-                } else {
-                    Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
-                }
-            }
-            usleep(5000 * 1000);
-        }
+    protected function addHeartbeatProcess(): void {
+        //心跳进程
+        $node = Node::factory();
+        $node->id = $this->id;
+        $node->name = $this->name;
+        $node->ip = $this->ip;
+        $node->fingerprint = APP_FINGERPRINT;
+        $node->port = $this->bindPort;
+        $node->socketPort = $this->bindPort + 1;
+        $node->role = \Scf\Core\App::isMaster() ? 'master' : 'slave';
+        $node->started = $this->started;
+        $node->restart_times = 0;
+        $node->master_pid = $this->server->master_pid;
+        $node->manager_pid = $this->server->manager_pid;
+        $node->swoole_version = swoole_version();
+        $node->cpu_num = swoole_cpu_num();
+        $node->stack_useage = Coroutine::getStackUsage();
+        $node->heart_beat = time();
+        $node->scf_version = SCF_VERSION;
+        $node->tables = Table::list();
+        $node->threads = count(Coroutine::list());
+        $node->thread_status = Coroutine::stats();
+        $node->server_run_mode = APP_RUN_MODE;
+        $this->server->addProcess(SubProcess::heartbeat($this->server, $node));
     }
 
     /**
@@ -532,150 +531,6 @@ INFO;
     }
 
     /**
-     * 转存内存table的日志到redis和日志文件
-     * @return void
-     */
-    protected function backupLog(): void {
-        $pid = Coroutine::create(function () {
-            $logger = Log::instance();
-            Timer::tick(3000, function () use ($logger) {
-                $logger->backup();
-            });
-        });
-        $this->log('日志备份启动完成!协程ID:' . $pid);
-    }
-
-
-    /**
-     * 监听文件改动自动重启服务
-     * @return void
-     */
-    protected function watchFileChange(): void {
-        $pid = Coroutine::create(function () {
-            $scanDirectories = function () {
-                if (APP_RUN_MODE == 'src') {
-                    $appFiles = Dir::scan(APP_PATH . '/src');
-                } else {
-                    $appFiles = [];
-                }
-                return [...$appFiles, ...Dir::scan(Root::dir())];
-            };
-
-            $files = $scanDirectories();
-            $fileList = [];
-            foreach ($files as $path) {
-                $fileList[] = [
-                    'path' => $path,
-                    'md5' => md5_file($path)
-                ];
-            }
-
-            while (true) {
-                $changed = false;
-                $changedFiles = [];
-
-                // Rescan directories to find new files
-                $currentFiles = $scanDirectories();
-                $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
-
-                // Check for new files
-                foreach ($currentFilePaths as $path) {
-                    if (!in_array($path, array_column($fileList, 'path'))) {
-                        $fileList[] = [
-                            'path' => $path,
-                            'md5' => md5_file($path)
-                        ];
-                        $changed = true;
-                        $changedFiles[] = $path;
-                    }
-                }
-
-                foreach ($fileList as $key => &$file) {
-                    if (!file_exists($file['path'])) {
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
-                        unset($fileList[$key]);
-                        continue;
-                    }
-                    $getMd5 = md5_file($file['path']);
-                    if (strcmp($file['md5'], $getMd5) !== 0) {
-                        $file['md5'] = $getMd5;
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
-                    }
-                }
-
-                if ($changed) {
-                    Console::warning('---------以下文件发生变动,即将重启---------');
-                    foreach ($changedFiles as $f) {
-                        Console::write($f);
-                    }
-                    Console::warning('-------------------------------------------');
-                    $this->server->reload();
-                    // Console::info("重启状态:" . $this->server->reload());
-                    if (App::isMaster()) {
-                        $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($this->bindPort + 2) . '/reload';
-                        $client = \Scf\Client\Http::create($dashboardHost);
-                        $client->get();
-                    }
-                }
-                Coroutine::sleep(3);
-            }
-        });
-        $this->log('文件改动监听服务启动完成!ID:' . $pid);
-    }
-
-    /**
-     * 向节点管理员报到
-     * @return void
-     */
-    protected function report(): void {
-        $manager = \Scf\Server\Manager::instance();
-        $node = Node::factory();
-        $node->appid = App::id();
-        $node->id = $this->id;
-        $node->name = $this->name;
-        $node->ip = $this->ip;
-        $node->fingerprint = APP_FINGERPRINT;
-        $node->port = $this->bindPort;
-        $node->socketPort = $this->bindPort + 1;
-        $node->role = App::isMaster() ? 'master' : 'slave';
-        $node->started = $this->started;
-        $node->restart_times = 0;
-        $node->master_pid = SERVER_MASTER_PID;
-        $node->manager_pid = SERVER_MANAGER_PID;
-        $node->swoole_version = swoole_version();
-        $node->cpu_num = swoole_cpu_num();
-        $node->stack_useage = Coroutine::getStackUsage();
-        $node->heart_beat = time();
-        $node->app_version = App::version();
-        $node->public_version = App::publicVersion();
-        $node->scf_version = SCF_VERSION;
-        $node->tables = Table::list();
-        $node->threads = count(Coroutine::list());
-        $node->thread_status = Coroutine::stats();
-        $node->server_run_mode = APP_RUN_MODE;
-        try {
-            if ($manager->report($node) === false) {
-                $this->log('节点报道失败:' . Color::red("MasterDB不可用"));
-                Timer::after(5000, function () {
-                    $this->report();
-                });
-            }
-            Timer::tick(1000, function () use ($manager, $node) {
-                if (Counter::instance()->exist('_REQUEST_COUNT_' . Date::leftday(2))) {
-                    Counter::instance()->delete('_REQUEST_COUNT_' . Date::leftday(2));
-                }
-                Counter::instance()->delete('_MYSQL_EXECUTE_COUNT_' . (time() - 5));
-                Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
-                $manager->heartbeat($this->server, $node);
-            });
-        } catch (Exception $exception) {
-            $this->log('节点报道失败:' . Color::red($exception->getMessage()));
-        }
-    }
-
-    /**
      * 向socket客户端推送内容
      * @param $fd
      * @param $str
@@ -701,7 +556,6 @@ INFO;
     protected function enable(): void {
         $this->serviceEnable = true;
         Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
-
     }
 
     /**
