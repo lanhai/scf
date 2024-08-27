@@ -50,11 +50,11 @@ class Crontab {
     protected int $executeTimeout = 0;
 
     /**
-     * @return void
+     * @return int
      */
-    public static function startProcess(): void {
+    public static function startProcess(): int {
         if (!App::isReady()) {
-            return;
+            return 0;
         }
         $process = new Process(function () {
             App::mount();
@@ -76,7 +76,7 @@ class Crontab {
         });
         $pid = $process->start();
         File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
-        Console::success('Crontab Manager PID:' . Color::info($pid));
+        return $pid;
     }
 
     public static function startByWorker(): void {

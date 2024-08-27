@@ -139,7 +139,7 @@ class Native {
             } else {
                 Console::success('IPC服务器启动成功,listen:' . $port);
                 if (Env::isDev()) {
-                    $this->watchFileChange();
+                    $this->server->addProcess(SubProcess::createFileWatchProcess($this->server));
                 }
             }
         });
@@ -177,67 +177,6 @@ class Native {
                 $this->server->reload();
             } else {
                 Console::log(Color::yellow($countdown) . '秒后重启服务器');
-            }
-        });
-    }
-
-
-    /**
-     * 监听文件改动自动重启服务
-     * @return void
-     */
-    protected function watchFileChange(): void {
-        Coroutine::create(function () {
-            $scanDirectories = function () {
-                $appFiles = Dir::scan(APP_PATH . '/src');
-                return [...$appFiles, ...Dir::scan(Root::dir())];
-            };
-            $files = $scanDirectories();
-            $fileList = [];
-            foreach ($files as $path) {
-                $fileList[] = [
-                    'path' => $path,
-                    'md5' => md5_file($path)
-                ];
-            }
-            while (true) {
-                $currentFiles = $scanDirectories();
-                $changedFiles = [];
-                $changed = false;
-                $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
-                foreach ($currentFilePaths as $path) {
-                    if (!in_array($path, array_column($fileList, 'path'))) {
-                        $fileList[] = [
-                            'path' => $path,
-                            'md5' => md5_file($path)
-                        ];
-                        $changed = true;
-                        $changedFiles[] = $path;
-                    }
-                }
-                foreach ($fileList as $key => &$file) {
-                    if (!file_exists($file['path'])) {
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
-                        unset($fileList[$key]);
-                        continue;
-                    }
-                    $getMd5 = md5_file($file['path']);
-                    if (strcmp($file['md5'], $getMd5) !== 0) {
-                        $file['md5'] = $getMd5;
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
-                    }
-                }
-                if ($changed) {
-                    Console::warning('---------以下文件发生变动,即将重启---------');
-                    foreach ($changedFiles as $f) {
-                        Console::write($f);
-                    }
-                    Console::warning('-------------------------------------------');
-                    $this->server->reload();
-                }
-                Coroutine::sleep(3);
             }
         });
     }
