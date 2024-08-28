@@ -148,7 +148,7 @@ class Http extends \Scf\Core\Server {
                         RQueue::startProcess();
                     }
                 }
-                usleep(1000 * 1000 * 30);
+                sleep(30);
             }
         });
         $this->server->addProcess($process);
@@ -286,6 +286,10 @@ class Http extends \Scf\Core\Server {
             //重置执行中的请求数统计
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
         });
+        //服务器销毁前
+        $this->server->on("BeforeShutdown", function (Server $server) {
+            Console::warning('服务器即将关闭');
+        });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             $this->onStart($server, $serverConfig);
@@ -348,7 +352,6 @@ Master:$masterPid
 --------------------------------
 INFO;
         Console::write(Color::info($info));
-        $this->enable();
         //自动更新
         APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
     }
@@ -389,7 +392,6 @@ INFO;
      */
     protected function checkVersion(): void {
         if (APP_RUN_MODE != 'phar') {
-            $this->enable();
             return;
         }
         $versionInfo = "";
@@ -452,21 +454,20 @@ INFO;
      */
     protected function reload(): void {
         $countdown = 3;
-        Console::log(Color::yellow($countdown) . '秒后重启服务器');
+        Console::log('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
         Timer::tick(1000, function ($id) use (&$countdown) {
             $countdown--;
             if ($countdown == 0) {
-                $version = Updater::instance()->getVersion();
                 Timer::clear($id);
                 $this->server->reload();
+                //重启控制台
                 if (App::isMaster()) {
                     $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($this->bindPort + 2) . '/reload';
                     $client = \Scf\Client\Http::create($dashboardHost);
                     $client->get();
                 }
-                $this->enable();
             } else {
-                Console::log(Color::yellow($countdown) . '秒后重启服务器');
+                Console::log('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
             }
         });
     }
@@ -478,11 +479,9 @@ INFO;
      * @return bool
      */
     public function appointUpdateTo($type, $version): bool {
-        $this->disable();
+        $type == 'app' and $this->disable();
         if (Updater::instance()->appointUpdateTo($type, $version)) {
             $type == 'app' and $this->reload();
-            usleep(5000);
-            $this->enable();
             return true;
         } else {
             $this->enable();
@@ -505,9 +504,6 @@ INFO;
             Log::instance()->info('开始执行更新:' . $version);
             if ($updater->changeAppVersion($version)) {
                 $this->reload();
-//                $this->server->reload();
-//                Log::instance()->info('已更新至版本:' . $version);
-//                $this->enable();
                 return true;
             } else {
                 $this->enable();
@@ -518,9 +514,6 @@ INFO;
             Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
             if ($updater->updateApp()) {
                 $this->reload();
-//                $this->server->reload();
-//                Log::instance()->info('已更新至版本:' . $version['remote']['app']['version']);
-//                $this->enable();
                 return true;
             } else {
                 $this->enable();
@@ -553,7 +546,7 @@ INFO;
      * 设置服务为可用状态
      * @return void
      */
-    protected function enable(): void {
+    public function enable(): void {
         $this->serviceEnable = true;
         Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
     }
@@ -562,7 +555,7 @@ INFO;
      * 设置服务为不可用状态
      * @return void
      */
-    protected function disable(): void {
+    public function disable(): void {
         $this->serviceEnable = false;
         Runtime::instance()->set('_SERVER_STATUS_', STATUS_OFF);
     }

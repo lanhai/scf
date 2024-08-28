@@ -5,19 +5,20 @@ namespace Scf\Server\Listener;
 use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Exception;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Server\Http;
-use Scf\Server\Table\Counter;
-use Scf\Server\Task\Crontab;
-use Scf\Server\Task\RQueue;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
 
 class WorkerListener extends Listener {
 
+    /**
+     * @throws Exception
+     */
     protected function onWorkerStart(Server $server, $workerId): void {
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
@@ -35,6 +36,7 @@ class WorkerListener extends Listener {
             Console::error($e->getMessage());
         }
         if ($workerId == 0) {
+            //注册注解路由
             AnnotationRouteRegister::instance()->load();
             $srcPath = App::src();
             $version = App::version();
@@ -54,6 +56,7 @@ INFO;
             if ($enableStatistics && App::isMaster()) {
                 StatisticModel::instance()->updateDB();
             }
+            !Http::instance()->isEnable() and Http::instance()->enable();
             //启动任务管理器
 //            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
 //            $serverConifg = Config::server();
