@@ -273,7 +273,7 @@ class Console {
      * @return void
      */
     public static function info(string $str, bool $push = true): void {
-        self::log(Color::notice($str), $push);
+        self::log(Color::cyan($str), $push);
     }
 
     /**

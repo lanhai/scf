@@ -52,7 +52,7 @@ class App extends \Scf\Core\App {
                 }
                 $serviceManager->addService($service);
                 if ($workerId == 0) {
-                    Console::log("【RPC】服务" . Color::notice($service->serviceName()) . Color::success('注册成功'));
+                    Console::log("【Server】RPC服务" . Color::notice($service->serviceName()) . Color::success('注册成功'));
 //                    //注册服务
 //                    $nodeId = md5(SERVER_HOST . $port);
 //                    $serviceNode = new ServiceNode();

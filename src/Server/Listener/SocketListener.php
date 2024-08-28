@@ -69,8 +69,8 @@ class SocketListener extends Listener {
                 //推送服务器运行状态数据
                 case 'server_status':
                     Timer::tick(1000, function ($id) use ($server, $frame) {
+                        $status = Manager::instance()->getStatus();
                         if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
-                            $status = Manager::instance()->getStatus();
                             try {
                                 $server->push($frame->fd, JsonHelper::toJson($status));
                             } catch (Throwable) {
