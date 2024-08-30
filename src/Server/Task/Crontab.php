@@ -20,7 +20,6 @@ use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
-use Swoole\WebSocket\Server;
 use Throwable;
 
 class Crontab {
@@ -60,7 +59,6 @@ class Crontab {
             App::mount();
             if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
                 self::instance()->start();
-                Event::wait();
             } else {
                 //没有定时任务也启动一个计时器
                 $managerId = Counter::instance()->get('_background_process_id_');
@@ -73,6 +71,7 @@ class Crontab {
                     }
                 });
             }
+            Event::wait();
         });
         $pid = $process->start();
         File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
@@ -92,7 +91,6 @@ class Crontab {
     public static function load(): bool {
         $managerId = Counter::instance()->get('_background_process_id_');
         if (!$modules = App::getModules()) {
-            Console::warning("app模块加载失败");
             return false;
         }
         $list = [];

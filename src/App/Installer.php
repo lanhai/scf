@@ -160,7 +160,7 @@ class Installer extends Struct {
      * @return bool
      */
     public function isInstalled(): bool {
-        return (!empty($this->app_auth_key) && !empty($this->appid)) || file_exists($this->src());
+        return file_exists($this->src());//(!empty($this->app_auth_key) && !empty($this->appid)) ||
     }
 
     /**

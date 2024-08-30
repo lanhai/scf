@@ -35,7 +35,7 @@ class RQueue {
             App::mount();
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
-                Console::warning("Redis服务不可用,队列管理未启动");
+                Console::warning("Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
                 self::instance()->watch($config['redis_queue_mc'] ?? 512);

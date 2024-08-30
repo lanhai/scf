@@ -114,6 +114,9 @@ class Redis extends Cache {
     private function createPool(string|array $server = 'main'): static {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
         try {
+            if (!$config['host']) {
+                throw new AppError('未配置redis服务器地址');
+            }
             $this->connection = new RedisPool($config['host'], $config['port'], $config['auth'], 0);
             $maxIdle = $config['max_idle'] ?? 16;        // 最大闲置连接数
             $maxLifetime = $config['max_life_time'] ?? 3600;  // 连接的最长生命周期
