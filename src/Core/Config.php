@@ -71,7 +71,7 @@ class Config {
      * @param array|string $path
      */
     public static function load(array|string $path): void {
-        $config = is_array($path) ? $path : (file_get_contents($path) ? require($path) : []);
+        $config = is_array($path) ? $path : (is_file($path) ? require($path) : []);
         try {
             self::$_cache = Arr::merge(self::$_cache, is_array($config) ? $config : []);
         } catch (\Throwable $e) {

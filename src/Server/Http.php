@@ -2,7 +2,6 @@
 
 namespace Scf\Server;
 
-use Exception;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -10,7 +9,6 @@ use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
 use Scf\Command\Manager;
-use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Runtime\Table;
 use Scf\Server\Struct\Node;
@@ -18,8 +16,6 @@ use Scf\Server\Table\Counter;
 use Scf\Server\Table\Runtime;
 use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
-use Scf\Util\Date;
-use Scf\Util\Dir;
 use Scf\Util\File;
 use Swoole\Coroutine;
 use Swoole\Process;
@@ -292,47 +288,23 @@ class Http extends \Scf\Core\Server {
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
-            $this->onStart($server, $serverConfig);
-        });
-        try {
-            //日志备份进程
-            $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
-            //心跳进程
-            $this->addHeartbeatProcess();
-            //启动文件监听进程
-            if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
-                $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
-            }
-            $this->server->start();
-        } catch (Throwable $exception) {
-            Console::error($exception->getMessage());
-        }
-    }
-
-    /**
-     * 服务器完成启动
-     * @param Server $server
-     * @param $serverConfig
-     * @return void
-     */
-    protected function onStart(Server $server, $serverConfig): void {
-        $masterPid = $server->master_pid;
-        $managerPid = $server->manager_pid;
-        define("SERVER_MASTER_PID", $masterPid);
-        define("SERVER_MANAGER_PID", $managerPid);
-        File::write(SERVER_MANAGER_PID_FILE, $managerPid);
-        $scfVersion = SCF_VERSION;
-        $role = SERVER_ROLE;
-        $env = APP_RUN_ENV;
-        $mode = APP_RUN_MODE;
-        $alias = SERVER_ALIAS;
-        $port = $this->bindPort;
-        $files = count(get_included_files());
-        $os = SERVER_ENV;
-        $host = SERVER_HOST;
-        $version = swoole_version();
-        $fingerprint = APP_FINGERPRINT;
-        $info = <<<INFO
+            $masterPid = $server->master_pid;
+            $managerPid = $server->manager_pid;
+            define("SERVER_MASTER_PID", $masterPid);
+            define("SERVER_MANAGER_PID", $managerPid);
+            File::write(SERVER_MANAGER_PID_FILE, $managerPid);
+            $scfVersion = SCF_VERSION;
+            $role = SERVER_ROLE;
+            $env = APP_RUN_ENV;
+            $mode = APP_RUN_MODE;
+            $alias = SERVER_ALIAS;
+            $port = $this->bindPort;
+            $files = count(get_included_files());
+            $os = SERVER_ENV;
+            $host = SERVER_HOST;
+            $version = swoole_version();
+            $fingerprint = APP_FINGERPRINT;
+            $info = <<<INFO
 ---------Server启动完成---------
 监听地址：{$this->bindHost}:{$port}
 主机地址：{$host}
@@ -351,9 +323,23 @@ Task Worker：{$serverConfig['task_worker_num']}
 Master:$masterPid
 --------------------------------
 INFO;
-        Console::write(Color::info($info));
-        //自动更新
-        APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
+            Console::write(Color::info($info));
+            //自动更新
+            APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
+        });
+        try {
+            //日志备份进程
+            $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
+            //心跳进程
+            $this->addHeartbeatProcess();
+            //启动文件监听进程
+            if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
+                $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
+            }
+            $this->server->start();
+        } catch (Throwable $exception) {
+            Console::error($exception->getMessage());
+        }
     }
 
     /**
@@ -431,19 +417,16 @@ INFO;
         Coroutine::sleep(10);
         $updater = Updater::instance();
         $version = $updater->getVersion();
-        if ($updater->hasNewAppVersion()) {
+        if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
             //强制更新
-            if ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced']) {
-                $this->disable();
-                Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
-                if ($updater->updateApp()) {
-                    $this->reload();
-                } else {
-                    Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
-                }
+            $this->disable();
+            Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
+            if ($updater->updateApp()) {
+                $this->reload();
             } else {
-                //Log::instance()->info('检测到新版本:' . $version['remote']['app']['version']);
+                Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
             }
+
         }
         return $this->autoUpdate();
     }
