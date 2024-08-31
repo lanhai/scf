@@ -145,7 +145,6 @@ class Dir {
      */
     private static function _scan(string $dir, int $deep = -1, int $level = 1): array {
         $files = [];
-
         if (is_dir($dir)) {
             $items = scandir($dir);
             foreach ($items as $item) {
