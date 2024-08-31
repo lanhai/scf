@@ -3,6 +3,7 @@
 namespace Scf\Util;
 
 use FilesystemIterator;
+use Generator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 
@@ -90,12 +91,13 @@ class Dir {
     }
 
     /**
-     * 扫描文件夹下所有文件
+     * 扫描文件夹下所有文件(兼容超长文件名)
      * @param string $dir 目录路径
      * @param int $deep 递归深度，-1 表示无限深度
-     * @return array 返回所有文件路径的数组
+     * @param bool $yield
+     * @return Generator|array 返回文件路径的生成器或者文件列表
      */
-    public static function scan(string $dir, int $deep = -1): array {
+    public static function scanLongFiles(string $dir, int $deep = -1, bool $yield = false): Generator|array {
         $files = [];
         try {
             $iterator = new RecursiveIteratorIterator(
@@ -105,7 +107,11 @@ class Dir {
             foreach ($iterator as $fileInfo) {
                 // 只获取文件，忽略目录
                 if ($fileInfo->isFile()) {
-                    $files[] = $fileInfo->getPathname();
+                    if ($yield) {
+                        yield $fileInfo->getPathname();
+                    } else {
+                        $files[] = $fileInfo->getPathname();
+                    }
                     // 如果设置了递归深度限制
                     if ($deep != -1 && $iterator->getDepth() >= $deep) {
                         break;
@@ -115,16 +121,18 @@ class Dir {
         } catch (\Exception $e) {
             echo "Error scanning directory: " . $e->getMessage();
         }
-        return $files;
+        if (!$yield) {
+            return $files;
+        }
     }
 
     /**
-     * 扫描文件夹下所有文件
+     * 扫描文件夹下所有文件(不兼容超长文件名)
      * @param string $dir 目录路径
      * @param int $deep 递归深度，-1 表示无限深度
      * @return array 返回所有文件路径的数组
      */
-    public static function __scan(string $dir, int $deep = -1): array {
+    public static function scan(string $dir, int $deep = -1): array {
         return self::_scan($dir, $deep);
     }
 
