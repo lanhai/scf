@@ -135,6 +135,36 @@ class Dir {
     }
 
     /**
+     * 使用 find 命令扫描目录下所有文件
+     * @param string $dir 目标目录
+     * @param int $deep 递归深度，-1 表示无限制
+     * @return array 返回文件路径的数组
+     */
+    public static function find(string $dir, int $deep = -1): array {
+        $files = [];
+
+        if (!is_dir($dir)) {
+            echo "Not a directory: $dir\n";
+            return $files;
+        }
+
+        // 构建 find 命令
+        $maxDepth = ($deep == -1) ? '' : "-maxdepth $deep";
+        $command = "find \"$dir\" $maxDepth -type f";
+
+        // 执行 find 命令并获取输出
+        exec($command, $output, $returnVar);
+
+        if ($returnVar === 0) {
+            $files = $output;
+        } else {
+            echo "Error executing find command.\n";
+        }
+
+        return $files;
+    }
+
+    /**
      * 扫描文件夹下所有文件(不兼容超长文件名)
      * @param string $dir 目录路径
      * @param int $deep 递归深度，-1 表示无限深度
