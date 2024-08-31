@@ -95,9 +95,9 @@ class Dir {
      * @param string $dir 目录路径
      * @param int $deep 递归深度，-1 表示无限深度
      * @param bool $yield
-     * @return Generator|array 返回文件路径的生成器或者文件列表
+     * @return array 返回文件路径的生成器或者文件列表
      */
-    public static function scanLongFiles(string $dir, int $deep = -1, bool $yield = false): Generator|array {
+    public static function scanLongFiles(string $dir, int $deep = -1, bool $yield = false): array {
         $files = [];
         try {
             $iterator = new RecursiveIteratorIterator(
@@ -107,11 +107,11 @@ class Dir {
             foreach ($iterator as $fileInfo) {
                 // 只获取文件，忽略目录
                 if ($fileInfo->isFile()) {
-                    if ($yield) {
-                        yield $fileInfo->getPathname();
-                    } else {
-                        $files[] = $fileInfo->getPathname();
-                    }
+//                    if ($yield) {
+//                        yield $fileInfo->getPathname();
+//                    } else {
+                    $files[] = $fileInfo->getPathname();
+                    //}
                     // 如果设置了递归深度限制
                     if ($deep != -1 && $iterator->getDepth() >= $deep) {
                         break;
@@ -121,9 +121,9 @@ class Dir {
         } catch (\Exception $e) {
             echo "Error scanning directory: " . $e->getMessage();
         }
-        if (!$yield) {
-            return $files;
-        }
+        //if (!$yield) {
+        return $files;
+        //}
     }
 
     /**
