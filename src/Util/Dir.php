@@ -91,49 +91,74 @@ class Dir {
 
     /**
      * 扫描文件夹下所有文件
-     * @param $dir
-     * @param int $deep
-     * @return array
+     * @param string $dir 目录路径
+     * @param int $deep 递归深度，-1 表示无限深度
+     * @return array 返回所有文件路径的数组
      */
-    public static function scan($dir, int $deep = -1): array {
-        self::$fileList = [];
-        $files = self::_scan($dir, $deep);
-        self::arrange($files);
-        return self::$fileList;
-    }
-
-    private static function arrange($files): void {
-        foreach ($files as $file) {
-            if (is_array($file)) {
-                self::arrange($file);
-            } else {
-                self::$fileList[] = $file;
-            }
-        }
-    }
-
-    private static function _scan($dir, $deep = -1, $level = 1) {
-        $files = array();
-        if ($handle = opendir($dir)) {
-            while (($file = readdir($handle)) !== false) {
-                if ($file != ".." && $file != ".") {
-                    //排除根目录；
-                    if (is_dir($dir . "/" . $file)) {
-                        if ($deep != -1 && $deep == $level) {
-                            continue;
-                        }
-                        //如果是子文件夹，就进行递归
-                        $files[] = self::_scan($dir . "/" . $file, $deep, $level + 1);
-                    } else {
-                        //不然就将文件的名字存入数组；
-                        $extension = explode('.', $file);
-                        $extension = array_pop($extension);
-                        $files[] = $dir . '/' . $file;
+    public static function scan(string $dir, int $deep = -1): array {
+        $files = [];
+        try {
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($iterator as $fileInfo) {
+                // 只获取文件，忽略目录
+                if ($fileInfo->isFile()) {
+                    $files[] = $fileInfo->getPathname();
+                    // 如果设置了递归深度限制
+                    if ($deep != -1 && $iterator->getDepth() >= $deep) {
+                        break;
                     }
                 }
             }
-            closedir($handle);
-            return $files;
+        } catch (\Exception $e) {
+            echo "Error scanning directory: " . $e->getMessage();
         }
+        return $files;
+    }
+
+    /**
+     * 扫描文件夹下所有文件
+     * @param string $dir 目录路径
+     * @param int $deep 递归深度，-1 表示无限深度
+     * @return array 返回所有文件路径的数组
+     */
+    public static function __scan(string $dir, int $deep = -1): array {
+        return self::_scan($dir, $deep);
+    }
+
+    /**
+     * 递归扫描目录
+     * @param string $dir 目录路径
+     * @param int $deep 递归深度，-1 表示无限深度
+     * @param int $level 当前递归深度
+     * @return array 返回目录中的文件列表
+     */
+    private static function _scan(string $dir, int $deep = -1, int $level = 1): array {
+        $files = [];
+
+        if (is_dir($dir)) {
+            $items = scandir($dir);
+            foreach ($items as $item) {
+                // 跳过 "." 和 ".."
+                if ($item === "." || $item === "..") {
+                    continue;
+                }
+                $fullPath = $dir . DIRECTORY_SEPARATOR . $item;
+                if (is_dir($fullPath)) {
+                    // 如果设置了深度限制且达到深度，跳过子目录
+                    if ($deep != -1 && $level >= $deep) {
+                        continue;
+                    }
+                    // 递归扫描子目录
+                    $files = array_merge($files, self::_scan($fullPath, $deep, $level + 1));
+                } else {
+                    // 保存文件路径
+                    $files[] = $fullPath;
+                }
+            }
+        }
+        return $files;
     }
 }
