@@ -146,26 +146,50 @@ class Dir {
     private static function _scan(string $dir, int $deep = -1, int $level = 1): array {
         $files = [];
         if (is_dir($dir)) {
-            $items = scandir($dir);
-            foreach ($items as $item) {
-                // 跳过 "." 和 ".."
-                if ($item === "." || $item === "..") {
-                    continue;
-                }
-                $fullPath = $dir . DIRECTORY_SEPARATOR . $item;
-                if (is_dir($fullPath)) {
-                    // 如果设置了深度限制且达到深度，跳过子目录
-                    if ($deep != -1 && $level >= $deep) {
-                        continue;
+            if ($handle = opendir($dir)) {
+                while (($file = readdir($handle)) !== false) {
+                    if ($file != "." && $file != "..") {
+                        $filePath = $dir . DIRECTORY_SEPARATOR . $file;
+                        if (is_dir($filePath)) {
+                            if ($deep != -1 && $level >= $deep) {
+                                continue;
+                            }
+                            $files = array_merge($files, self::_scan($filePath, $deep, $level + 1));
+                        } else {
+                            $files[] = $filePath;
+                        }
                     }
-                    // 递归扫描子目录
-                    $files = array_merge($files, self::_scan($fullPath, $deep, $level + 1));
-                } else {
-                    // 保存文件路径
-                    $files[] = $fullPath;
                 }
+                closedir($handle);
+            } else {
+                echo "Could not open directory: $dir\n";
             }
+        } else {
+            echo "Not a directory: $dir\n";
         }
         return $files;
+//        $files = [];
+//        if (is_dir($dir)) {
+//            $items = scandir($dir);
+//            foreach ($items as $item) {
+//                // 跳过 "." 和 ".."
+//                if ($item === "." || $item === "..") {
+//                    continue;
+//                }
+//                $fullPath = $dir . DIRECTORY_SEPARATOR . $item;
+//                if (is_dir($fullPath)) {
+//                    // 如果设置了深度限制且达到深度，跳过子目录
+//                    if ($deep != -1 && $level >= $deep) {
+//                        continue;
+//                    }
+//                    // 递归扫描子目录
+//                    $files = array_merge($files, self::_scan($fullPath, $deep, $level + 1));
+//                } else {
+//                    // 保存文件路径
+//                    $files[] = $fullPath;
+//                }
+//            }
+//        }
+//        return $files;
     }
 }
