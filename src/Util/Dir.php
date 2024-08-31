@@ -92,38 +92,45 @@ class Dir {
     }
 
     /**
-     * 扫描文件夹下所有文件(兼容超长文件名)
-     * @param string $dir 目录路径
-     * @param int $deep 递归深度，-1 表示无限深度
-     * @param bool $yield
-     * @return array|Generator 返回文件路径的生成器或者文件列表
+     * 扫描文件夹下所有文件
+     * @param string $dir 目标目录
+     * @param int $deep 递归深度，-1表示无限制
+     * @return array 返回文件路径的数组
      */
-    public static function scanLongFiles(string $dir, int $deep = -1, bool $yield = false): array|Generator {
-        $files = [];
+    public static function scanLongFiles(string $dir, int $deep = -1): array {
+        return iterator_to_array(self::scanLongFilesGenerator($dir, $deep));
+    }
+
+    /**
+     * 使用生成器逐步扫描文件夹下所有文件
+     * @param string $dir 目标目录
+     * @param int $deep 递归深度，-1表示无限制
+     * @return Generator 逐步返回文件路径
+     */
+    public static function scanLongFilesGenerator(string $dir, int $deep = -1): Generator {
         try {
             $iterator = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
                 RecursiveIteratorIterator::SELF_FIRST
             );
+
             foreach ($iterator as $fileInfo) {
                 // 只获取文件，忽略目录
                 if ($fileInfo->isFile()) {
-                    if ($yield) {
-                        yield $fileInfo->getPathname();
-                    } else {
-                        $files[] = $fileInfo->getPathname();
-                    }
-                    // 如果设置了递归深度限制
-                    if ($deep != -1 && $iterator->getDepth() >= $deep) {
-                        break;
+                    yield $fileInfo->getPathname();
+                }
+
+                // 如果设置了递归深度限制，且当前深度达到限制
+                if ($deep != -1 && $iterator->getDepth() >= $deep) {
+                    // 跳过当前目录
+                    $iterator->next();
+                    while ($iterator->valid() && $iterator->getDepth() >= $deep) {
+                        $iterator->next();
                     }
                 }
             }
         } catch (Exception $e) {
-            echo "Error scanning directory: " . $e->getMessage();
-        }
-        if (!$yield) {
-            return $files;
+            error_log("Error scanning directory {$dir}: " . $e->getMessage());
         }
     }
 
