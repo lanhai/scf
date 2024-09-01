@@ -17,6 +17,7 @@ use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Root;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
+use Scf\Server\Table\Runtime;
 use Scf\Util\File;
 use Swoole\Event;
 use Swoole\ExitException;
@@ -30,12 +31,14 @@ class Dashboard {
 
     protected ?Server $_SERVER = null;
 
-    public static function start($port): void {
+    public static function start(): void {
         if (!App::isMaster() && App::isReady()) {
             return;
         }
-        $process = new Process(function () use ($port) {
+        $process = new Process(function () {
             try {
+                $port = Http::getUseablePort(8580);
+                Runtime::instance()->set('DASHBOARD_PORT', $port);
                 self::instance()->create($port, Manager::instance()->issetOpt('d'));
             } catch (\Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
@@ -51,7 +54,7 @@ class Dashboard {
             Console::error('Dashboard服务启动失败');
             exit();
         }
-        Console::success("Dashboard服务启动完成!PID:" . $pid);
+        Console::info("Dashboard服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->get('DASHBOARD_PORT'));
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
@@ -96,7 +99,7 @@ class Dashboard {
      * @param bool $daemonize
      * @return void
      */
-    public function create(int $port = 9582, bool $daemonize = false): void {
+    public function create(int $port, bool $daemonize = false): void {
         if (!is_null($this->_SERVER)) {
             $this->_SERVER->reload();
         } else {
@@ -128,7 +131,7 @@ class Dashboard {
             try {
                 $this->_SERVER = new Server('0.0.0.0');
                 $setting = [
-                    'worker_num' => 4,
+                    'worker_num' => 2,
                     'max_wait_time' => 60,
                     'reload_async' => true,
                     'daemonize' => $daemonize,
@@ -280,7 +283,7 @@ class Dashboard {
                     Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
                 }
             }
-            usleep(5000 * 1000);
+            sleep(5);
         }
     }
 }

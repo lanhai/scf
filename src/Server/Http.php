@@ -2,6 +2,7 @@
 
 namespace Scf\Server;
 
+use Exception;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -46,7 +47,7 @@ class Http extends \Scf\Core\Server {
     /**
      * @var int 绑定端口
      */
-    protected int $bindPort = 9580;
+    protected int $bindPort = 0;
     /**
      * @var string 本机ip地址
      */
@@ -99,6 +100,38 @@ class Http extends \Scf\Core\Server {
             self::$_instances[$class] = new $class($role, $host, $port);
         }
         return self::$_instances[$class];
+    }
+
+    /**
+     * 获取可用端口
+     * @param $port
+     * @return int
+     */
+    public static function getUseablePort($port): int {
+        try {
+            $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+            if ($socket === false) {
+                return $port;
+            }
+            $result = socket_bind($socket, '0.0.0.0', $port);
+            socket_close($socket);
+            if ($result === false) {
+                return self::getUseablePort($port + 1);
+            }
+        } catch (Exception) {
+            return self::getUseablePort($port + 1);
+        }
+        return $port; // 端口未被占用
+//        try {
+//            $server = new \Swoole\Server('0.0.0.0', $port, SWOOLE_BASE);
+//            if ($server->getLastError() === 0) {
+//                $server->shutdown();
+//                return $port;
+//            }
+//            return self::getUseablePort($port + 1);
+//        } catch (Exception) {
+//            return self::getUseablePort($port + 1);
+//        }
     }
 
     public static function bgs(): void {
@@ -165,14 +198,14 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\Runtime',
             'Scf\Server\Table\RouteTable',
         ]);
-        $this->bindPort = $this->bindPort ?: 9580;
         //启动master节点管理面板服务器
-        Dashboard::start($this->bindPort + 2);
+        Dashboard::start();
         //等待APP安装完成
         App::await();
         //加载服务器配置
         $serverConfig = Config::server();
-        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit']);
+        $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);
+        !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? (128 * 10));
         //检查是否存在异常进程
@@ -224,6 +257,7 @@ class Http extends \Scf\Core\Server {
                 'open_http2_protocol' => true,
                 'open_websocket_protocol' => true
             ]);
+            Runtime::instance()->set('HTTP_PORT', $this->bindPort);
         } catch (Throwable $exception) {
             Console::log(Color::red('http服务端口监听启动失败:' . $exception->getMessage()));
             exit(1);
@@ -236,6 +270,7 @@ class Http extends \Scf\Core\Server {
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => true
             ]);
+            Runtime::instance()->set('SOCKET_PORT', $this->bindPort + 1);
         } catch (Throwable $exception) {
             Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
             exit(1);
@@ -243,12 +278,14 @@ class Http extends \Scf\Core\Server {
         //监听RPC服务(tcp)请求
         try {
             /** @var Server $rpcPort */
-            $rpcPort = $this->server->listen($this->bindHost, ($this->bindPort + 5), SWOOLE_SOCK_TCP);
+            $rpcPortNum = $serverConfig['rpc_port'] ?? ($this->bindPort + 5);
+            $rpcPort = $this->server->listen('0.0.0.0', $rpcPortNum, SWOOLE_SOCK_TCP);
             $rpcPort->set([
                 'open_http_protocol' => false,
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => false
             ]);
+            Runtime::instance()->set('RPC_PORT', $rpcPortNum);
         } catch (Throwable $exception) {
             Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
             exit(1);
@@ -354,7 +391,7 @@ INFO;
         $node->ip = $this->ip;
         $node->fingerprint = APP_FINGERPRINT;
         $node->port = $this->bindPort;
-        $node->socketPort = $this->bindPort + 1;
+        $node->socketPort = Runtime::instance()->get('SOCKET_PORT');
         $node->role = \Scf\Core\App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
         $node->restart_times = 0;

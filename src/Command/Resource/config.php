@@ -6,12 +6,6 @@ return [
         'master_host' => '127.0.0.1',
         'module_style' => APP_MODULE_STYLE_MICRO
     ],
-    // 第三方非Composer管理的类库
-    'namespace_map' => [
-        'Common' => APP_LIB_PATH,
-        'Cli' => APP_LIB_PATH,
-        'Rpc' => APP_LIB_PATH,
-    ],
     // 类映射
     'class_map' => [],
     // 默认主题名
@@ -100,7 +94,7 @@ return [
             'username' => 'admin',
             'password' => 'public',
             'topic' => 'php_log',
-            'enable' => true
+            'enable' => false
         ],
     ],
     //简易webservice
@@ -159,7 +153,6 @@ return [
                     'time_out' => 1,//连接超时时间
                     'size' => 16,//连接池连接数
                     'max_idle' => 8,//最大闲置连接数
-                    'key_prefix' => APP_ID,
                 ]
             ],
         ]

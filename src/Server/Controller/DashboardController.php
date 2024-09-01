@@ -23,6 +23,7 @@ use Scf\Command\Handler\NodeManager;
 use Scf\Server\Env;
 use Scf\Server\Http;
 use Scf\Server\Manager;
+use Scf\Server\Table\Runtime;
 use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
@@ -344,12 +345,11 @@ class DashboardController extends Controller {
     /**
      * 服务器状态
      * @return Result
-     * @throws Exception
      */
     public function actionServer(): Result {
         $host = Request::header('host') ?: null;
-        $referer = Request::header('referer') ?? null;
-        $protocol = str_starts_with($referer, 'https') ? 'wss://' : 'ws://';
+        $referer = Request::header('referer');
+        $protocol = (!empty($referer) && str_starts_with($referer, 'https')) ? 'wss://' : 'ws://';
         if (is_null($host)) {
             return Result::error('访问域名获取失败');
         }
@@ -357,7 +357,7 @@ class DashboardController extends Controller {
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
             $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         } else {
-            $socketHost = $protocol . 'localhost:' . (Http::instance()->getPort() + 1);
+            $socketHost = $protocol . 'localhost:' . Runtime::instance()->get('SOCKET_PORT');
         }
         $status = Manager::instance()->getStatus();
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');
