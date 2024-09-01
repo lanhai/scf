@@ -12,7 +12,6 @@ use OSS\Core\OssException;
 use OSS\OssClient;
 use Scf\Client\Http;
 use Scf\Cloud\Aliyun;
-use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;

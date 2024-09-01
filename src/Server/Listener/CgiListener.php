@@ -181,7 +181,6 @@ class CgiListener extends Listener {
      * @param \Swoole\Http\Request $request
      * @param \Swoole\Http\Response $response
      * @return bool
-     * @throws Exception
      */
     public function dashboradTakeover(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
         if (str_starts_with($request->server['path_info'], '/~',)) {
@@ -193,18 +192,17 @@ class CgiListener extends Listener {
                 Request::resetPath($path);
                 return false;
             }
-            $server = Server::instance();
-            $port = $server->getPort();
+            $port = Runtime::instance()->get('DASHBOARD_PORT');
             if (App::isReady()) {
-                $masterHost = App::isMaster() ? '127.0.0.1' : (Config::get('app')['master_host'] ?? '127.0.0.1');
+                $masterHost = App::isMaster() ? 'localhost' : (Config::get('app')['master_host'] ?? 'localhost');
                 if (SERVER_HOST_IS_IP || App::isMaster()) {
-                    $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . ($port + 2);
+                    $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . $port;
                 } else {
-                    $dashboardHost = PROTOCOL_HTTP . ($port + 2) . '.' . $masterHost;
+                    $dashboardHost = PROTOCOL_HTTP . $port . '.' . $masterHost;
                 }
             } else {
-                $masterHost = '127.0.0.1';
-                $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($port + 2);
+                $masterHost = 'localhost';
+                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $port;
             }
             if ($isIndex) {
                 $url = $dashboardHost . '/dashboard';
