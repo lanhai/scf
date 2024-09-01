@@ -25,6 +25,7 @@ use Swoole\Http\Server;
 use Swoole\Process;
 use Swoole\Server\Task;
 use Swoole\Timer;
+use Throwable;
 
 class Dashboard {
     use Singleton;
@@ -40,7 +41,7 @@ class Dashboard {
                 $port = Http::getUseablePort(8580);
                 Runtime::instance()->set('DASHBOARD_PORT', $port);
                 self::instance()->create($port, Manager::instance()->issetOpt('d'));
-            } catch (\Throwable $exception) {
+            } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
         });
@@ -58,7 +59,7 @@ class Dashboard {
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
-                $installServer = new Server('0.0.0.0', Http::instance()->getPort());
+                $installServer = new Server('0.0.0.0', Http::instance()->getPort() ?: 9580);
                 $installServer->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) use ($installServer) {
                     if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
                         $response->end();
@@ -88,7 +89,7 @@ class Dashboard {
                     });
                 });
                 $installServer->start();
-            } catch (\Throwable $throwable) {
+            } catch (Throwable) {
                 Console::error("启动安装服务失败");
             }
         }
@@ -152,7 +153,7 @@ class Dashboard {
                         'open_http2_protocol' => true,
                         'open_websocket_protocol' => false
                     ]);
-                } catch (\Throwable $exception) {
+                } catch (Throwable $exception) {
                     Console::log(Color::red('dashboard服务[' . $port . ']启动失败:' . $exception->getMessage()));
                     exit(1);
                 }
@@ -233,7 +234,7 @@ class Dashboard {
                             return;
                         }
                         Response::error($exception->getStatus());
-                    } catch (\Throwable $exception) {
+                    } catch (Throwable $exception) {
                         Response::error("STSTEM ERROR:" . $exception->getMessage());
                     }
                 });
@@ -248,7 +249,7 @@ class Dashboard {
                     }
                 });
                 $this->_SERVER->start();
-            } catch (\Throwable $exception) {
+            } catch (Throwable $exception) {
                 Console::log('dashboard:' . Color::red($exception->getMessage()));
             }
         }
@@ -261,7 +262,7 @@ class Dashboard {
     public static function server(): ?Server {
         try {
             return self::instance()->getServer();
-        } catch (\Throwable) {
+        } catch (Throwable) {
             return null;
         }
     }
