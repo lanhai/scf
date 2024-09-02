@@ -113,7 +113,7 @@ class Http extends \Scf\Core\Server {
             if ($socket === false) {
                 return $port;
             }
-            $result = socket_bind($socket, '0.0.0.0', $port);
+            $result = @socket_bind($socket, '0.0.0.0', $port);
             socket_close($socket);
             if ($result === false) {
                 return self::getUseablePort($port + 1);
@@ -200,8 +200,8 @@ class Http extends \Scf\Core\Server {
         ]);
         //启动master节点管理面板服务器
         Dashboard::start();
-        //等待APP安装完成
-        App::await();
+        //启动masterDB(redis协议)服务器
+        MasterDB::start(MDB_PORT);
         //加载服务器配置
         $serverConfig = Config::server();
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);
@@ -221,8 +221,6 @@ class Http extends \Scf\Core\Server {
 //                unlink(SERVER_MASTER_PID_FILE);
 //            }
 //        }
-        //启动masterDB(redis)服务器
-        MasterDB::start(MDB_PORT);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         //添加一个后台任务管理进程

@@ -52,10 +52,10 @@ class Dashboard {
         });
         Event::wait();
         if (!$pid || !Process::kill($pid, 0)) {
-            Console::error('Dashboard服务启动失败');
+            Console::error('【Dashboard】服务启动失败');
             exit();
         }
-        Console::info("Dashboard服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->get('DASHBOARD_PORT'));
+        Console::info("【Dashboard】服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->get('DASHBOARD_PORT'));
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
@@ -68,14 +68,14 @@ class Dashboard {
                     Response::instance()->register($response);
                     Request::instance()->register($request);
                     $listener = new CgiListener($installServer);
-                    App::isReady() and App::mount();
                     if (!$listener->dashboradTakeover($request, $response)) {
                         $response->status(503);
+                        $response->header("Content-Type", "text/html; charset=utf-8");
                         $response->end("应用安装中...");
                     }
                 });
                 $installServer->on('start', function (Server $server) {
-                    Console::info("安装服务器已启动,等待安装完成");
+                    Console::info("【Dashboard】安装服务器已启动,等待安装完成");
                     App::await();
                     $timeout = 3;
                     Timer::tick(1000, function ($id) use ($server, &$timeout) {
@@ -84,13 +84,13 @@ class Dashboard {
                             $server->shutdown();
                             return;
                         }
-                        Console::log("应用安装完成," . Color::red($timeout) . "秒后关闭安装服务器");
+                        Console::log("【Dashboard】应用安装完成," . Color::red($timeout) . "秒后关闭安装服务器");
                         $timeout--;
                     });
                 });
                 $installServer->start();
             } catch (Throwable) {
-                Console::error("启动安装服务失败");
+                Console::error("【Dashboard】启动安装服务失败");
             }
         }
     }
@@ -154,7 +154,7 @@ class Dashboard {
                         'open_websocket_protocol' => false
                     ]);
                 } catch (Throwable $exception) {
-                    Console::log(Color::red('dashboard服务[' . $port . ']启动失败:' . $exception->getMessage()));
+                    Console::log(Color::red('【Dashboard】服务[' . $port . ']启动失败:' . $exception->getMessage()));
                     exit(1);
                 }
                 $this->_SERVER->on('WorkerStart', function (Server $server, $workerId) {
@@ -164,7 +164,7 @@ class Dashboard {
                             AnnotationRouteRegister::instance()->load();
                         }
                     }
-                    //Console::info("[Dashboard]worker#" . $workerId . "启动完成");
+                    //Console::info("【Dashboard】worker#" . $workerId . " 启动完成");
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {
                     Console::info("【Dashboard】重启完成");
@@ -241,16 +241,15 @@ class Dashboard {
                 //服务器完成启动
                 $this->_SERVER->on('start', function (Server $server) {
                     if (!App::isReady()) {
-                        //App::await();
-                        Console::info("等待安装配置文件就绪...");
+                        Console::info("【Dashboard】等待安装配置文件就绪...");
                         $this->waittingInstall();
-                        Console::info("[Dashboard]应用安装成功!配置文件加载完成!开始重启");
+                        Console::info("【Dashboard】应用安装成功!配置文件加载完成!开始重启");
                         $server->reload();
                     }
                 });
                 $this->_SERVER->start();
             } catch (Throwable $exception) {
-                Console::log('dashboard:' . Color::red($exception->getMessage()));
+                Console::log('【Dashboard】' . Color::red($exception->getMessage()));
             }
         }
     }
@@ -277,14 +276,14 @@ class Dashboard {
             if ($app->readyToInstall()) {
                 $updater = Updater::instance();
                 $version = $updater->getVersion();
-                Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
+                Console::info('【Dashboard】开始执行更新:' . $version['remote']['app']['version']);
                 if ($updater->updateApp()) {
                     break;
                 } else {
-                    Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
+                    Console::info('【Dashboard】更新失败:' . $version['remote']['app']['version']);
                 }
             }
-            sleep(5);
+            sleep(3);
         }
     }
 }
