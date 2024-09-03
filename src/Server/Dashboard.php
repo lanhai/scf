@@ -59,7 +59,7 @@ class Dashboard {
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
-                $installServer = new Server('0.0.0.0', Http::instance()->getPort() ?: 9580);
+                $installServer = new Server('0.0.0.0', SERVER_PORT ?: 9580);
                 $installServer->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) use ($installServer) {
                     if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
                         $response->end();
