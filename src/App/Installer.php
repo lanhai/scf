@@ -142,8 +142,8 @@ class Installer extends Struct {
             'dashboard_password' => Auth::encode(time(), Sn::create_uuid())
         ];
         !self::$_apps and self::$_apps[] = $info;
-        $info['version'] = (defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') ? $info['version'] : 'development';
-        $info['public_version'] = (defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') ? $info['public_version'] : 'development';
+        $info['version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $info['version'] : 'development';
+        $info['public_version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $info['public_version'] : 'development';
         return self::factory($info);
     }
 
