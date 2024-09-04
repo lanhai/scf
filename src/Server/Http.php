@@ -243,8 +243,9 @@ class Http extends \Scf\Core\Server {
             $setting['enable_static_handler'] = true;
             $setting['http_autoindex'] = true;
             $setting['http_index_files'] = ['index.html'];
-            $setting['static_handler_locations'] = $serverConfig['static_handler_locations'] ?? ['/document', '/cp'];
+            $setting['static_handler_locations'] = $serverConfig['static_handler_locations'] ?? ['/cp', '/asset'];
         }
+        Runtime::instance()->set('allow_cross_origin', $serverConfig['allow_cross_origin'] ?? false);
         $this->server->set($setting);
         //监听HTTP请求
         try {
