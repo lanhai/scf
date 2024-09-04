@@ -202,8 +202,8 @@ class Installer extends Struct {
             Util::releaseResource(Root::dir() . '/Command/Resource/version.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/version.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/controller/_config.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/_config.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/controller/index.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/Controller/Index.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error.html', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error_404.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error_404.html', true);
+//            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error.html', true);
+//            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error_404.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error_404.html', true);
         }
         return $this->update();
     }

@@ -54,10 +54,11 @@ class CgiListener extends Listener {
 //            }
 //        });
         // 设置CORS响应头
-//        $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
-//        $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-//        $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-
+        if (Runtime::instance()->get('allow_cross_origin')) {
+            $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
+            $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+            $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+        }
         // 如果是预检请求，直接返回200 OK
         if ($request->server['request_method'] == 'OPTIONS') {
             $response->status(200);

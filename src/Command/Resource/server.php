@@ -20,4 +20,5 @@ return [
     'slow_log_time' => 10000,//慢日志时间
     'redis_queue_mc' => 512,//redis队列每次取出上线
     'enable_db_statistics' => false,//开启数据库统计组件,需配置statistics和history数据库
+    'allow_cross_origin' => false
 ];
