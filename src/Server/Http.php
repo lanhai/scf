@@ -164,6 +164,13 @@ class Http extends \Scf\Core\Server {
 //    }
     protected function addCrontabProcess($config): void {
         $process = new Process(function () use ($config) {
+            //等待服务器启动完成
+            while (true) {
+                if (Runtime::instance()->get('SERVER_START_STATUS')) {
+                    break;
+                }
+                sleep(3);
+            }
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
             Counter::instance()->incr('_background_process_id_');
@@ -198,6 +205,7 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\Runtime',
             'Scf\Server\Table\RouteTable',
         ]);
+        Runtime::instance()->set('SERVER_START_STATUS', false);
         //启动master节点管理面板服务器
         Dashboard::start();
         //启动masterDB(redis协议)服务器
