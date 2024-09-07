@@ -9,6 +9,7 @@ use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Pool\ConnectionPool;
 use Scf\Database\Pool\Dialer;
 use Scf\Mode\Web\Log;
+use Scf\Server\Http;
 use Scf\Server\Table\Counter;
 use Scf\Server\Table\PdoPoolTable;
 use Swoole\Timer;
@@ -170,7 +171,8 @@ class DB {
         $this->pool->setPingInterval($autoPing);
         $this->pool->setIdleTimeout($idleTimeout);
         $this->pool->setId($this->poolId);
-        if ($autoPing) {
+        $server = Http::master();
+        if ($autoPing && (is_null($server) || $server->taskworker === false)) {
             $table = PdoPoolTable::instance();
             $idleCheckTimerId = $this->pool->idleCheck();
             $table->set($this->poolId, [
@@ -246,7 +248,7 @@ class DB {
                     $transaction->setPrefix($this->config['prefix'] ?? '');
                     return $transaction;
                 }
-            } catch (\Throwable $exception) {
+            } catch (Throwable $exception) {
                 Log::instance()->error("事务开启失败:" . $exception->getMessage());
             }
         }

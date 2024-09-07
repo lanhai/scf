@@ -35,7 +35,7 @@ class RQueue {
             App::mount();
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
-                Console::warning("Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
+                Console::warning("【Redis Queue】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
                 self::instance()->watch($config['redis_queue_mc'] ?? 512);
@@ -44,13 +44,13 @@ class RQueue {
         });
         $pid = $process->start();
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        Console::success('RQueue Manager PID:' . Color::info($pid));
+        Console::info('【RedisQueue】Manager PID:' . $pid);
     }
 
     public static function startByWorker(): void {
         $pool = Redis::pool();
         if ($pool instanceof NullPool) {
-            Console::warning("Redis服务不可用,队列管理未启动");
+            Console::warning("【Redis Queue】Redis服务不可用,队列管理未启动");
         } else {
             $config = Config::server();
             self::instance()->watch($config['redis_queue_mc'] ?? 512);
@@ -88,7 +88,7 @@ class RQueue {
                             $successed++;
                         }
                     });
-                    Env::isDev() and Console::log('本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
+                    Env::isDev() and Console::log('【Redis Queue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
                 }
             });
         });
@@ -168,7 +168,7 @@ class RQueue {
         try {
             return Redis::pool()->lLength(QueueStatus::IN->is($status) || $status == QueueStatus::DELAY->is($status) ? QueueStatus::matchKey($status) : QueueStatus::matchKey($status) . '_' . $day);
         } catch (Throwable $err) {
-            Env::isDev() and Console::warning('查询队列任务错误:' . $err->getMessage());
+            Env::isDev() and Console::warning('【Redis Queue】查询队列任务错误:' . $err->getMessage());
             return 0;
         }
 

@@ -518,11 +518,25 @@ class Dao extends Struct {
     }
 
     /**
+     * 数据库是否存在
+     * @return bool
+     */
+    public function databaseCheck(): bool {
+        $dbName = $this->getDb();  // 获取数据库名称
+        return Pdo::factory()->createDatabaseIfNotExists($dbName);
+    }
+
+
+    /**
      * 更新数据表结构
      * @param $latest
      * @return void
      */
     public function updateTable($latest): void {
+        $hasError = false;
+        if (!$this->databaseCheck()) {
+            return;
+        }
         $key = $latest['db'] . '_' . $latest['table'];
         $versionFile = APP_PATH . '/db/updates/' . $key . '.yml';
         $current = file_exists($versionFile) ? Yaml::parseFile($versionFile) : null;
@@ -580,7 +594,7 @@ class Dao extends Struct {
                 $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP PRIMARY KEY, ADD PRIMARY KEY (" . implode(',', $latest['primary']) . ") USING BTREE";
             }
             // 输出所有 SQL 语句
-            $hasError = false;
+
             foreach ($sqlStatements as $sql) {
                 try {
                     Pdo::master($this->getDb())->getDatabase()->exec($sql)->get();
@@ -590,11 +604,10 @@ class Dao extends Struct {
                     Console::error($sql . "=>" . $exception->getMessage());
                 }
             }
-
-            //if (!$hasError) {
             update:
-            File::write($versionFile, Yaml::dump($latest, 3));
-            //}
+            if (!$hasError) {
+                File::write($versionFile, Yaml::dump($latest, 3));
+            }
         }
     }
 

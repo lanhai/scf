@@ -2,10 +2,15 @@
 
 namespace Scf\Database;
 
+use PDOException;
 use Scf\Core\Config;
+use Scf\Core\Console;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Helper\StringHelper;
+use Scf\Server\Http;
+use Scf\Server\Table\PdoPoolTable;
 use Scf\Util\Arr;
+use Throwable;
 use const DBS_MASTER;
 use const DBS_SLAVE;
 
@@ -20,6 +25,8 @@ class Pdo {
         'pool' => [
             'max_open' => -1,// 最大开启连接数
             'max_idle' => -1,// 最大闲置连接数
+            'task_worker_max_open' => 1,
+            'task_worker_max_idle' => 1,
             'max_lifetime' => 60,//连接的最长生命周期
             'wait_timeout' => 0.0,// 从池获取连接等待的时间, 0为一直等待
             'connection_auto_ping_interval' => 0,//自动ping间隔时间
@@ -83,6 +90,33 @@ class Pdo {
             self::$_instances[$instanceKey] = $instance;
         }
         return self::$_instances[$instanceKey];
+    }
+
+    /**
+     * 尝试创建数据库如果不存在
+     * @param string $name
+     * @return bool
+     */
+    public function createDatabaseIfNotExists(string $name = 'default'): bool {
+        $config = $this->_config['mysql'][$name];
+        $dbName = $config['name'];
+        $charset = $config['charset'] ?? 'utf8mb4';
+        try {
+            $dsn = "mysql:host={$config['master']};port={$config['port']}";
+            $pdo = new \PDO($dsn, $config['username'], $config['password']);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $stmt = $pdo->query("SHOW DATABASES LIKE '$dbName'");
+            if (!$stmt->fetch()) {
+                //Console::warning("数据库`$dbName`不存在,尝试创建");
+                $createDbSQL = "CREATE DATABASE IF NOT EXISTS `$dbName` CHARACTER SET '$charset' COLLATE utf8mb4_general_ci";
+                $pdo->exec($createDbSQL);
+                Console::success("数据库`$dbName`不存在,创建成功");
+            }
+        } catch (PDOException $e) {
+            Console::error("检查数据库失败:" . $e->getMessage());
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -153,8 +187,14 @@ class Pdo {
         $this->database->setConfig($this->serverConfig);
         $logger = new PdoLogger();
         if ($this->enablePool) {
-            $maxOpen = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['max_open'] : $this->_config['pool']['max_open'];
-            $maxIdle = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['max_idle'] : $this->_config['pool']['max_idle'];
+            $server = Http::master();
+            if (is_null($server) || $server->taskworker === false) {
+                $maxOpen = $this->serverConfig['pool']['max_open'] ?? $this->_config['pool']['max_open'];
+                $maxIdle = $this->serverConfig['pool']['max_idle'] ?? $this->_config['pool']['max_idle'];
+            } else {
+                $maxOpen = $this->serverConfig['pool']['task_worker_max_open'] ?? $this->_config['pool']['task_worker_max_open'];
+                $maxIdle = $this->serverConfig['pool']['task_worker_max_idle'] ?? $this->_config['pool']['task_worker_max_idle'];
+            }
             $maxLifetime = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['max_lifetime'] : $this->_config['pool']['max_lifetime'];
             $waitTimeout = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['wait_timeout'] : $this->_config['pool']['wait_timeout'];
             $autoPing = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['connection_auto_ping_interval'] : $this->_config['pool']['connection_auto_ping_interval'];
@@ -178,7 +218,7 @@ class Pdo {
         }
         $server = $config[$name] ?? null;
         if (!$config) {
-            throw new \PDOException('未配置数据库:' . $name);
+            throw new PDOException('未配置数据库:' . $name);
         }
         $this->serverConfig = $server;
         return $this->serverConfig;
@@ -194,6 +234,5 @@ class Pdo {
         }
         return $this->serverConfig;
     }
-
 
 }
