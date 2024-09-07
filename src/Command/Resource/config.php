@@ -119,6 +119,8 @@ return [
         'pool' => [
             'max_open' => 32,// 最大开启连接数
             'max_idle' => 8,// 最大闲置连接数
+            'task_worker_max_open' => 1,
+            'task_worker_max_idle' => 1,
             'max_lifetime' => 3600,//连接的最长生命周期
             'wait_timeout' => 0.0,// 从池获取连接等待的时间, 0为一直等待
             'connection_auto_ping_interval' => 60,//自动ping间隔时间
