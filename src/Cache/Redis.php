@@ -524,6 +524,30 @@ class Redis extends Cache {
     }
 
     /**
+     * 增加hash表字段值
+     * @param string $key
+     * @param $hashKey
+     * @param $value
+     * @return bool|int
+     */
+    public function hInc(string $key, $hashKey, $value): bool|int {
+        try {
+
+            if ($value !== null && $value !== '') {
+                if (Arr::isArray($value)) {
+                    $value = json_encode($value, JSON_UNESCAPED_UNICODE);
+                }
+                return $this->connection->hIncrBy($this->setPrefix($key), $hashKey, $value);
+            } else {
+                return false;
+            }
+        } catch (RedisException $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    /**
      * 获取存储在哈希表中指定字段的值
      * @param string $key
      * @param $hashKey
