@@ -8,9 +8,7 @@ use Scf\Core\Console;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Helper\StringHelper;
 use Scf\Server\Http;
-use Scf\Server\Table\PdoPoolTable;
 use Scf\Util\Arr;
-use Throwable;
 use const DBS_MASTER;
 use const DBS_SLAVE;
 
@@ -25,6 +23,7 @@ class Pdo {
         'pool' => [
             'max_open' => -1,// 最大开启连接数
             'max_idle' => -1,// 最大闲置连接数
+            'task_worker_enable' => false,
             'task_worker_max_open' => 1,
             'task_worker_max_idle' => 1,
             'max_lifetime' => 60,//连接的最长生命周期
@@ -186,9 +185,14 @@ class Pdo {
         $this->database = new DB("mysql:host={$host};port={$this->serverConfig['port']};charset={$this->serverConfig['charset']};dbname={$this->serverConfig['name']}", $this->serverConfig['username'], $this->serverConfig['password'], [\PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC], $this->actor);//, \PDO::ATTR_PERSISTENT => true, \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true
         $this->database->setConfig($this->serverConfig);
         $logger = new PdoLogger();
+        $server = Http::master();
+        $isTaskWorker = !is_null($server) && $server->taskworker;
+        if ($isTaskWorker) {
+            $isTaskWorker = true;
+            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? $this->_config['pool']['task_worker_enable'];
+        }
         if ($this->enablePool) {
-            $server = Http::master();
-            if (is_null($server) || $server->taskworker === false) {
+            if (!$isTaskWorker) {
                 $maxOpen = $this->serverConfig['pool']['max_open'] ?? $this->_config['pool']['max_open'];
                 $maxIdle = $this->serverConfig['pool']['max_idle'] ?? $this->_config['pool']['max_idle'];
             } else {

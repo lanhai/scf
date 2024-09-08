@@ -9,6 +9,7 @@ use Scf\Server\Env;
 use Scf\Server\Http;
 use Scf\Server\Table\Counter;
 use Scf\Server\Worker\ProcessLife;
+use Swoole\Timer;
 use Throwable;
 
 class PdoLogger implements ILogger {
@@ -42,10 +43,14 @@ class PdoLogger implements ILogger {
                 $executeSql = str_replace($field, $bindings[trim(str_replace(':', '', $field))] ?? '', $executeSql);
             }
         }
-        if (!is_null(Http::server())) {
-            Counter::instance()->incr('_MYSQL_EXECUTE_COUNT_' . time());
-            ProcessLife::instance()->addSql("{$executeSql}【{$time}】ms");
+        $countKey = '_MYSQL_EXECUTE_COUNT_' . time();
+        $count = Counter::instance()->incr($countKey);
+        if ($count == 1) {
+            Timer::after(2000, function () use ($countKey) {
+                Counter::instance()->delete($countKey);
+            });
         }
+        ProcessLife::instance()->addSql("{$executeSql}【{$time}】ms");
         PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql}【{$time}】ms");
         if (!is_null($exception) && !str_starts_with($executeSql, 'DESCRIBE')) {
             $backTrace = $exception->getTrace();

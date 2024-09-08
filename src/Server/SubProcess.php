@@ -44,11 +44,6 @@ class SubProcess {
                             });
                         }
                         Timer::tick(1000, function () use ($manager, $node, $server, $process) {
-                            if (Counter::instance()->exist('_REQUEST_COUNT_' . Date::leftday(2))) {
-                                Counter::instance()->delete('_REQUEST_COUNT_' . Date::leftday(2));
-                            }
-                            Counter::instance()->delete('_MYSQL_EXECUTE_COUNT_' . (time() - 5));
-                            Counter::instance()->delete('_REQUEST_COUNT_' . (time() - 5));
                             $manager->heartbeat($server, $node);
                         });
                         \Swoole\Event::wait();
@@ -56,7 +51,6 @@ class SubProcess {
                         Console::log('【Server】节点报道失败:' . Color::red($exception->getMessage()));
                     }
                 }
-
                 report($process, $server, $node);
             }
         });
