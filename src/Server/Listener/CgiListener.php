@@ -25,6 +25,7 @@ use Scf\Util\File;
 use Scf\Util\Sn;
 use Swoole\Event;
 use Swoole\ExitException;
+use Swoole\Timer;
 use Throwable;
 
 class CgiListener extends Listener {
@@ -71,6 +72,7 @@ class CgiListener extends Listener {
             return;
         }
         if (!Server::instance()->isEnable() && !$proxy) {
+            $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
                 'errCode' => 'SERVICE_UNAVAILABLE',
@@ -83,6 +85,7 @@ class CgiListener extends Listener {
         $requestCount = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
         if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
             Counter::instance()->incr('_REQUEST_REJECT_');
+            $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
                 'errCode' => 'SERVER_BUSY',
@@ -93,11 +96,23 @@ class CgiListener extends Listener {
         }
         Response::instance()->register($response);
         Request::instance()->register($request);
+        //使用原子子增值统计并发访问量
         Counter::instance()->incr('_REQUEST_COUNT_');
-        Counter::instance()->incr('_REQUEST_COUNT_' . time());
-        Counter::instance()->incr('_REQUEST_COUNT_' . Date::today());
+        $countKey = '_REQUEST_COUNT_' . time();
+        $count = Counter::instance()->incr($countKey);
+        if ($count == 1) {
+            Timer::after(2000, function () use ($countKey, $count) {
+                Counter::instance()->delete($countKey);
+            });
+        }
+        $countKeyDay = '_REQUEST_COUNT_' . Date::today();
+        $countToday = Counter::instance()->incr($countKeyDay);
+        if ($countToday == 1) {
+            Timer::after(86400 * 1000 * 2, function () use ($countKeyDay) {
+                Counter::instance()->delete($countKeyDay);
+            });
+        }
         Counter::instance()->incr('_REQUEST_PROCESSING_');
-
         if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
             $logger = Log::instance();
             $app = App::instance();
