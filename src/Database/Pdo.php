@@ -204,8 +204,8 @@ class Pdo {
             $autoPing = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['connection_auto_ping_interval'] : $this->_config['pool']['connection_auto_ping_interval'];
             $idleTimeout = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['connection_idle_timeout'] : $this->_config['pool']['connection_idle_timeout'];
             $this->database->startPool($maxOpen, $maxIdle, $maxLifetime, $waitTimeout, $autoPing, $idleTimeout, is_array($config) ? $this->serverConfig['name'] : $config);
+            $this->database->setLogger($logger);
         }
-        $this->database->setLogger($logger);
         return $this;
     }
 

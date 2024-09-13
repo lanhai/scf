@@ -78,11 +78,11 @@ class SubProcess {
 
     /**
      * 文件变更监听
-     * @param Server $server
+     * @param Server|\Swoole\Server $server
      * @param int $port
      * @return Process
      */
-    public static function createFileWatchProcess(Server $server, int $port = 0): Process {
+    public static function createFileWatchProcess(Server|\Swoole\Server $server, int $port = 0): Process {
         return new Process(function ($process) use ($server, $port) {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {

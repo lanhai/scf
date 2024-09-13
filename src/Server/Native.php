@@ -3,6 +3,7 @@
 namespace Scf\Server;
 
 use App\Window\Main;
+use Scf\Command\Manager;
 use Scf\Core\Console;
 use Scf\Command\Color;
 use Scf\Core\Result;
@@ -11,10 +12,8 @@ use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Native\App;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
-use Scf\Root;
 use Scf\Server\Runtime\Table;
 use Scf\Server\Table\Runtime;
-use Scf\Util\Dir;
 use Swoole\Coroutine;
 use Swoole\Timer;
 use Swoole\Server;
@@ -138,11 +137,12 @@ class Native {
                 $server->shutdown();
             } else {
                 Console::success('IPC服务器启动成功,listen:' . $port);
-                if (Env::isDev()) {
-                    $this->server->addProcess(SubProcess::createFileWatchProcess($this->server));
-                }
             }
         });
+        //启动文件监听进程
+        if (Env::isDev()) {
+            $this->server->addProcess(SubProcess::createFileWatchProcess($this->server));
+        }
         $this->server->start();
     }
 

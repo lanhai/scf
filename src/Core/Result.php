@@ -79,7 +79,7 @@ class Result {
      */
     public function getData(string $key = null): mixed {
         if (!is_null($key)) {
-            return $this->data['data'][$key] ?? "";
+            return $this->data['data'][$key] ?? null;
         }
         return $this->data['data'];
     }
