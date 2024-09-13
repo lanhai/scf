@@ -119,7 +119,7 @@ return [
         'pool' => [
             'max_open' => 32,// 最大开启连接数
             'max_idle' => 8,// 最大闲置连接数
-            'task_worker_enable' => true,
+            'task_worker_enable' => true,// 任务进程启用连接池
             'task_worker_max_open' => 1,
             'task_worker_max_idle' => 1,
             'max_lifetime' => 3600,//连接的最长生命周期

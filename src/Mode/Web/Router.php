@@ -14,7 +14,7 @@ class Router {
 
     protected array $_config = [
         // 默认模块
-        'default_module' => 'Index',
+        'default_module' => 'Controller',
         // 默认控制器
         'default_controller' => 'Index',
         // 默认动作
@@ -221,7 +221,7 @@ class Router {
 
         $map = [];
         $this->_partitions = [];
-        $this->_module = StringHelper::lower2camel($pathinfo[0] ?? $this->_config['default_module']);
+        $this->_module = StringHelper::lower2camel($pathinfo[0] ?? ($moduleStyle == APP_MODULE_STYLE_LARGE ? 'Index' : $this->_config['default_module']));
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
             $this->_module = 'Controller';
         }
@@ -279,7 +279,7 @@ class Router {
      * 生成URL
      *
      * 例如:
-     * url('Index') --> /home/index/index
+     * url('Controller') --> /home/index/index
      * url('User/Profile') --> /home/user/profile
      * url('Admin/User/Profile', array('name'=>'hypo')) --> /admin/user/profile?name=hypo
      * url('@/User/Profile') --> /home/user/profile
