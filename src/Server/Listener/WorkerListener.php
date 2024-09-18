@@ -56,7 +56,7 @@ INFO;
             if ($enableStatistics && App::isMaster()) {
                 StatisticModel::instance()->updateDB();
             }
-            Http::instance()->enable();
+            Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
             Runtime::instance()->set('SERVER_START_STATUS', true);
             //启动任务管理器
 //            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
