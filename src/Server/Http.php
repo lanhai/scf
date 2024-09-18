@@ -306,6 +306,7 @@ class Http extends \Scf\Core\Server {
             'TaskListener'
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
+            $this->disable();
             //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
@@ -464,7 +465,6 @@ INFO;
         $version = $updater->getVersion();
         if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
             //强制更新
-            $this->disable();
             Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
             if ($updater->updateApp()) {
                 $this->reload();
@@ -507,7 +507,6 @@ INFO;
      * @return bool
      */
     public function appointUpdateTo($type, $version): bool {
-        $type == 'app' and $this->disable();
         if (Updater::instance()->appointUpdateTo($type, $version)) {
             $type == 'app' and $this->reload();
             return true;
@@ -527,7 +526,6 @@ INFO;
         if (!$updater->hasNewAppVersion()) {
             return false;
         }
-        $this->disable();
         if (!is_null($version)) {
             Log::instance()->info('开始执行更新:' . $version);
             if ($updater->changeAppVersion($version)) {

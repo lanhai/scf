@@ -84,7 +84,7 @@ class App extends Lifetime {
             //查找子目录控制器
             if (!class_exists($ctrlClass)) {
                 $method = $router->getFragment(2) ?: 'index';
-                $router->fixPartition('module', StringHelper::lower2camel($router->getFragment(0)));
+                $router->fixPartition('module', StringHelper::lower2camel($router->getFragment(0) ?: 'Index'));
                 $router->fixPartition('controller', StringHelper::lower2camel($router->getAction()));
                 $router->fixPartition('action', StringHelper::lower2camel($method));
                 $ctrlClass = self::buildControllerPath('Controller', $router->getModule(), $router->getController());
