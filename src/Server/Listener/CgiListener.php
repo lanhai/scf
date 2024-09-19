@@ -71,7 +71,8 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
-        if (!Server::instance()->isEnable() && !$proxy) {
+        $status = Runtime::instance()->get('_SERVER_STATUS_');
+        if ((int)$status == STATUS_OFF && !$proxy) {
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
