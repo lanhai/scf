@@ -9,6 +9,7 @@ use PDOException;
 use Scf\Command\Color;
 use Scf\Component\Cache;
 use Scf\Core\App;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Core\Struct;
@@ -540,11 +541,12 @@ class Dao extends Struct {
         $key = $latest['db'] . '_' . $latest['table'];
         $versionFile = APP_PATH . '/db/updates/' . $key . '.yml';
         $current = file_exists($versionFile) ? Yaml::parseFile($versionFile) : null;
+        $conf = Config::get('database')['mysql'];
         if (!$current || !$this->tableExist()) {
             if (!$this->createTable($latest['create'])) {
-                Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::red('创建失败'));
+                Console::log("【Database】{$conf[$latest['db']]['name']}.{$latest['table']} " . Color::red('创建失败'));
             } else {
-                Console::log("【Database】{$latest['db']}.{$latest['table']} " . Color::success('创建成功'));
+                Console::log("【Database】{$conf[$latest['db']]['name']}.{$latest['table']} " . Color::success('创建成功'));
                 File::write($versionFile, Yaml::dump($latest, 3));
             }
         } elseif ($current['version'] !== $latest['version']) {
@@ -598,10 +600,10 @@ class Dao extends Struct {
             foreach ($sqlStatements as $sql) {
                 try {
                     Pdo::master($this->getDb())->getDatabase()->exec($sql)->get();
-                    Console::success($sql . "=>执行成功");
+                    Console::success("【Database】" . $sql . "=>执行成功");
                 } catch (Throwable $exception) {
                     $hasError = true;
-                    Console::error($sql . "=>" . $exception->getMessage());
+                    Console::error("【Database】" . $sql . "=>" . $exception->getMessage());
                 }
             }
             update:

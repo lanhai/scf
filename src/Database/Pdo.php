@@ -3,6 +3,7 @@
 namespace Scf\Database;
 
 use PDOException;
+use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Database\Logger\PdoLogger;
@@ -109,10 +110,10 @@ class Pdo {
                 //Console::warning("数据库`$dbName`不存在,尝试创建");
                 $createDbSQL = "CREATE DATABASE IF NOT EXISTS `$dbName` CHARACTER SET '$charset' COLLATE utf8mb4_general_ci";
                 $pdo->exec($createDbSQL);
-                Console::success("数据库`$dbName`不存在,创建成功");
+                Console::log("【Database】$dbName " . Color::green('创建成功'));
             }
         } catch (PDOException $e) {
-            Console::error("检查数据库失败:" . $e->getMessage());
+            Console::error("【Database】检查数据库失败:" . $e->getMessage());
             return false;
         }
         return true;

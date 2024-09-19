@@ -1,0 +1,57 @@
+dao: Scf/Database/Statistics/Dao/StatisticdRecordDAO
+db: history
+table: t_statistics_record
+version: '20240919084156'
+create: "CREATE TABLE `t_statistics_record` (`id` int NOT NULL AUTO_INCREMENT,`mch_id` int COMMENT '商户ID',`scene` varchar(50) COMMENT '模块',`data_id` varchar(32) COMMENT '模块数据ID',`usr_id` int DEFAULT '0' COMMENT '访客uid',`guest_id` varchar(32) COMMENT '访客ID',`ip` varchar(50) COMMENT '访客IP',`trigger_time` int COMMENT '访问时间',`trigger_times` int DEFAULT '1' COMMENT '总访问次数',`updated` int,`search_key` varchar(32),PRIMARY KEY (`id`), INDEX `data_id`(`data_id` ASC) USING BTREE, UNIQUE INDEX `id`(`id` ASC) USING BTREE, INDEX `mch_id`(`mch_id` ASC) USING BTREE, INDEX `scene`(`scene` ASC) USING BTREE, UNIQUE INDEX `search_key`(`search_key` ASC) USING BTREE)"
+columns:
+    id:
+        content: '`id` int NOT NULL AUTO_INCREMENT'
+        hash: b3ba00e355cbb0ab647b8d3f4e94636a
+    mch_id:
+        content: "`mch_id` int COMMENT '商户ID' AFTER `id`"
+        hash: 0ec17fffcabe4bb59062d666ccf8b523
+    scene:
+        content: "`scene` varchar(50) COMMENT '模块' AFTER `mch_id`"
+        hash: a25132164b42e1d441fa903f39d7e46d
+    data_id:
+        content: "`data_id` varchar(32) COMMENT '模块数据ID' AFTER `scene`"
+        hash: ba5df52dd432c66338b0aa12f4abdf77
+    usr_id:
+        content: "`usr_id` int DEFAULT '0' COMMENT '访客uid' AFTER `data_id`"
+        hash: 94ceb521543a9779e9c6f748fae07962
+    guest_id:
+        content: "`guest_id` varchar(32) COMMENT '访客ID' AFTER `usr_id`"
+        hash: d6e90de631e46fe64200113f06ebc384
+    ip:
+        content: "`ip` varchar(50) COMMENT '访客IP' AFTER `guest_id`"
+        hash: 39f6ba44d8b54cde52306d9ac1a90074
+    trigger_time:
+        content: "`trigger_time` int COMMENT '访问时间' AFTER `ip`"
+        hash: 69ea75c66f63a0fb453a02806eba8e76
+    trigger_times:
+        content: "`trigger_times` int DEFAULT '1' COMMENT '总访问次数' AFTER `trigger_time`"
+        hash: 7ee26cda068902aceb9d18d3a44afa22
+    updated:
+        content: '`updated` int AFTER `trigger_times`'
+        hash: 5d47305b951821d13872f7cd0cf48927
+    search_key:
+        content: '`search_key` varchar(32) AFTER `updated`'
+        hash: e0afe9e9d67b7362523ead79ed4c4276
+primary:
+    - '`id`'
+index:
+    data_id:
+        content: 'INDEX `data_id`(`data_id` ASC) USING BTREE'
+        hash: b146ad327d0f2756fae3c00a2665c986
+    id:
+        content: 'UNIQUE INDEX `id`(`id` ASC) USING BTREE'
+        hash: 8f8a959359f1a8028baecdd95e0c3cdb
+    mch_id:
+        content: 'INDEX `mch_id`(`mch_id` ASC) USING BTREE'
+        hash: 32935d7dd3ae7cb4bb01a2f89f92e5a5
+    scene:
+        content: 'INDEX `scene`(`scene` ASC) USING BTREE'
+        hash: 403f39f095185c2197dee22f4efb6f1b
+    search_key:
+        content: 'UNIQUE INDEX `search_key`(`search_key` ASC) USING BTREE'
+        hash: fabe48fe106afb223b99471dc0cfd609
