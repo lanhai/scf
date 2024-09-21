@@ -310,7 +310,8 @@ class App {
      * @return string|null
      */
     public static function version(): ?string {
-        return self::installer()->version;
+        $vision = require App::src() . '/version.php';
+        return $vision['version'];
     }
 
     /**
