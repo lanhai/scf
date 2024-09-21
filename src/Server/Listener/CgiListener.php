@@ -141,7 +141,7 @@ class CgiListener extends Listener {
                 if ($exception instanceof ExitException) {
                     if (!Response::instance()->isEnd()) {
                         $app->handleError([
-                            'code' => 503,
+                            'code' => 501,
                             'error' => $exception->getStatus(),
                             'file' => $exception->getFile(),
                             'line' => $exception->getLine(),
