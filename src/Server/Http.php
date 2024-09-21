@@ -306,7 +306,7 @@ class Http extends \Scf\Core\Server {
             'TaskListener'
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
-            $this->disable();
+            //$this->disable();
             //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
