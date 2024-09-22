@@ -118,10 +118,10 @@ class Redis extends Cache {
                 throw new AppError('未配置redis服务器地址');
             }
             $this->connection = new RedisPool($config['host'], $config['port'], $config['auth'], 0);
-            $maxIdle = $config['max_idle'] ?? 16;        // 最大闲置连接数
+            $maxIdle = $config['max_idle'] ?? 32;        // 最大闲置连接数
             $maxLifetime = $config['max_life_time'] ?? 3600;  // 连接的最长生命周期
             $waitTimeout = $config['wait_timeout'] ?? 0.0;   // 从池获取连接等待的时间, 0为一直等待
-            $this->connection->start($config['size'], $maxIdle, $maxLifetime, $waitTimeout);
+            $this->connection->start($config['size'] ?? 16, $maxIdle, $maxLifetime, $waitTimeout);
             $logger = new RedisLogger();
             $this->connection->setLogger($logger);
         } catch (RedisException $exception) {

@@ -22,7 +22,6 @@ class TaskListener extends Listener {
         try {
             $hander::instance()->execute($task);
         } catch (Throwable $throwable) {
-            var_dump($throwable->getTrace()[0]);
             Log::instance()->error("【Task】任务执行失败:" . $throwable->getMessage());
         }
     }
