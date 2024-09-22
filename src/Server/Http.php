@@ -306,7 +306,8 @@ class Http extends \Scf\Core\Server {
             'TaskListener'
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
-            //$this->disable();
+            $this->log(Color::yellow('服务器正在重启'));
+            $this->disable();
             //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
@@ -331,7 +332,7 @@ class Http extends \Scf\Core\Server {
         });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
-            Console::warning('服务器即将关闭');
+            $this->log(Color::red('服务器即将关闭'));
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
