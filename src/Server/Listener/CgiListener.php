@@ -84,7 +84,7 @@ class CgiListener extends Listener {
         }
         $mysqlExecuteCount = Counter::instance()->get('_MYSQL_EXECUTE_COUNT_' . (time() - 1)) ?: 0;
         $requestCount = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
-        if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
+        if (($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) && !$proxy) {
             Counter::instance()->incr('_REQUEST_REJECT_');
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);

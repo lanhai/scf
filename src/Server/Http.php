@@ -67,11 +67,6 @@ class Http extends \Scf\Core\Server {
     protected int $restartTimes = 0;
 
     /**
-     * @var bool 服务是否可用
-     */
-    protected bool $serviceEnable = false;
-
-    /**
      * @param $role
      * @param string $host
      * @param int $port
@@ -307,7 +302,7 @@ class Http extends \Scf\Core\Server {
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
-            $this->disable();
+            Runtime::instance()->set('_SERVER_STATUS_', STATUS_OFF);
             //增加服务器重启次数计数
             $this->restartTimes += 1;
             Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
@@ -336,6 +331,7 @@ class Http extends \Scf\Core\Server {
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
+            Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
@@ -448,8 +444,6 @@ INFO;
             if ($updater->updateApp()) {
                 $this->reload();
             }
-        } else {
-            $this->enable();
         }
         $pid = Coroutine::create(function () use ($version) {
             $this->autoUpdate();
@@ -512,8 +506,6 @@ INFO;
         if (Updater::instance()->appointUpdateTo($type, $version)) {
             $type == 'app' and $this->reload();
             return true;
-        } else {
-            $this->enable();
         }
         return false;
     }
@@ -534,7 +526,6 @@ INFO;
                 $this->reload();
                 return true;
             } else {
-                $this->enable();
                 Log::instance()->info('更新失败:' . $version);
             }
         } else {
@@ -544,7 +535,6 @@ INFO;
                 $this->reload();
                 return true;
             } else {
-                $this->enable();
                 Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
             }
         }
@@ -569,34 +559,6 @@ INFO;
         }
     }
 
-
-    /**
-     * 设置服务为可用状态
-     * @return void
-     */
-    public function enable(): void {
-        $this->serviceEnable = true;
-        Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
-    }
-
-    /**
-     * 设置服务为不可用状态
-     * @return void
-     */
-    public function disable(): void {
-        $this->serviceEnable = false;
-        Runtime::instance()->set('_SERVER_STATUS_', STATUS_OFF);
-    }
-
-    /**
-     * 服务是否可用
-     * @return bool
-     */
-    public function isEnable(): bool {
-        $status = Runtime::instance()->get('_SERVER_STATUS_');
-        $this->serviceEnable = $status == STATUS_ON;
-        return $this->serviceEnable;
-    }
 
     /**
      * @return string|null
