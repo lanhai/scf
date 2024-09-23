@@ -40,7 +40,8 @@ class MasterDB {
             'db_index' => 0,
             'time_out' => 10,//连接超时时间
             'size' => 32,
-            'max_idle' => 16
+            'max_idle' => 16,
+            'key_prefix' => ''
         ]);
         if ($pool instanceof NullPool) {
             if ($this->latestError['msg'] == $pool->getError() && time() - $this->latestError['time'] > 30) {

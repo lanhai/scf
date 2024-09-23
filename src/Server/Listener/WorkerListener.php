@@ -56,6 +56,7 @@ INFO;
                 StatisticModel::instance()->updateDB();
             }
             Runtime::instance()->set('SERVER_START_STATUS', true);
+            Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
             //启动任务管理器
 //            $reloadTimes = Counter::instance()->get('_HTTP_SERVER_RESTART_COUNT_') ?? 0;
 //            $serverConifg = Config::server();
