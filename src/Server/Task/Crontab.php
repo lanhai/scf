@@ -199,8 +199,7 @@ class Crontab {
      */
     public function isAlive(int $id = 1): bool {
         if ($this->isOrphan()) {
-            Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
-            //Timer::clearAll();
+            //Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
             return false;
         } elseif ($id !== $this->id) {
             return false;

@@ -16,7 +16,7 @@ use Scf\Util\Arr;
 use Throwable;
 
 class Redis extends Cache {
-    protected string $keyPrefix = APP_ID;
+    protected string $keyPrefix = '';
 
     protected array $_config = [
         'ttl' => 3600,//缺省生存时间
@@ -124,6 +124,7 @@ class Redis extends Cache {
             $this->connection->start($config['size'] ?? 16, $maxIdle, $maxLifetime, $waitTimeout);
             $logger = new RedisLogger();
             $this->connection->setLogger($logger);
+            $this->keyPrefix = $config["key_prefix"] ?? APP_ID;
         } catch (RedisException $exception) {
             $msg = '【Redis】[' . $config['host'] . ':' . $config['port'] . ']创建连接池失败：' . $exception->getMessage();
             throw new AppError($msg);

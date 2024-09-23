@@ -321,7 +321,6 @@ class Http extends \Scf\Core\Server {
         });
         $this->server->on("AfterReload", function () {
             $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
-            Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
             //重置执行中的请求数统计
             Counter::instance()->set('_REQUEST_PROCESSING_', 0);
         });
@@ -331,7 +330,6 @@ class Http extends \Scf\Core\Server {
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
-            Runtime::instance()->set('_SERVER_STATUS_', STATUS_ON);
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
