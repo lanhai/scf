@@ -34,11 +34,10 @@ class CgiListener extends Listener {
     /**
      * @param \Swoole\Http\Request $request
      * @param \Swoole\Http\Response $response
-     * @param bool $proxy
      * @return void
      * @throws Exception
      */
-    public function onRequest(\Swoole\Http\Request $request, \Swoole\Http\Response $response, bool $proxy = false): void {
+    public function onRequest(\Swoole\Http\Request $request, \Swoole\Http\Response $response): void {
 //        register_shutdown_function(function () use ($response) {
 //            $error = error_get_last();
 //            switch ($error['type'] ?? null) {
@@ -72,7 +71,7 @@ class CgiListener extends Listener {
             return;
         }
         $status = Runtime::instance()->get('_SERVER_STATUS_');
-        if ((int)$status == STATUS_OFF && !$proxy) {
+        if ((int)$status == STATUS_OFF) {
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
@@ -84,7 +83,9 @@ class CgiListener extends Listener {
         }
         $mysqlExecuteCount = Counter::instance()->get('_MYSQL_EXECUTE_COUNT_' . (time() - 1)) ?: 0;
         $requestCount = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
-        if (($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) && !$proxy) {
+//        $serverStatus = $this->server->stats();
+//        $requestCount = $serverStatus['connection_num'] ?? 0;
+        if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
             Counter::instance()->incr('_REQUEST_REJECT_');
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);

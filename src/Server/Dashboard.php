@@ -183,12 +183,11 @@ class Dashboard {
                     }
                     Response::instance()->register($response);
                     Request::instance()->register($request);
+                    $httpPort = Runtime::instance()->get('HTTP_PORT') ?: 9580;
                     try {
                         $controller = new DashboardController();
                         $method = 'action' . StringHelper::lower2camel(str_replace("/", "_", substr($request->server['path_info'], 1)));
                         if (!method_exists($controller, $method)) {
-//                            $cgi = new CgiListener();
-//                            $cgi->onRequest($request, $response, true);
                             if ($method == 'actionReload') {
                                 $this->_SERVER->reload();
                                 return;
@@ -199,9 +198,9 @@ class Dashboard {
                                 $path .= '?' . $request->server['query_string'];
                             }
                             if (SERVER_HOST_IS_IP) {
-                                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . ($port - 2);
+                                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $httpPort;
                             } else {
-                                $dashboardHost = PROTOCOL_HTTP . ($port - 2) . '.' . SERVER_HOST;
+                                $dashboardHost = PROTOCOL_HTTP . $httpPort . '.' . SERVER_HOST;
                             }
                             $client = \Scf\Client\Http::create($dashboardHost . $path);
                             foreach ($request->header as $key => $value) {

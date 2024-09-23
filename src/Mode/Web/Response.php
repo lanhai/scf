@@ -59,7 +59,7 @@ class Response {
      * @param int $status
      * @return void
      */
-    public static function error($error, string $code = 'SERVICE_ERROR', mixed $data = '', int $status = 503): void {
+    public static function error($error, string $code = 'SERVICE_ERROR', mixed $data = '', int $status = 500): void {
         if ($error instanceof Result) {
             $output = [
                 'errCode' => $error->getErrCode(),
