@@ -4,6 +4,7 @@ namespace Scf\Server\Task;
 
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
 use Scf\Cache\Redis;
@@ -72,12 +73,11 @@ class RQueue {
                 });
             }
         }
-        //Counter::instance()->incr('_background_process_id_');
-        $this->managerId = Counter::instance()->get('_background_process_id_');
+        $this->managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         Coroutine::create(function () use ($mc) {
             //每一秒读取一次队列列表
             Timer::tick(1000, function ($tickerId) use ($mc) {
-                $latestManagerId = Counter::instance()->get('_background_process_id_');
+                $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                 if ($this->managerId != $latestManagerId) {
                     Timer::clear($tickerId);
                 }
@@ -93,30 +93,6 @@ class RQueue {
             });
         });
         return $this->managerId;
-//        Coroutine::create(function () use ($mc) {
-//            while (true) {
-//                if ($this->managerId != Counter::instance()->get('_background_process_id_')) {
-//                    break;
-//                }
-//                if ($count = $this->count()) {
-//                    $channel = new Channel($count);
-//                    for ($i = 0; $i < min($count, $mc); $i++) {
-//                        Coroutine::create(function () use ($channel) {
-//                            $channel->push($this->pop());
-//                        });
-//                    }
-//                    $successed = 0;
-//                    for ($i = 0; $i < min($count, $mc); $i++) {
-//                        $successed += $channel->pop() ? 1 : 0;
-//                    }
-//                    Console::log('本次累计执行队列任务:' . $count . ',执行成功:' . $successed);
-//                }
-//                Coroutine::sleep(0.01);
-//            }
-//            Coroutine::defer(function () {
-//                Console::log(Color::yellow('销毁队列监听孤儿协程:' . $this->managerId));
-//            });
-//        });
     }
 
     /**

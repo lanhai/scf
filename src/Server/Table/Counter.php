@@ -11,7 +11,7 @@ class Counter extends Table {
      * @var array
      */
     protected array $_config = [
-        'size' => 2048,
+        'size' => 1024,
         'colums' => [
             '_value' => ['type' => \Swoole\Table::TYPE_INT, 'size' => 0],
         ]

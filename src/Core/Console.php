@@ -125,16 +125,7 @@ class Console {
             hint: $hint ?: ''
         );
     }
-//    /**
-//     * 接收控制台输入内容
-//     * @param null $msg
-//     * @param bool $break
-//     * @return string
-//     */
-//    public static function input($msg = null, bool $break = true): string {
-//        !is_null($msg) and self::write($msg ?: '请输入内容', $break);
-//        return self::receive();
-//    }
+
     /**
      * @param array $options
      * @param mixed $default 当start为0时默认值为第n个元素键值;为1时默认值为index:n
@@ -165,15 +156,6 @@ class Console {
             scroll: $scroll
         );
     }
-
-//    public static function select($options = []): string {
-//        self::line();
-//        foreach ($options as $k => $app) {
-//            Console::write(($k + 1) . ':' . ($app['name'] ?? $app));
-//        }
-//        self::line();
-//        return self::input('输入要进行的操作编号:', false);
-//    }
 
     /**
      * 开始loading
@@ -284,14 +266,11 @@ class Console {
     public static function log(string $str, bool $push = true): void {
         if (defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
             Coroutine::create(function () use ($str) {
-                $port = defined('SERVER_PORT') ? SERVER_PORT : 9580;
+                $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
                 $client = Http::create('http://localhost:' . $port . '/@console.message@/');
-                $result = $client->post([
+                $client->post([
                     'message' => $str
                 ]);
-                if ($result->hasError() && (int)$client->statusCode() !== 503) {
-                    //self::warning('向socket客户端推送失败:' . $result->getMessage(), false);
-                }
                 defer(function () use ($client) {
                     $client->close();
                 });

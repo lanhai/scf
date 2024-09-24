@@ -2,6 +2,7 @@
 
 namespace Scf\Server;
 
+use Scf\Core\Key;
 use Scf\Core\Traits\EnumMatcher;
 use Scf\Util\Date;
 
@@ -11,7 +12,7 @@ enum Keys: string {
     /**
      * 收到请求
      */
-    case REQUEST_COUNT = '_REQUEST_COUNT_';
+    case REQUEST_COUNT = Key::COUNTER_REQUEST;
 
     /**
      * 实时请求

@@ -2,6 +2,8 @@
 
 namespace Scf\Core;
 
+use Throwable;
+
 abstract class Server {
 
     protected static Server $_SERVER;
@@ -28,6 +30,28 @@ abstract class Server {
      */
     protected function log(string $str): void {
         Console::log("【Server】" . $str, false);
+    }
+
+    /**
+     * 获取可用端口
+     * @param $port
+     * @return int
+     */
+    public static function getUseablePort($port): int {
+        try {
+            $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+            if ($socket === false) {
+                return $port;
+            }
+            $result = @socket_bind($socket, '0.0.0.0', $port);
+            socket_close($socket);
+            if ($result === false) {
+                return self::getUseablePort($port + 1);
+            }
+        } catch (Throwable) {
+            return self::getUseablePort($port + 1);
+        }
+        return $port;
     }
 
 }

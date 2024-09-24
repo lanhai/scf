@@ -56,10 +56,10 @@ class MasterDB {
         });
         Event::wait();
         if (!Process::kill($masterDbPid, 0)) {
-            Console::error('MasterDB服务启动失败');
+            Console::error('【MasterDB】服务启动失败');
             exit();
         } else {
-            Console::success("MasterDB服务启动完成!PID:" . $masterDbPid);
+            Console::info("【MasterDB】服务启动完成!PID:" . $masterDbPid . ",PORT:" . $port);
         }
     }
 

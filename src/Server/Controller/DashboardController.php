@@ -357,7 +357,7 @@ class DashboardController extends Controller {
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
             $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         } else {
-            $socketHost = $protocol . 'localhost:' . Runtime::instance()->get('SOCKET_PORT');
+            $socketHost = $protocol . 'localhost:' . Runtime::instance()->socketPort();
         }
         $status = Manager::instance()->getStatus();
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');

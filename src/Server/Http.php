@@ -2,10 +2,10 @@
 
 namespace Scf\Server;
 
-use Exception;
 use Scf\App\Updater;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
@@ -61,10 +61,6 @@ class Http extends \Scf\Core\Server {
      * @var int 启动时间
      */
     protected int $started = 0;
-    /**
-     * @var int 重启次数
-     */
-    protected int $restartTimes = 0;
 
     /**
      * @param $role
@@ -97,37 +93,6 @@ class Http extends \Scf\Core\Server {
         return self::$_instances[$class];
     }
 
-    /**
-     * 获取可用端口
-     * @param $port
-     * @return int
-     */
-    public static function getUseablePort($port): int {
-        try {
-            $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-            if ($socket === false) {
-                return $port;
-            }
-            $result = @socket_bind($socket, '0.0.0.0', $port);
-            socket_close($socket);
-            if ($result === false) {
-                return self::getUseablePort($port + 1);
-            }
-        } catch (Exception) {
-            return self::getUseablePort($port + 1);
-        }
-        return $port; // 端口未被占用
-//        try {
-//            $server = new \Swoole\Server('0.0.0.0', $port, SWOOLE_BASE);
-//            if ($server->getLastError() === 0) {
-//                $server->shutdown();
-//                return $port;
-//            }
-//            return self::getUseablePort($port + 1);
-//        } catch (Exception) {
-//            return self::getUseablePort($port + 1);
-//        }
-    }
 
     public static function bgs(): void {
         MasterDB::start();
@@ -137,42 +102,22 @@ class Http extends \Scf\Core\Server {
      * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
      * @param $config
      */
-//    public static function startMasterProcess($config) {
-//        $process = new Process(function () use ($config) {
-//            $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
-//            $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
-//            Counter::instance()->incr('_background_process_id_');
-//            define('IS_CRONTAB_PROCESS', true);
-//            while (true) {
-//                if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
-//                    Runtime::instance()->set('_background_process_status_', STATUS_ON);
-//                    Crontab::startProcess();
-//                    if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-//                        $runQueueInMaster and RQueue::startProcess();
-//                    }
-//                }
-//                usleep(1000 * 1000 * 30);
-//            }
-//        });
-//        $pid = $process->start();
-//        Console::success('Background Process PID:' . Color::info($pid));
-//    }
     protected function addCrontabProcess($config): void {
         $process = new Process(function () use ($config) {
             //等待服务器启动完成
             while (true) {
-                if (Runtime::instance()->get('SERVER_START_STATUS')) {
+                if (Runtime::instance()->serverStatus()) {
                     break;
                 }
                 sleep(3);
             }
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
-            Counter::instance()->incr('_background_process_id_');
+            Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
-                if (Runtime::instance()->get('_background_process_status_') == STATUS_OFF) {
-                    Runtime::instance()->set('_background_process_status_', STATUS_ON);
+                if (!Runtime::instance()->crontabProcessStatus()) {
+                    Runtime::instance()->crontabProcessStatus(true);
                     $pid = Crontab::startProcess();
                     Console::info('【Server】定时任务PID:' . $pid);
                     if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
@@ -200,7 +145,7 @@ class Http extends \Scf\Core\Server {
             'Scf\Server\Table\Runtime',
             'Scf\Server\Table\RouteTable',
         ]);
-        Runtime::instance()->set('SERVER_START_STATUS', false);
+        Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
         Dashboard::start();
         //启动masterDB(redis协议)服务器
@@ -249,49 +194,52 @@ class Http extends \Scf\Core\Server {
             $setting['http_index_files'] = ['index.html'];
             $setting['static_handler_locations'] = $serverConfig['static_handler_locations'] ?? ['/cp', '/asset'];
         }
-        Runtime::instance()->set('allow_cross_origin', $serverConfig['allow_cross_origin'] ?? false);
+        //是否允许跨域请求
+        define('ALLOW_CROSS_ORIGIN', $serverConfig['allow_cross_origin'] ?? false);
         $this->server->set($setting);
         //监听HTTP请求
         try {
-            $httpPort = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
-            $httpPort->set([
+            $httpPortListener = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
+            $httpPortListener->set([
                 'package_max_length' => $serverConfig['package_max_length'] ?? 8 * 1024 * 1024,
                 'open_http_protocol' => true,
                 'open_http2_protocol' => true,
                 'open_websocket_protocol' => true
             ]);
-            Runtime::instance()->set('HTTP_PORT', $this->bindPort);
+            Runtime::instance()->httpPort($this->bindPort);
         } catch (Throwable $exception) {
             Console::log(Color::red('http服务端口监听启动失败:' . $exception->getMessage()));
             exit(1);
         }
         //监听SOCKET请求
         try {
-            $socketPort = $this->server->listen($this->bindHost, ($this->bindPort + 1), SWOOLE_SOCK_TCP);
-            $socketPort->set([
+            $socketPort = self::getUseablePort($this->bindPort + 1);
+            $socketPortListener = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
+            $socketPortListener->set([
                 'open_http_protocol' => false,
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => true
             ]);
-            Runtime::instance()->set('SOCKET_PORT', $this->bindPort + 1);
+            Runtime::instance()->socketPort($socketPort);
         } catch (Throwable $exception) {
             Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
             exit(1);
         }
         //监听RPC服务(tcp)请求
-        try {
-            /** @var Server $rpcPort */
-            $rpcPortNum = $serverConfig['rpc_port'] ?? ($this->bindPort + 5);
-            $rpcPort = $this->server->listen('0.0.0.0', $rpcPortNum, SWOOLE_SOCK_TCP);
-            $rpcPort->set([
-                'open_http_protocol' => false,
-                'open_http2_protocol' => false,
-                'open_websocket_protocol' => false
-            ]);
-            Runtime::instance()->set('RPC_PORT', $rpcPortNum);
-        } catch (Throwable $exception) {
-            Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
-            exit(1);
+        if (isset($serverConfig['rpc_port'])) {
+            try {
+                /** @var Server $rpcPort */
+                $rpcPort = $this->server->listen('0.0.0.0', $serverConfig['rpc_port'], SWOOLE_SOCK_TCP);
+                $rpcPort->set([
+                    'open_http_protocol' => false,
+                    'open_http2_protocol' => false,
+                    'open_websocket_protocol' => false
+                ]);
+                Runtime::instance()->rpcPort($serverConfig['rpc_port']);
+            } catch (Throwable $exception) {
+                Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
+                exit(1);
+            }
         }
         Listener::register([
             'SocketListener',
@@ -302,12 +250,11 @@ class Http extends \Scf\Core\Server {
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
-            Runtime::instance()->set('_SERVER_STATUS_', STATUS_OFF);
+            Runtime::instance()->serverStatus(false);
             //增加服务器重启次数计数
-            $this->restartTimes += 1;
-            Counter::instance()->incr('_HTTP_SERVER_RESTART_COUNT_');
+            Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
             //后台定时任务ID迭代
-            Counter::instance()->incr('_background_process_id_');
+            Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {
@@ -320,9 +267,9 @@ class Http extends \Scf\Core\Server {
             }
         });
         $this->server->on("AfterReload", function () {
-            $this->log(Color::notice('第' . $this->restartTimes . '次重启完成'));
+            $this->log(Color::notice('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成'));
             //重置执行中的请求数统计
-            Counter::instance()->set('_REQUEST_PROCESSING_', 0);
+            Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
         });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
@@ -334,6 +281,8 @@ class Http extends \Scf\Core\Server {
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
             define("SERVER_MANAGER_PID", $managerPid);
+            $this->log(Color::cyan("主进程PID:" . $masterPid));
+            $this->log(Color::cyan("管理进程PID:" . $managerPid));
             File::write(SERVER_MANAGER_PID_FILE, $managerPid);
             $scfVersion = SCF_VERSION;
             $role = SERVER_ROLE;
@@ -347,25 +296,23 @@ class Http extends \Scf\Core\Server {
             $version = swoole_version();
             $fingerprint = APP_FINGERPRINT;
             $info = <<<INFO
----------Server启动完成---------
-监听地址：{$this->bindHost}:{$port}
+------------------Server启动完成------------------
+监听端口：{$port}
 主机地址：{$host}
 应用指纹：{$fingerprint}
 运行系统：{$os}
+运行环境：{$env}
+运行模式：{$mode}
 节点名称：{$alias}
 节点角色：{$role}
-应用环境：{$env}
-运行模式：{$mode}
-管理进程：{$managerPid}
 文件加载：{$files}
-SW版本号：{$version}
+环境版本：{$version}
 框架版本：{$scfVersion}
-Worker：{$serverConfig['worker_num']}
-Task Worker：{$serverConfig['task_worker_num']}
-Master:$masterPid
---------------------------------
+工作进程：{$serverConfig['worker_num']}
+任务进程：{$serverConfig['task_worker_num']}
+--------------------------------------------------
 INFO;
-            Console::write(Color::info($info));
+            Console::write(Color::cyan($info));
             //自动更新
             APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
         });
@@ -396,7 +343,7 @@ INFO;
         $node->ip = $this->ip;
         $node->fingerprint = APP_FINGERPRINT;
         $node->port = $this->bindPort;
-        $node->socketPort = Runtime::instance()->get('SOCKET_PORT');
+        $node->socketPort = Runtime::instance()->socketPort();
         $node->role = \Scf\Core\App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
         $node->restart_times = 0;
@@ -581,6 +528,10 @@ INFO;
         return $this->server;
     }
 
+
+    public static function allowCrossOrigin(): bool {
+        return defined('ALLOW_CROSS_ORIGIN') && ALLOW_CROSS_ORIGIN;
+    }
 
     public static function server(): ?Server {
         try {

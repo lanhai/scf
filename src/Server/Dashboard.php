@@ -8,7 +8,6 @@ use Scf\Core\Result;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\App;
-use Scf\Mode\Web\Log;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Command\Color;
@@ -104,31 +103,6 @@ class Dashboard {
         if (!is_null($this->_SERVER)) {
             $this->_SERVER->reload();
         } else {
-            //检查是否存在异常进程
-//            $pid = 0;
-//            Coroutine::create(function () use (&$pid) {
-//                $pid = File::read(SERVER_DASHBOARD_PID_FILE);
-//            });
-//            Event::wait();
-//            if ($pid && Process::kill($pid, 0)) {
-//                Process::kill($pid, SIGKILL);
-//                $time = time();
-//                while (true) {
-//                    usleep(1000);
-//                    if (!Process::kill($pid, 0)) {
-//                        if (is_file(SERVER_DASHBOARD_PID_FILE)) {
-//                            unlink(SERVER_DASHBOARD_PID_FILE);
-//                        }
-//                        Console::log(Color::yellow("Dashboard PID:{$pid} killed"));
-//                        break;
-//                    } else {
-//                        if (time() - $time > 15) {
-//                            Console::info("结束Dashboard进程失败:{$pid} , 请重试");
-//                            break;
-//                        }
-//                    }
-//                }
-//            }
             try {
                 $this->_SERVER = new Server('0.0.0.0');
                 $setting = [
@@ -183,7 +157,6 @@ class Dashboard {
                     }
                     Response::instance()->register($response);
                     Request::instance()->register($request);
-                    $httpPort = Runtime::instance()->get('HTTP_PORT') ?: 9580;
                     try {
                         $controller = new DashboardController();
                         $method = 'action' . StringHelper::lower2camel(str_replace("/", "_", substr($request->server['path_info'], 1)));
@@ -193,6 +166,7 @@ class Dashboard {
                                 return;
                             }
                             //转发回cgi
+                            $httpPort = Runtime::instance()->httpPort() ?: 9580;
                             $path = $request->server['path_info'];
                             if (isset($request->server['query_string'])) {
                                 $path .= '?' . $request->server['query_string'];
