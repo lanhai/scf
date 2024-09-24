@@ -5,6 +5,7 @@ namespace Scf\Server\Task;
 use JetBrains\PhpStorm\ArrayShape;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Result;
 use Scf\Core\Traits\Singleton;
@@ -61,13 +62,13 @@ class Crontab {
                 self::instance()->start();
             } else {
                 //没有定时任务也启动一个计时器
-                $managerId = Counter::instance()->get('_background_process_id_');
+                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                 Timer::tick(5000, function () use ($managerId) {
                     //服务器已重启,终止现有计时器
-                    if ($managerId !== Counter::instance()->get('_background_process_id_')) {
+                    if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                         Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
                         Timer::clearAll();
-                        Runtime::instance()->set('_background_process_status_', STATUS_OFF);
+                        Runtime::instance()->crontabProcessStatus(false);
                     }
                 });
             }
@@ -89,7 +90,7 @@ class Crontab {
      * @return bool
      */
     public static function load(): bool {
-        $managerId = Counter::instance()->get('_background_process_id_');
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         if (!$modules = App::getModules()) {
             return false;
         }
@@ -146,7 +147,7 @@ class Crontab {
                 MasterDB::delete('-crontabs-' . $id);
             }
         }
-        $managerId = Counter::instance()->get('_background_process_id_');
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         foreach (self::$tasks as &$task) {
             Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
             $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
@@ -180,7 +181,7 @@ class Crontab {
                 Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
                 Timer::clearAll();
                 sleep(5);
-                Runtime::instance()->set('_background_process_status_', STATUS_OFF);
+                Runtime::instance()->crontabProcessStatus(false);
                 return;
             }
             $this->sync();
@@ -524,7 +525,7 @@ class Crontab {
      */
     public function isOrphan(int $managerId = 0): bool {
         $managerId = $managerId ?: $this->attributes['manager_id'];
-        $latestManagerId = Counter::instance()->get('_background_process_id_');
+        $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         return $managerId !== $latestManagerId;
     }
 

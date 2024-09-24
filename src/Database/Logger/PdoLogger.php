@@ -3,6 +3,7 @@
 namespace Scf\Database\Logger;
 
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Server\Env;
@@ -43,7 +44,7 @@ class PdoLogger implements ILogger {
                 $executeSql = str_replace($field, $bindings[trim(str_replace(':', '', $field))] ?? '', $executeSql);
             }
         }
-        $countKey = '_MYSQL_EXECUTE_COUNT_' . time();
+        $countKey = Key::COUNTER_MYSQL_PROCESSING . time();
         $count = Counter::instance()->incr($countKey);
         if ($count == 1) {
             Timer::after(2000, function () use ($countKey) {

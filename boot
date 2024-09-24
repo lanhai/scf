@@ -5,7 +5,6 @@ version_compare(PHP_VERSION, '8.1.0', '<') and die('运行此应用需PHP8.1(含
 const SCF_ROOT = __DIR__;
 //TODO 根据加载的APP配置设置时区
 ini_set('date.timezone', 'Asia/Shanghai');
-//composer自动加载
 require __DIR__ . '/vendor/autoload.php';
 
 //root 必须优先加载,因为含系统常量

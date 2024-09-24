@@ -6,6 +6,7 @@ use Scf\Client\Http;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Exception;
+use Scf\Core\Key;
 use Scf\Core\Result;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
@@ -54,7 +55,7 @@ class CgiListener extends Listener {
 //            }
 //        });
         // 设置CORS响应头
-        if (Runtime::instance()->get('allow_cross_origin')) {
+        if (Server::allowCrossOrigin()) {
             $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
             $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
             $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -70,8 +71,7 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
-        $status = Runtime::instance()->get('_SERVER_STATUS_');
-        if ((int)$status == STATUS_OFF) {
+        if (!Runtime::instance()->serverStatus()) {
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
@@ -81,12 +81,12 @@ class CgiListener extends Listener {
             ]));
             return;
         }
-        $mysqlExecuteCount = Counter::instance()->get('_MYSQL_EXECUTE_COUNT_' . (time() - 1)) ?: 0;
-        $requestCount = Counter::instance()->get('_REQUEST_COUNT_' . (time() - 1)) ?: 0;
+        $mysqlExecuteCount = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
+        $requestCount = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
 //        $serverStatus = $this->server->stats();
 //        $requestCount = $serverStatus['connection_num'] ?? 0;
         if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
-            Counter::instance()->incr('_REQUEST_REJECT_');
+            Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
@@ -99,22 +99,22 @@ class CgiListener extends Listener {
         Response::instance()->register($response);
         Request::instance()->register($request);
         //使用原子子增值统计并发访问量
-        Counter::instance()->incr('_REQUEST_COUNT_');
-        $countKey = '_REQUEST_COUNT_' . time();
+        Counter::instance()->incr(Key::COUNTER_REQUEST);
+        $countKey = Key::COUNTER_REQUEST . time();
         $count = Counter::instance()->incr($countKey);
         if ($count == 1) {
             Timer::after(2000, function () use ($countKey, $count) {
                 Counter::instance()->delete($countKey);
             });
         }
-        $countKeyDay = '_REQUEST_COUNT_' . Date::today();
+        $countKeyDay = Key::COUNTER_REQUEST . Date::today();
         $countToday = Counter::instance()->incr($countKeyDay);
         if ($countToday == 1) {
             Timer::after(86400 * 1000 * 2, function () use ($countKeyDay) {
                 Counter::instance()->delete($countKeyDay);
             });
         }
-        Counter::instance()->incr('_REQUEST_PROCESSING_');
+        Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
             $logger = Log::instance();
             $app = App::instance();
@@ -171,10 +171,16 @@ class CgiListener extends Listener {
         }
         Done:
         Event::defer(function () {
-            Counter::instance()->decr('_REQUEST_PROCESSING_');
+            Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
         });
     }
 
+    /**
+     * 控制台消息推送
+     * @param \Swoole\Http\Request $request
+     * @param \Swoole\Http\Response $response
+     * @return bool
+     */
     protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
         if (str_starts_with($request->server['path_info'], '/@console.message@/')) {
             $data = Request::instance()->post()->pack();
