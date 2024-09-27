@@ -71,7 +71,7 @@ class MasterDB {
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
         try {
-            ini_set('memory_limit', '256M');
+            ini_set('memory_limit', '512M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
