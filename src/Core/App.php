@@ -305,6 +305,9 @@ class App {
         return true;
     }
 
+    public static function profile(): Installer {
+        return self::installer();
+    }
     /**
      * 当前版本
      * @return string|null
