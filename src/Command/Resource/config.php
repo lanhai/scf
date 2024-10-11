@@ -16,8 +16,8 @@ return [
     'aliyun' => [
         'accounts' => [
             'default' => [
-                'accessId' => 'LTAI5tD3jp8BrEGgvTrdK1we',
-                'accessKey' => 'rXMvi8RAs8peFInKI9j9xJl7FaExOh',
+                'accessId' => '',
+                'accessKey' => '',
                 'product' => ['oss', 'sts']
             ]
         ],
@@ -27,15 +27,21 @@ return [
             'server' => [
                 'default' => [
                     'account' => 'default',
-                    'REGION_ID' => 'oss-cn-chengdu',
+                    'REGION_ID' => '',
                     'LOG' => false,
                     'LOG_PATH' => APP_PATH . 'log/alioss/',
                     'DISPLAY_LOG' => false,
-                    'OSS_HOST' => 'lky-chengdu.oss-cn-chengdu.aliyuncs.com',
-                    'BUCKET' => 'lky-chengdu',
+                    'OSS_HOST' => '',
+                    'BUCKET' => '',
                     'IS_CNNAME' => true,
-                    'ENDPOINT' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com',
-                    'CDN_DOMAIN' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com'
+                    'ENDPOINT' => '',
+                    'CDN_DOMAIN' => '',
+                    'sts' => [
+                        'regionId' => '',
+                        'RoleArn' => '',
+                        'policy' => '{"Statement": [{"Action": ["oss:*"],"Effect": "Allow","Resource": ["acs:oss:*"]}],"Version": "1"}',
+                        'tokenExpire' => 900
+                    ]
                 ]
             ]
         ],
