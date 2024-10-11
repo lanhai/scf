@@ -387,9 +387,10 @@ class MasterDB {
 //
 //            });
             $server->on('WorkerStart', function (Server $server) {
-                Timer::tick(1000*10, function () use ($server) {
+                Timer::tick(1000 * 10, function () use ($server) {
                     //Console::log("【MasterDB】数据持久化大小:" . strlen(serialize($this->data)));
-                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
+                    File::write(APP_RUNTIME_DB, serialize($this->data));
+                    //file_put_contents(APP_RUNTIME_DB, serialize($this->data));
                 });
             });
 //            $server->on('start', function (Server $server) {
