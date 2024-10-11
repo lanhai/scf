@@ -65,8 +65,9 @@ class Manager extends Component {
      * @return bool
      */
     public function heartbeat(Server $server, Node $node): bool {
-        $node->app_version = App::version();
-        $node->public_version = App::publicVersion() ?: '--';
+        $profile = App::profile();
+        $node->app_version = $profile->version;
+        $node->public_version = $profile->public_version ?: '--';
         $node->heart_beat = time();
         $node->tables = Table::list();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
@@ -81,10 +82,10 @@ class Manager extends Component {
         $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-        $key = App::id() . '-node-' . SERVER_NODE_ID;
-        if (!MasterDB::sIsMember(App::id() . '-nodes', $node->id)) {
-            MasterDB::sAdd(App::id() . '-nodes', $node->id);
-        }
+        $key = $profile->appid . '-node-' . SERVER_NODE_ID;
+//        if (!MasterDB::sIsMember($profile->appid . '-nodes', $node->id)) {
+//            MasterDB::sAdd($profile->appid . '-nodes', $node->id);
+//        }
         return MasterDB::set($key, $node->toArray());
     }
 
@@ -98,10 +99,11 @@ class Manager extends Component {
         if (!$node->validate()) {
             throw new Exception("节点设置错误:" . $node->getError());
         }
-        if (!MasterDB::sIsMember(App::id() . '-nodes', $node->id)) {
-            MasterDB::sAdd(App::id() . '-nodes', $node->id);
+        $profile = App::profile();
+        if (!MasterDB::sIsMember($profile->appid . '-nodes', $node->id)) {
+            MasterDB::sAdd($profile->appid . '-nodes', $node->id);
         }
-        $key = App::id() . '-node-' . $node->id;
+        $key = $profile->appid . '-node-' . $node->id;
         return MasterDB::set($key, $node->toArray());
     }
 

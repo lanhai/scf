@@ -129,7 +129,7 @@ class Installer extends Struct {
             }
             self::$_apps = $apps;
         }
-        $info = self::match($path) ?: [
+        $profile = self::match($path) ?: [
             'appid' => "",
             'app_path' => $path,
             'app_auth_key' => "",
@@ -141,10 +141,10 @@ class Installer extends Struct {
             'node_id' => Sn::create_guid(),
             'dashboard_password' => Auth::encode(time(), Sn::create_uuid())
         ];
-        !self::$_apps and self::$_apps[] = $info;
-        $info['version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $info['version'] : 'development';
-        $info['public_version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $info['public_version'] : 'development';
-        return self::factory($info);
+        !self::$_apps and self::$_apps[] = $profile;
+        $profile['version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $profile['version'] : 'development';
+        $profile['public_version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $profile['public_version'] : 'development';
+        return self::factory($profile);
     }
 
     /**
@@ -202,8 +202,6 @@ class Installer extends Struct {
             Util::releaseResource(Root::dir() . '/Command/Resource/version.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/version.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/controller/_config.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/_config.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/controller/index.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/Controller/Controller.php', true);
-//            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error.html', true);
-//            Util::releaseResource(Root::dir() . '/Command/Resource/template/common/error_404.html', SCF_APPS_ROOT . '/' . $this->app_path . '/src/template/common/error_404.html', true);
         }
         return $this->update();
     }
