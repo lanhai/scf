@@ -16,32 +16,26 @@ return [
     'aliyun' => [
         'accounts' => [
             'default' => [
-                'accessId' => '',
-                'accessKey' => '',
+                'accessId' => 'LTAI5tD3jp8BrEGgvTrdK1we',
+                'accessKey' => 'rXMvi8RAs8peFInKI9j9xJl7FaExOh',
                 'product' => ['oss', 'sts']
             ]
         ],
         //oss客户端
         'Scf\Cloud\Ali\Oss' => [
-            'default_server' => 'oss_0',
+            'default_server' => 'default',
             'server' => [
-                'oss_0' => [
+                'default' => [
                     'account' => 'default',
-                    'REGION_ID' => '',
+                    'REGION_ID' => 'oss-cn-chengdu',
                     'LOG' => false,
-                    'APP_LOG_PATH' => APP_PATH . '/log/alioss/',
+                    'LOG_PATH' => APP_PATH . 'log/alioss/',
                     'DISPLAY_LOG' => false,
-                    'OSS_HOST' => '',
-                    'BUCKET' => '',
+                    'OSS_HOST' => 'lky-chengdu.oss-cn-chengdu.aliyuncs.com',
+                    'BUCKET' => 'lky-chengdu',
                     'IS_CNNAME' => true,
-                    'ENDPOINT' => '',
-                    'CDN_DOMAIN' => '',
-                    'sts' => [
-                        'regionId' => 'cn-wuhan',
-                        'RoleArn' => '',
-                        'policy' => '{"Statement": [{"Action": ["oss:*"],"Effect": "Allow","Resource": ["acs:oss:*"]}],"Version": "1"}',
-                        'tokenExpire' => 900
-                    ]
+                    'ENDPOINT' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com',
+                    'CDN_DOMAIN' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com'
                 ]
             ]
         ],
@@ -88,13 +82,13 @@ return [
     'components' => [
         //日志推送服务配置
         'Scf\Component\SocketMessager' => [
-            'broker' => '',
+            'broker' => 'mqtt.dmool.com',
             'port' => 1883,
             'client_id' => 'logger_publisher',
             'username' => 'admin',
             'password' => 'public',
             'topic' => 'php_log',
-            'enable' => false
+            'enable' => true
         ],
     ],
     //简易webservice

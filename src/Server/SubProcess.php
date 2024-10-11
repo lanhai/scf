@@ -11,6 +11,7 @@ use Scf\Core\Log;
 use Scf\Root;
 use Scf\Server\Struct\Node;
 use Scf\Server\Table\Counter;
+use Scf\Server\Table\Runtime;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Swoole\Process;
@@ -51,6 +52,7 @@ class SubProcess {
                         Console::log('【Server】节点报道失败:' . Color::red($exception->getMessage()));
                     }
                 }
+
                 report($process, $server, $node);
             }
         });
@@ -143,7 +145,7 @@ class SubProcess {
                         $server->reload();
                         // Console::info("重启状态:" . $this->server->reload());
                         if ($port && App::isMaster()) {
-                            $dashboardHost = PROTOCOL_HTTP . 'localhost:' . ($port + 2) . '/reload';
+                            $dashboardHost = PROTOCOL_HTTP . 'localhost:' . Runtime::instance()->dashboardPort() . '/reload';
                             $client = \Scf\Client\Http::create($dashboardHost);
                             $client->get();
                         }

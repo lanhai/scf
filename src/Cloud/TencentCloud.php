@@ -24,7 +24,7 @@ abstract class TencentCloud {
     protected string $accessKey;
 
     /**
-     * 获取单利
+     * 获取单例
      * @param array|null $conf
      * @return static
      */

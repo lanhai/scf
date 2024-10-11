@@ -36,7 +36,7 @@ class SimpleWs extends Controller {
     /**
      * 验证接口请求是否合法
      */
-    protected function _valid() {
+    protected function _valid(): void {
         $this->headers = $this->request()->header();
         $appid = !empty($this->headers['appid']) ? $this->headers['appid'] : '';
         $sign = !empty($this->headers['sign']) ? $this->headers['sign'] : '';

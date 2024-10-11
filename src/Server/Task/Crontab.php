@@ -175,22 +175,24 @@ class Crontab {
         }
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 0;
-        Timer::tick(5000, function () {
-            //服务器已重启,终止现有计时器
-            if ($this->isOrphan()) {
-                Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
-                Timer::clearAll();
-                sleep(5);
-                Runtime::instance()->crontabProcessStatus(false);
-                return;
-            }
-            $this->sync();
-            if ($this->isExpired()) {
-                //迭代
-                $this->upgrade();
-            }
-        });
-        $this->excute();
+        if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {
+            Timer::tick(5000, function () {
+                //服务器已重启,终止现有计时器
+                if ($this->isOrphan()) {
+                    Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
+                    Timer::clearAll();
+                    sleep(5);
+                    Runtime::instance()->crontabProcessStatus(false);
+                    return;
+                }
+                $this->sync();
+                if ($this->isExpired()) {
+                    //迭代
+                    $this->upgrade();
+                }
+            });
+        }
+        $this->startTask();
     }
 
     /**
@@ -213,7 +215,7 @@ class Crontab {
      * 执行任务
      * @return void
      */
-    protected function excute(): void {
+    protected function startTask(): void {
         $this->updateTask('latest_alive', time());
         $mode = $this->attributes['override']['mode'] ?? $this->attributes['mode'];
         $interval = $this->attributes['override']['interval'] ?? $this->attributes['interval'] ?? 0;
@@ -230,7 +232,7 @@ class Crontab {
                     if ($this->isAlive($id)) {
                         $this->processingStart(time() + $interval);
                         try {
-                            $this->run();
+                            $this->execute();
                         } catch (Throwable $throwable) {
                             Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                             $this->log("任务执行失败:" . $throwable->getMessage());
@@ -251,7 +253,7 @@ class Crontab {
                 $this->updateRunTime();
                 try {
                     //单次执行的任务如果是无限循环任务需要在循环逻辑里判断当前任务是否处于激活状态,且在结束循环时清理相关计时器
-                    $this->run();
+                    $this->execute();
                 } catch (Throwable $throwable) {
                     Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
@@ -276,7 +278,7 @@ class Crontab {
         $this->updateTask('expired', 0);
         Console::info($this->attributes['namespace'] . "运行参数已变更,已升级迭代至#" . $this->id);
         //重新执行
-        $this->excute();
+        $this->startTask();
     }
 
     /**
@@ -302,7 +304,7 @@ class Crontab {
         return go(function () {
             $this->processingStart();
             try {
-                $this->run();
+                $this->execute();
             } catch (Throwable $throwable) {
                 Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
@@ -355,6 +357,10 @@ class Crontab {
         //保存日志到Redis&日志文件
         $key = strtolower('crontab' . str_replace("\\", "_", $this->attributes['namespace']));
         MasterDB::addLog($key, ['message' => Log::filter($msg)]);
+    }
+
+    public function setAttributes($attributes): void {
+        $this->attributes = $attributes;
     }
 
     /**
@@ -412,7 +418,7 @@ class Crontab {
             if ($this->isAlive($id)) {
                 $this->processingStart();
                 try {
-                    $this->run();
+                    $this->execute();
                 } catch (Throwable $throwable) {
                     Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
@@ -468,7 +474,7 @@ class Crontab {
         $channel = new Coroutine\Channel(1);
         $this->timerCid = Coroutine::create(function () use ($channel) {
             try {
-                $this->run();
+                $this->execute();
                 $channel->push('success');
             } catch (Throwable $throwable) {
                 Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
@@ -651,5 +657,13 @@ class Crontab {
 
     public function run() {
 
+    }
+
+    public function execute(): void {
+        /** @var static $app */
+        $app = new $this->attributes['namespace'];
+        $app->setAttributes($this->attributes);
+        $app->run();
+        unset($app);
     }
 }

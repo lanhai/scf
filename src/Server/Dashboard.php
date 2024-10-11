@@ -38,7 +38,7 @@ class Dashboard {
         $process = new Process(function () {
             try {
                 $port = Http::getUseablePort(8580);
-                Runtime::instance()->set('DASHBOARD_PORT', $port);
+                Runtime::instance()->dashboardPort($port);
                 self::instance()->create($port, Manager::instance()->issetOpt('d'));
             } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
@@ -54,7 +54,7 @@ class Dashboard {
             Console::error('【Dashboard】服务启动失败');
             exit();
         }
-        Console::info("【Dashboard】服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->get('DASHBOARD_PORT'));
+        Console::info("【Dashboard】服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->dashboardPort());
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
@@ -220,6 +220,10 @@ class Dashboard {
                         $server->reload();
                     }
                 });
+                //启动文件监听进程
+//                if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
+//                    $this->_SERVER->addProcess(SubProcess::createFileWatchProcess($this->_SERVER, $this->bindPort));
+//                }
                 $this->_SERVER->start();
             } catch (Throwable $exception) {
                 Console::log('【Dashboard】' . Color::red($exception->getMessage()));
