@@ -24,11 +24,11 @@ if (json_last_error() == JSON_ERROR_NONE) {
 }
 define("SCF_VERSION", $scfVersion);
 const APP_MODULE_STYLE_MICRO = 1;
+const APP_MODULE_STYLE_LARGE = 2;
 const NETWORK_MODE_SINGLE = 'single';
 const NETWORK_MODE_GROUP = 'group';
 const PROTOCOL_HTTPS = 'https://';
 const PROTOCOL_HTTP = 'http://';
-const APP_MODULE_STYLE_LARGE = 2;
 const SWOOLE_SERVER = 'server';
 const SWOOLE_SERVER_HTTP = 'server_http';
 const SWOOLE_SERVER_SOCKET = 'server_socket';

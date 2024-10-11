@@ -216,7 +216,7 @@ class CgiListener extends Listener {
                 Request::resetPath($path);
                 return false;
             }
-            $port = Runtime::instance()->get('DASHBOARD_PORT');
+            $port = Runtime::instance()->dashboardPort();
             if (App::isReady()) {
                 $masterHost = App::isMaster() ? 'localhost' : (Config::get('app')['master_host'] ?? 'localhost');
                 if (SERVER_HOST_IS_IP || App::isMaster()) {

@@ -78,4 +78,16 @@ class Runtime extends Table {
         }
         return $this->get(Key::RUNTIME_HTTP_PORT);
     }
+
+    /**
+     * Http服务端口
+     * @param int|null $port
+     * @return bool|mixed
+     */
+    public function dashboardPort(?int $port = null): mixed {
+        if ($port) {
+            return $this->set(Key::RUNTIME_DASHBOARD_PORT, $port);
+        }
+        return $this->get(Key::RUNTIME_DASHBOARD_PORT);
+    }
 }

@@ -45,6 +45,8 @@ class App extends Lifetime {
                 $str = $arr[0];
                 $str = ltrim(str_replace('MP_verify_', '', $str), '/');
                 $this->response()->end($str);
+            } elseif (preg_match('/^(\d+)\.txt$/', $this->router->getModule(), $matches) && file_exists(APP_PUBLIC_PATH . '/' . $this->router->getModule())) {
+                $this->response()->end(file_get_contents(APP_PUBLIC_PATH . '/' . $this->router->getModule()));
             } else {
                 Response::instance()->setHeader('Error-Info', 'module undefined:' . $this->router->getModule());
                 throw new NotFoundException('未定义的模块:' . $this->router->getModule());
