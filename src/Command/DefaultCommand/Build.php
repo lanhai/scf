@@ -250,7 +250,7 @@ class Build implements CommandInterface {
                     Console::line();
                     //文件加密
 //                    $publicContent = File::read($publicFilePath);
-//                    $publicContentEncrypted = Auth::encode($publicContent);
+//                    $publicContentEncrypted = Base::encode($publicContent);
 //                    if (!File::write($publicFilePath, $publicContentEncrypted)) {
 //                        Console::log('资源文件加密失败');
 //                        exit();

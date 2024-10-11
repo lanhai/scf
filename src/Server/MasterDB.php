@@ -71,7 +71,7 @@ class MasterDB {
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
         try {
-            ini_set('memory_limit', '512M');
+            ini_set('memory_limit', '256M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
@@ -387,7 +387,8 @@ class MasterDB {
 //
 //            });
             $server->on('WorkerStart', function (Server $server) {
-                Timer::tick(5000, function () use ($server) {
+                Timer::tick(1000*10, function () use ($server) {
+                    //Console::log("【MasterDB】数据持久化大小:" . strlen(serialize($this->data)));
                     file_put_contents(APP_RUNTIME_DB, serialize($this->data));
                 });
             });

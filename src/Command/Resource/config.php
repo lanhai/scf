@@ -23,13 +23,13 @@ return [
         ],
         //oss客户端
         'Scf\Cloud\Ali\Oss' => [
-            'default_server' => 'oss_0',
+            'default_server' => 'default',
             'server' => [
-                'oss_0' => [
+                'default' => [
                     'account' => 'default',
                     'REGION_ID' => '',
                     'LOG' => false,
-                    'APP_LOG_PATH' => APP_PATH . '/log/alioss/',
+                    'LOG_PATH' => APP_PATH . 'log/alioss/',
                     'DISPLAY_LOG' => false,
                     'OSS_HOST' => '',
                     'BUCKET' => '',
@@ -37,7 +37,7 @@ return [
                     'ENDPOINT' => '',
                     'CDN_DOMAIN' => '',
                     'sts' => [
-                        'regionId' => 'cn-wuhan',
+                        'regionId' => '',
                         'RoleArn' => '',
                         'policy' => '{"Statement": [{"Action": ["oss:*"],"Effect": "Allow","Resource": ["acs:oss:*"]}],"Version": "1"}',
                         'tokenExpire' => 900
@@ -88,13 +88,13 @@ return [
     'components' => [
         //日志推送服务配置
         'Scf\Component\SocketMessager' => [
-            'broker' => '',
+            'broker' => 'mqtt.dmool.com',
             'port' => 1883,
             'client_id' => 'logger_publisher',
             'username' => 'admin',
             'password' => 'public',
             'topic' => 'php_log',
-            'enable' => false
+            'enable' => true
         ],
     ],
     //简易webservice
