@@ -225,7 +225,7 @@ class Crontab {
                     if ($this->isAlive($id)) {
                         $this->processingStart(time() + $interval);
                         try {
-                            $this->execute();
+                            $this->run();
                         } catch (Throwable $throwable) {
                             Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                             $this->log("任务执行失败:" . $throwable->getMessage());
@@ -246,7 +246,7 @@ class Crontab {
                 $this->updateRunTime();
                 try {
                     //单次执行的任务如果是无限循环任务需要在循环逻辑里判断当前任务是否处于激活状态,且在结束循环时清理相关计时器
-                    $this->execute();
+                    $this->run();
                 } catch (Throwable $throwable) {
                     Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
@@ -297,7 +297,7 @@ class Crontab {
         return go(function () {
             $this->processingStart();
             try {
-                $this->execute();
+                $this->run();
             } catch (Throwable $throwable) {
                 Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
@@ -411,7 +411,7 @@ class Crontab {
             if ($this->isAlive($id)) {
                 $this->processingStart();
                 try {
-                    $this->execute();
+                    $this->run();
                 } catch (Throwable $throwable) {
                     Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
@@ -467,7 +467,7 @@ class Crontab {
         $channel = new Coroutine\Channel(1);
         $this->timerCid = Coroutine::create(function () use ($channel) {
             try {
-                $this->execute();
+                $this->run();
                 $channel->push('success');
             } catch (Throwable $throwable) {
                 Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
