@@ -16,7 +16,7 @@ abstract class ActiveRecord extends Component {
      */
     public static function lookup(...$args): static {
         $cid = Coroutine::getCid();
-        $instanceKey = md5(get_called_class().JsonHelper::toJson($args)) . $cid;
+        $instanceKey = md5(get_called_class() . JsonHelper::toJson($args)) . $cid;
         if (!isset(static::$_AR_INSTANCE[$instanceKey])) {
             $cls = static::factory();
             if (!method_exists($cls, 'find')) {
