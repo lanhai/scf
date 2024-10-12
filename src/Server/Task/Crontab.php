@@ -492,6 +492,7 @@ class Crontab {
             }
         }
         $this->processingFinish(time() + $timeout);
+        $this->log("#" . Coroutine::getCid() . "执行完成,内存占用:" . Color::yellow(round(Coroutine::getStackUsage() / 1024 / 1024, 2)) . "MB");
         $timerId = Timer::after($timeout * 1000, function () use ($timeout, $id) {
             $this->loop($timeout, $id);
         });
