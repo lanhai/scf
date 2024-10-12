@@ -177,6 +177,7 @@ class Crontab {
         $this->executeTimeout = $task['timeout'] ?? 0;
         if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {
             Timer::tick(5000, function () {
+                $this->log("#" . Coroutine::getPcid() . "内存占用:" . Color::yellow(round(Coroutine::getStackUsage(Coroutine::getPcid()) / 1024 / 1024, 2)) . "MB");
                 //服务器已重启,终止现有计时器
                 if ($this->isOrphan()) {
                     Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
@@ -492,7 +493,6 @@ class Crontab {
             }
         }
         $this->processingFinish(time() + $timeout);
-        $this->log("#" . Coroutine::getCid() . "执行完成,内存占用:" . Color::yellow(round(Coroutine::getStackUsage() / 1024 / 1024, 2)) . "MB");
         $timerId = Timer::after($timeout * 1000, function () use ($timeout, $id) {
             $this->loop($timeout, $id);
         });
