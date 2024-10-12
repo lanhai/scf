@@ -265,16 +265,16 @@ class Console {
      */
     public static function log(string $str, bool $push = true): void {
         if (defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
-            Coroutine::create(function () use ($str) {
-                $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
-                $client = Http::create('http://localhost:' . $port . '/@console.message@/');
-                $client->post([
-                    'message' => $str
-                ]);
-                defer(function () use ($client) {
-                    $client->close();
-                });
+            //Coroutine::create(function () use ($str) {
+            $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
+            $client = Http::create('http://localhost:' . $port . '/@console.message@/');
+            $client->post([
+                'message' => $str
+            ]);
+            defer(function () use ($client) {
+                $client->close();
             });
+            //});
         }
         if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
             $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
