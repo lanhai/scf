@@ -117,7 +117,7 @@ class Crontab {
                     if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                         Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
                         Timer::clearAll();
-                        Runtime::instance()->crontabProcessStatus(false);
+                        //Runtime::instance()->crontabProcessStatus(false);
                     }
                 });
             }
@@ -174,8 +174,8 @@ class Crontab {
                 if ($this->isOrphan()) {
                     Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
                     Timer::clearAll();
-                    sleep(5);
-                    Runtime::instance()->crontabProcessStatus(false);
+                    //sleep(5);
+                    //Runtime::instance()->crontabProcessStatus(false);
                     return;
                 }
                 $this->sync();
@@ -194,10 +194,8 @@ class Crontab {
      * @return bool
      */
     public function isAlive(int $id = 1): bool {
-        if ($this->isOrphan()) {
+        if ($this->isOrphan() || $id !== $this->id) {
             //Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
-            return false;
-        } elseif ($id !== $this->id) {
             return false;
         }
         $this->updateTask('latest_alive', time());
