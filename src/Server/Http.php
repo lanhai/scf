@@ -113,18 +113,26 @@ class Http extends \Scf\Core\Server {
             }
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
-            Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+            $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+            $started = false;
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
-                if (!Runtime::instance()->crontabProcessStatus()) {
+                //if (!Runtime::instance()->crontabProcessStatus()) {
+                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                    $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+                    $started = false;
+                }
+                if (!$started) {
+                    $started = true;
                     Runtime::instance()->crontabProcessStatus(true);
                     $pid = Crontab::startProcess();
-                    Console::info('【Server】定时任务PID:' . $pid);
+                    Console::info("【Server】定时任务#{$managerId} PID:" . $pid);
                     if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-                        RQueue::startProcess();
+                        $pid = RQueue::startProcess();
+                        Console::info("【Server】Redis队列#{$managerId} PID:" . $pid);
                     }
                 }
-                sleep(30);
+                sleep(5);
             }
         });
         $this->server->addProcess($process);

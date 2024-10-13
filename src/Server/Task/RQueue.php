@@ -27,10 +27,9 @@ class RQueue {
 
     protected int $managerId = 0;
 
-
-    public static function startProcess(): void {
+    public static function startProcess(): int {
         if (!App::isReady()) {
-            return;
+            return 0;
         }
         $process = new Process(function () {
             App::mount();
@@ -45,7 +44,7 @@ class RQueue {
         });
         $pid = $process->start();
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        Console::info('【RedisQueue】Manager PID:' . $pid);
+        return $pid;
     }
 
     public static function startByWorker(): void {
