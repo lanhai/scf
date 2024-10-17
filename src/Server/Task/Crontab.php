@@ -111,21 +111,44 @@ class Crontab {
                 self::instance()->start();
             } else {
                 //没有定时任务也启动一个计时器
-                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                Timer::tick(5000, function () use ($managerId) {
-                    //服务器已重启,终止现有计时器
-                    if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                        Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
-                        Timer::clearAll();
-                        //Runtime::instance()->crontabProcessStatus(false);
-                    }
-                });
+                $this->processCheck();
             }
             Event::wait();
         });
         $pid = $process->start();
         File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
         return $pid;
+    }
+
+    /**
+     * 启动一个进程过期检测定时器
+     * @return void
+     */
+    protected function processCheck(): void {
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        Timer::tick(10000, function () use ($managerId) {
+            //Console::info("【Crontab#" . $managerId . "】当前计时器:" . Timer::stats()['num']);
+            //服务已重启,终止现有计时器
+            if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                Timer::clearAll();
+                Runtime::instance()->crontabProcessStatus(false);
+                Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
+            }
+        });
+    }
+
+    /**
+     * 是否活着
+     * @param int $id
+     * @return bool
+     */
+    public function isAlive(int $id = 1): bool {
+        if ($this->isOrphan() || $id !== $this->id) {
+            Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
+            return false;
+        }
+        $this->updateTask('latest_alive', time());
+        return true;
     }
 
     /**
@@ -141,6 +164,7 @@ class Crontab {
             }
         }
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        $this->processCheck();
         foreach (self::$tasks as &$task) {
             Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
             $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
@@ -148,8 +172,8 @@ class Crontab {
                 if (!method_exists($worker, 'run')) {
                     Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
                 } else {
-                    $worker->register($task);
                     Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
+                    $worker->register($task);
                 }
             });
         }
@@ -170,14 +194,6 @@ class Crontab {
         $this->executeTimeout = $task['timeout'] ?? 0;
         if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {
             Timer::tick(5000, function () {
-                //服务器已重启,终止现有计时器
-                if ($this->isOrphan()) {
-                    Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[" . $this->attributes['namespace'] . "]管理进程已迭代,所有定时器已清除");
-                    Timer::clearAll();
-                    //sleep(5);
-                    //Runtime::instance()->crontabProcessStatus(false);
-                    return;
-                }
                 $this->sync();
                 if ($this->isExpired()) {
                     //迭代
@@ -188,19 +204,6 @@ class Crontab {
         $this->startTask();
     }
 
-    /**
-     * 是否活着
-     * @param int $id
-     * @return bool
-     */
-    public function isAlive(int $id = 1): bool {
-        if ($this->isOrphan() || $id !== $this->id) {
-            //Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
-            return false;
-        }
-        $this->updateTask('latest_alive', time());
-        return true;
-    }
 
     /**
      * 执行任务

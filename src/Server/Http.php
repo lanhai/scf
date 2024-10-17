@@ -117,8 +117,8 @@ class Http extends \Scf\Core\Server {
             $started = false;
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
-                //if (!Runtime::instance()->crontabProcessStatus()) {
-                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                if (!Runtime::instance()->crontabProcessStatus()) {
+//                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                     $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                     $started = false;
                 }
