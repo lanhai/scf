@@ -392,6 +392,7 @@ class App {
                 $arr = explode('/', $file);
                 $allowFiles = [
                     '_config.php',
+                    '_module_.php',
                     'config.php',
                     'service.php'
                 ];

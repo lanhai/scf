@@ -4,6 +4,7 @@ namespace Scf\Server\Task;
 
 use JetBrains\PhpStorm\ArrayShape;
 use Scf\Core\App;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Log;
@@ -55,10 +56,24 @@ class Crontab {
      */
     public static function load(): bool {
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        $serverConfig = Config::server();
+        $list = [];
+        $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
+        if (App::isMaster() && $enableStatistics) {
+            $list[] = [
+                'name' => '统计数据入库',
+                'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
+                'mode' => Crontab::RUN_MODE_LOOP,
+                'interval' => $serverConfig['db_statistics_interval'] ?? 3,
+                'status' => STATUS_ON
+            ];
+        }
         if (!$modules = App::getModules()) {
+            if ($list) {
+                goto init;
+            }
             return false;
         }
-        $list = [];
         foreach ($modules as $module) {
             $crontabs = $module['crontabs'] ?? $module['background_tasks'] ?? [];
             if ($crontabs) {
@@ -71,6 +86,7 @@ class Crontab {
                 $list = $list ? [...$list, ...$slaveCrontabls] : $slaveCrontabls;
             }
         }
+        init:
         if ($list) {
             foreach ($list as &$task) {
                 $task['id'] = $managerId;
@@ -111,7 +127,7 @@ class Crontab {
                 self::instance()->start();
             } else {
                 //没有定时任务也启动一个计时器
-                $this->processCheck();
+                self::processCheck();
             }
             Event::wait();
         });
@@ -124,7 +140,7 @@ class Crontab {
      * 启动一个进程过期检测定时器
      * @return void
      */
-    protected function processCheck(): void {
+    public static function processCheck(): void {
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         Timer::tick(10000, function () use ($managerId) {
             //Console::info("【Crontab#" . $managerId . "】当前计时器:" . Timer::stats()['num']);
@@ -164,7 +180,7 @@ class Crontab {
             }
         }
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $this->processCheck();
+        self::processCheck();
         foreach (self::$tasks as &$task) {
             Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
             $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {

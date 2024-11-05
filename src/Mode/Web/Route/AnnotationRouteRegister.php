@@ -65,6 +65,7 @@ class AnnotationRouteRegister extends Component {
         $entryScripts = Dir::scan(APP_LIB_PATH, 4);
         $excludeFiles = [
             '_config.php',
+            '_module_.php',
             'config.php',
             'service.php',
             '_service.php'

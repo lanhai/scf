@@ -2,6 +2,7 @@
 
 namespace Scf\Server\Listener;
 
+use Scf\Cloud\Ali\Oss;
 use Scf\Command\Color;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -50,10 +51,11 @@ INFO;
             App::updateDatabase();
             $serverConfig = Config::server();
             //升级/创建统计数据表
-            $enableStatistics = $serverConfig['enable_db_statistics'] ?? false;
+            $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
             if ($enableStatistics && App::isMaster()) {
                 StatisticModel::instance()->updateDB();
             }
+            Oss::instance()->createTable();
             Runtime::instance()->serverStatus(true);
         }
     }

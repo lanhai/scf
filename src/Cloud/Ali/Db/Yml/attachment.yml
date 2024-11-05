@@ -1,0 +1,63 @@
+dao: Scf/Cloud/Ali/Db/AttachmentTable
+db: default
+table: t_attachment
+version: '20241022100801'
+create: "CREATE TABLE `t_attachment` (`id` int NOT NULL AUTO_INCREMENT,`oss_server` varchar(50) COMMENT '服务器ID',`oss_bucket` varchar(50) COMMENT '文件仓库',`oss_object` varchar(255) COMMENT '文件名称',`file_type` varchar(50) COMMENT '文件类型',`file_ext` varchar(10) COMMENT '文件后缀名',`file_original_name` varchar(255) COMMENT '文件源名称',`file_size` int COMMENT '文件大小',`app` varchar(50) COMMENT '文件所属应用',`app_id` varchar(50) COMMENT '应用数据id',`status` tinyint(1) DEFAULT '0' COMMENT '文件状态0未审核',`verify_uid` int DEFAULT '0' COMMENT '审核人UID',`created_scene` varchar(10) COMMENT '创建场景 1:后台上传 2:前台上传 3:系统下载',`created_uid` int DEFAULT '0' COMMENT '创建者UID',`created_at` int COMMENT '创建时间',`deleted_at` int DEFAULT '0' COMMENT '删除时间',`deleted_uid` int DEFAULT '0' COMMENT '删除者用户ID',PRIMARY KEY (`id`), UNIQUE INDEX `id`(`id` ASC) USING BTREE)"
+columns:
+  id:
+    content: '`id` int NOT NULL AUTO_INCREMENT'
+    hash: b3ba00e355cbb0ab647b8d3f4e94636a
+  oss_server:
+    content: "`oss_server` varchar(50) COMMENT '服务器ID' AFTER `id`"
+    hash: 51a33ffd18e61f627bc3527692c3e57d
+  oss_bucket:
+    content: "`oss_bucket` varchar(50) COMMENT '文件仓库' AFTER `oss_server`"
+    hash: 56d7423eab27def29f3292a16fa311a8
+  oss_object:
+    content: "`oss_object` varchar(255) COMMENT '文件名称' AFTER `oss_bucket`"
+    hash: 3fc5335485fb689322e6ed0b6e85ecb8
+  file_type:
+    content: "`file_type` varchar(50) COMMENT '文件类型' AFTER `oss_object`"
+    hash: 331e1244a65aa11898eef537b0a961f3
+  file_ext:
+    content: "`file_ext` varchar(10) COMMENT '文件后缀名' AFTER `file_type`"
+    hash: e6b868bd8efa8e273b59792aa8fa365a
+  file_original_name:
+    content: "`file_original_name` varchar(255) COMMENT '文件源名称' AFTER `file_ext`"
+    hash: ea31f5bea273dd8cb049a2691dc2165c
+  file_size:
+    content: "`file_size` int COMMENT '文件大小' AFTER `file_original_name`"
+    hash: 097a818f917974eb785b7ec544143429
+  app:
+    content: "`app` varchar(50) COMMENT '文件所属应用' AFTER `file_size`"
+    hash: dce24ed3983e704e390b2241d4b8654c
+  app_id:
+    content: "`app_id` varchar(50) COMMENT '应用数据id' AFTER `app`"
+    hash: 01a086e0a195db43e7f5d6afce408d2c
+  status:
+    content: "`status` tinyint(1) DEFAULT '0' COMMENT '文件状态0未审核' AFTER `app_id`"
+    hash: bf0f7fa89839568aaee2e7e0597f3a18
+  verify_uid:
+    content: "`verify_uid` int DEFAULT '0' COMMENT '审核人UID' AFTER `status`"
+    hash: fedaccf744dd584b9a36b049c668e9c3
+  created_scene:
+    content: "`created_scene` varchar(10) COMMENT '创建场景 1:后台上传 2:前台上传 3:系统下载' AFTER `verify_uid`"
+    hash: 71119eae7ad06627e2f60e514687e758
+  created_uid:
+    content: "`created_uid` int DEFAULT '0' COMMENT '创建者UID' AFTER `created_scene`"
+    hash: 6fcfb374a7da9b49b48785cf49456854
+  created_at:
+    content: "`created_at` int COMMENT '创建时间' AFTER `created_uid`"
+    hash: 2d38b21d91016554e05787b27ba13b70
+  deleted_at:
+    content: "`deleted_at` int DEFAULT '0' COMMENT '删除时间' AFTER `created_at`"
+    hash: edf5c38b1759e709c57bb72b57356a9d
+  deleted_uid:
+    content: "`deleted_uid` int DEFAULT '0' COMMENT '删除者用户ID' AFTER `deleted_at`"
+    hash: 8c405324b9d095f1f497a829b00879bf
+primary:
+  - '`id`'
+index:
+  id:
+    content: 'UNIQUE INDEX `id`(`id` ASC) USING BTREE'
+    hash: 8f8a959359f1a8028baecdd95e0c3cdb
