@@ -5,7 +5,6 @@ namespace Scf\Cloud\Ali;
 use AlibabaCloud\SDK\Sts\V20150401\Models\AssumeRoleRequest;
 use AlibabaCloud\SDK\Sts\V20150401\Sts as StsClient;
 use AlibabaCloud\Tea\Exception\TeaUnableRetryError;
-use App\Common\Dao\OssDao;
 use Darabonba\OpenApi\Models\Config;
 use JetBrains\PhpStorm\ArrayShape;
 use OSS\Core\OssException;
@@ -13,11 +12,15 @@ use OSS\OssClient;
 use Scf\Client\Http;
 use Scf\Cloud\Aliyun;
 use Scf\Core\Result;
+use Scf\Database\Dao;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
+use Scf\Root;
 use Scf\Util\Date;
 use Scf\Util\MimeTypes;
 use Scf\Util\Sn;
+use Symfony\Component\Yaml\Yaml;
+use Scf\Cloud\Ali\Db\AttachmentTable;
 use Throwable;
 
 class Oss extends Aliyun {
@@ -27,7 +30,6 @@ class Oss extends Aliyun {
     protected OssClient $_client;
 
     protected array $server;
-
     protected string $endpoint;
     protected string $serverId;
     protected array $allowTypes = [
@@ -82,6 +84,40 @@ class Oss extends Aliyun {
         } catch (OssException $e) {
             throw new AppError($e->getMessage());
         }
+    }
+
+    /**
+     * 创建数据表
+     * @return void
+     */
+    public function createTable(): void {
+        if (!$this->accessId) {
+            return;
+        }
+        $table = Yaml::parseFile(Root::dir() . '/Cloud/Ali/Db/Yml/attachment.yml');
+        $arr = explode("/", $table['dao']);
+        $cls = implode('\\', $arr);
+        /** @var Dao $cls */
+        $dao = $cls::factory();
+        $dao->updateTable($table);
+    }
+
+    /**
+     * sts授权
+     * @return Result
+     */
+    public function auth(): Result {
+        //TODO 客户端频次以及权限判定
+        $result = $this->stsAuth();
+        if ($result->hasError()) {
+            return $result;
+        }
+        $data = [
+            'credentials' => $result->getData('Credentials'),
+            'server' => $this->bucket(),
+            'object_path' => 'upload/' . date('Ymd') . '/',
+        ];
+        return Result::success($data);
     }
 
     /**
@@ -291,6 +327,67 @@ class Oss extends Aliyun {
     }
 
     /**
+     * 保存文件到数据库
+     * @param $data
+     * @return Result
+     */
+    public function saveFile($data): Result {
+        $allowTypes = [
+            'jpg' => 'image',
+            'jpeg' => 'image',
+            'png' => 'image',
+            'gif' => 'image',
+            'bmp' => 'image',
+            'mp3' => 'media',
+            'wmv' => 'media',
+            'wav' => 'video',
+            'mp4' => 'video',
+            'mov' => 'video',
+            'avi' => 'video',
+            '3gp' => 'video',
+            'rm' => 'video',
+            'rmvb' => 'video',
+            'xlsx' => 'file',
+            'xls' => 'file',
+            'doc' => 'file',
+            'docx' => 'file',
+            'zip' => 'file',
+            'gzip' => 'file',
+            'tar' => 'file',
+            'rar' => 'file',
+            'txt' => 'file',
+            'csv' => 'file',
+            'ppt' => 'file',
+            'pptx' => 'file'
+        ];
+        $object = AttachmentTable::factory($data);
+        if (!$object->validate()) {
+            return Result::error($object->getError());
+        }
+        if (!$object->oss_bucket) {
+            return Result::error('请选择要保存的bucket');
+        }
+        if (!$object->file_ext || !isset($allowTypes[strtolower($object->file_ext)])) {
+            return Result::error('文件格式不正确,不支持的文件格式:' . $object->file_ext);
+        }
+        if (!$object->save()) {
+            return Result::error('文件保存失败:' . $object->getError());
+        }
+        $result = [
+            'original_name' => $data['file_original_name'],
+            'size' => ceil($data['file_size']) . 'KB',
+            'ext' => strtolower($data['file_ext']),
+            'type' => $data['file_type'],
+            'server' => $data['oss_server'],
+            'bucket' => $data['oss_bucket'],
+            'object' => $data['oss_object'],
+            'file' => $object->id
+        ];
+        $result['object_url'] = $this->getServer()['CDN_DOMAIN'] . '/' . $data['oss_object'];
+        return Result::success($result);
+    }
+
+    /**
      * @param string $content
      * @param string $object
      * @param string $return
@@ -320,7 +417,7 @@ class Oss extends Aliyun {
             $fileTypeArr = explode('/', $content_type);
             $fileType = $fileTypeArr[0];
             $pathArr = explode("/", $object);
-            $ossAr = OssDao::factory();
+            $ossAr = AttachmentTable::factory();
             $ossAr->file_original_name = array_pop($pathArr);
             $ossAr->file_size = ceil(strlen($content) / 1024);
             $ossAr->file_ext = strtolower($extension);
@@ -388,7 +485,7 @@ class Oss extends Aliyun {
                 $fileTypeArr = explode('/', $content_type);
                 $fileType = $fileTypeArr[0];
                 $pathArr = explode("/", $object);
-                $ossAr = OssDao::factory();
+                $ossAr = AttachmentTable::factory();
                 $ossAr->file_original_name = array_pop($pathArr);
                 $ossAr->file_size = 0;
                 $ossAr->oss_server = $this->server['account'];
@@ -405,7 +502,6 @@ class Oss extends Aliyun {
                     return Result::error($ossAr->getError());
                 }
             }
-
             return Result::success($this->server['CDN_DOMAIN'] . $object);
         } catch (Throwable $e) {
             return Result::error($e->getMessage());
@@ -424,6 +520,7 @@ class Oss extends Aliyun {
             'cdn_domain' => $this->server['CDN_DOMAIN']
         ];
     }
+
     /**
      * 返回已经初始化的客户端
      * @return OssClient|null

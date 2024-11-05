@@ -20,6 +20,7 @@ return [
     'redis_queue_in_slave' => false,//slave节点运行redis队列开关
     'slow_log_time' => 10000,//慢日志时间
     'redis_queue_mc' => 512,//redis队列每次取出上线
-    'enable_db_statistics' => false,//开启数据库统计组件,需配置statistics和history数据库
+    'db_statistics_enable' => false,//开启数据库统计组件,需配置statistics和history数据库
+    'db_statistics_interval' => 3,
     'allow_cross_origin' => false
 ];

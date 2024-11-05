@@ -4,13 +4,13 @@ namespace Scf\Cloud\Wx;
 
 
 use App\Common\Model\ConfigModel;
+use App\Db\Wx\WxAccountTable;
 use App\Wx\Component\WxAccount;
-use App\Wx\Db\WxAccountTable;
 use Scf\Client\Http;
+use Scf\Cloud\Wx\Util\MsgCrypt;
 use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Core\Traits\ComponentTrait;
-use Scf\Cloud\Wx\Util\MsgCrypt;
 use Scf\Core\Traits\Singleton;
 
 class OpenPlatform {

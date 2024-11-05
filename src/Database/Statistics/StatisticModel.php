@@ -44,18 +44,17 @@ class StatisticModel {
             Console::error('数据库配置statistics以及history不能为空');
         } else {
             $configDir = Root::dir() . '/Database/Statistics/Yml';
-            if (is_dir($configDir) && $files = Dir::scan($configDir)) {
-                foreach ($files as $file) {
-                    $table = Yaml::parseFile($file);
-                    $arr = explode("/", $table['dao']);
-                    $cls = implode('\\', $arr);
-                    if (!class_exists($cls)) {
-                        Console::error($cls . " not exist");
-                    } else {
-                        /** @var Dao $cls */
-                        $dao = $cls::factory();
-                        $dao->updateTable($table);
-                    }
+            $files = Dir::scan($configDir);
+            foreach ($files as $file) {
+                $table = Yaml::parseFile($file);
+                $arr = explode("/", $table['dao']);
+                $cls = implode('\\', $arr);
+                if (!class_exists($cls)) {
+                    Console::error($cls . " not exist");
+                } else {
+                    /** @var Dao $cls */
+                    $dao = $cls::factory();
+                    $dao->updateTable($table);
                 }
             }
         }

@@ -200,7 +200,7 @@ class Installer extends Struct {
             Util::releaseResource(Root::dir() . '/Command/Resource/config_dev.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/config/app_dev.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/server.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/config/server.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/version.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/version.php', true);
-            Util::releaseResource(Root::dir() . '/Command/Resource/controller/_config.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/_config.php', true);
+            Util::releaseResource(Root::dir() . '/Command/Resource/controller/_module_.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/_module_.php', true);
             Util::releaseResource(Root::dir() . '/Command/Resource/controller/index.php', SCF_APPS_ROOT . '/' . $this->app_path . '/src/lib/Demo/Controller/Controller.php', true);
         }
         return $this->update();
