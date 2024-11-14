@@ -40,14 +40,6 @@ class WorkerListener extends Listener {
             $srcPath = App::src();
             $version = App::version();
             $publicVersion = App::publicVersion();
-            $info = <<<INFO
----------Workers启动完成---------
-内核版本：{$version}
-资源版本：{$publicVersion}
-源码目录：{$srcPath}
----------------------------------
-INFO;
-            Console::write(Color::green($info));
             App::updateDatabase();
             $serverConfig = Config::server();
             //升级/创建统计数据表
@@ -57,6 +49,14 @@ INFO;
             }
             Oss::instance()->createTable();
             Runtime::instance()->serverStatus(true);
+            $info = <<<INFO
+---------Workers启动完成---------
+内核版本：{$version}
+资源版本：{$publicVersion}
+源码目录：{$srcPath}
+---------------------------------
+INFO;
+            Console::write(Color::green($info));
         }
     }
 

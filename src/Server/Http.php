@@ -258,7 +258,7 @@ class Http extends \Scf\Core\Server {
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
-            Runtime::instance()->serverStatus(false);
+            //Runtime::instance()->serverStatus(false);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
             //后台定时任务ID迭代
@@ -439,7 +439,7 @@ INFO;
                 $this->server->reload();
                 //重启控制台
                 if (App::isMaster()) {
-                    $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . ($this->bindPort + 2) . '/reload';
+                    $dashboardHost = 'http://localhost:' . Runtime::instance()->dashboardPort() . '/reload';
                     $client = \Scf\Client\Http::create($dashboardHost);
                     $client->get();
                 }
