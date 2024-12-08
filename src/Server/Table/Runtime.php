@@ -37,7 +37,7 @@ class Runtime extends Table {
      * @return bool
      */
     public function serverStatus(?bool $status = null): bool {
-        if (!is_null($status)) {
+        if (is_bool($status)) {
             return $this->set(Key::RUNTIME_SERVER_STATUS, $status);
         }
         return $this->get(Key::RUNTIME_SERVER_STATUS) ?: false;
