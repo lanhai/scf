@@ -109,7 +109,7 @@ class Http extends \Scf\Core\Server {
                 if (Runtime::instance()->serverStatus()) {
                     break;
                 }
-                sleep(3);
+                sleep(1);
             }
             $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
             $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
@@ -132,7 +132,7 @@ class Http extends \Scf\Core\Server {
                         Console::info("【Server】Redis队列#{$managerId} PID:" . $pid);
                     }
                 }
-                sleep(5);
+                sleep(10);
             }
         });
         $this->server->addProcess($process);
@@ -278,6 +278,7 @@ class Http extends \Scf\Core\Server {
             $this->log(Color::notice('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成'));
             //重置执行中的请求数统计
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
+            Runtime::instance()->serverStatus(true);
         });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
