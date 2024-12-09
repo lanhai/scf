@@ -32,12 +32,14 @@
     "alibabacloud/green-20220302": "2.2.6",
     "alibabacloud/client": "1.5.32",
     "alibabacloud/tea": "3.2.1",
-    "alibabacloud/tea-utils": "0.2.20",
+    "alibabacloud/tea-utils": "0.2.21",
     "php-mqtt/client": "^2.1",
     "twig/twig": "^3.0",
     "laravel/prompts": "^0.1.24",
     "symfony/yaml": "6.4.8",
-    "symfony/console": "^6.4"
+    "symfony/console": "^6.4",
+    "alibabacloud/darabonba-openapi": "0.2.13",
+    "alibabacloud/dysmsapi-20170525": "3.1.0"
   },
   "autoload": {
     "psr-4": {
