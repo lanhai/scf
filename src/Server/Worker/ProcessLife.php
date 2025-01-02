@@ -66,6 +66,9 @@ class ProcessLife {
      * @return void
      */
     public function addRedis($cmd): void {
+        if (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI) {
+            return;
+        }
         $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $cmd;
         if (str_starts_with(strtolower($cmd), 'get') || str_starts_with(strtolower($cmd), 'hget')) {
             $this->redisLogs['get'] += 1;
@@ -94,6 +97,9 @@ class ProcessLife {
      * @return void
      */
     public function addSql($sql): void {
+        if (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI) {
+            return;
+        }
         $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $sql;
         if (str_starts_with(strtolower($sql), 'select')) {
             $this->databaseLogs['read'] += 1;

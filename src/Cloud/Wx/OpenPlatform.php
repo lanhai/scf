@@ -42,7 +42,10 @@ class OpenPlatform {
         if (!$review) {
             return Result::error('暂无过审版本');
         }
-        $result = WxAccount::lookup($appid)->release();
+        $account = WxAccount::lookup($appid);
+        $account->ar()->audit_version = $review;
+        $account->ar()->save();
+        $result = $account->release();
         if ($result->hasError()) {
             return $result;
         }
