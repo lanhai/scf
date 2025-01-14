@@ -123,7 +123,6 @@ class Http extends \Scf\Core\Server {
                     $started = false;
                 }
                 if (!$started) {
-                    $started = true;
                     Runtime::instance()->crontabProcessStatus(true);
                     $pid = Crontab::startProcess();
                     Console::info("【Server】定时任务#{$managerId} PID:" . $pid);
@@ -131,8 +130,9 @@ class Http extends \Scf\Core\Server {
                         $pid = RQueue::startProcess();
                         Console::info("【Server】Redis队列#{$managerId} PID:" . $pid);
                     }
+                    $started = true;
                 }
-                sleep(10);
+                sleep(30);
             }
         });
         $this->server->addProcess($process);
@@ -261,7 +261,7 @@ class Http extends \Scf\Core\Server {
             //Runtime::instance()->serverStatus(false);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
-            //后台定时任务ID迭代
+            //定时任务迭代
             Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             //断开所有客户端连接
             $clients = $this->server->getClientList();

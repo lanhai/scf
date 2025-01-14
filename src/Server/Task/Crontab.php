@@ -147,6 +147,7 @@ class Crontab {
             //服务已重启,终止现有计时器
             if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                 Timer::clearAll();
+                sleep(3);
                 Runtime::instance()->crontabProcessStatus(false);
                 Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
             }
