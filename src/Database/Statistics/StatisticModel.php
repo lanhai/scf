@@ -290,7 +290,14 @@ class StatisticModel {
                         continue;
                     }
                     $m['days'] = 1;
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
                         $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->sum($sum)->getData();
@@ -308,7 +315,14 @@ class StatisticModel {
                         continue;
                     }
                     $m['days'] = 1;
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
                         $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->sum($sum)->getData();
@@ -329,7 +343,14 @@ class StatisticModel {
                     }
                     $m['result'] = 0;
                     $m['days'] = count($days);
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
                         $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->end($end)->init()->sum($sum)->getData();
@@ -352,7 +373,14 @@ class StatisticModel {
                     $m['result'] = 0;
                     $m['days'] = $day;
                     $date = date("Y-m-d", strtotime("-" . $day . " days"));
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
                         $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($date)->init()->sum($sum)->getData();
@@ -501,7 +529,14 @@ class StatisticModel {
                     $scenes[$k]['total'] = 0;
                     $scenes[$k]['series'] = [];
                     $thisHour = date('H', time());
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? false;
                     if ($m['scene'] == 'compute') {
                         goto compute;
@@ -637,7 +672,14 @@ class StatisticModel {
                 foreach ($scenes as &$m) {
                     $m['total'] = 0;
                     $m['series'] = [];
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? false;
                     if ($m['scene'] == 'compute') {
                         goto computeDay2;
@@ -794,7 +836,14 @@ class StatisticModel {
                     $m['series'] = [];
                     $m['day_series'] = [];
                     $j = 0;
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? false;
                     if ($m['scene'] == 'compute') {
                         goto computeDay3;
@@ -996,7 +1045,14 @@ class StatisticModel {
                     $m['series'] = [];
                     $m['day_series'] = [];
                     $j = 0;
-                    $condition = $m['condition'] ?? [];
+                    if (!empty($m['conditions'])) {
+                        $condition = [];
+                        foreach ($m['conditions'] as $item) {
+                            $condition[$item['key']] = $item['value'];
+                        }
+                    } else {
+                        $condition = $m['condition'] ?? [];
+                    }
                     $sum = $m['sum'] ?? false;
                     if ($m['scene'] == 'compute') {
                         goto computeDefault;

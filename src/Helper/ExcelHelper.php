@@ -3,6 +3,7 @@
 namespace Scf\Helper;
 
 use Scf\Cloud\Ali\Oss;
+use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Util\Sn;
 use Vtiful\Kernel\Excel;
@@ -11,10 +12,10 @@ class ExcelHelper {
     /**
      * @param array $data
      * @param array $headerMaps
-     * @param string $fileName
+     * @param ?string $fileName
      * @return Result
      */
-    public static function export(array $data, array $headerMaps, string $fileName): Result {
+    public static function export(array $data, array $headerMaps, ?string $fileName = null): Result {
         $exportDatas = [];
         $header = [];
         $keys = [];
@@ -41,8 +42,14 @@ class ExcelHelper {
             ->header($header)
             ->data($exportDatas)
             ->output();
-        $oss = Oss::instance()->uploadFile($filePath, '/upload/excel/' . date('Ymd') . '/' . $fileName);
+        //var_dump(basename($filePath));
+        //$extension = pathinfo($filePath, PATHINFO_EXTENSION);
+        //$uploadResult = Oss::instance()->upload(file_get_contents($filePath), $extension);
+        $uploadResult = Oss::instance()->uploadFile($filePath, '/upload/excel/' . date('Ymd') . '/' . $fileName);
+        if ($uploadResult->hasError()) {
+            return Result::error($uploadResult->getMessage());
+        }
         @unlink($filePath);
-        return Result::success($oss->getData());
+        return Result::success($uploadResult->getData());
     }
 }

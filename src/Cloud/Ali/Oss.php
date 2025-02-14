@@ -8,6 +8,7 @@ use AlibabaCloud\Tea\Exception\TeaUnableRetryError;
 use Darabonba\OpenApi\Models\Config;
 use JetBrains\PhpStorm\ArrayShape;
 use OSS\Core\OssException;
+use OSS\Http\RequestCore_Exception;
 use OSS\OssClient;
 use Scf\Client\Http;
 use Scf\Cloud\Aliyun;
@@ -78,7 +79,6 @@ class Oss extends Aliyun {
         $this->accessId = $account['accessId'];
         $this->accessKey = $account['accessKey'];
         //Endpoint以杭州为例，其它Region请按实际情况填写。
-        $endpoint = $this->server['ENDPOINT'];
         try {
             $this->_client = new OssClient($this->accessId, $this->accessKey, $this->server['ENDPOINT'], $this->server['IS_CNNAME']);
         } catch (OssException $e) {
@@ -307,8 +307,12 @@ class Oss extends Aliyun {
         if (is_null($object)) {
             $object = '/upload/' . Date::today() . '/' . Sn::create_uuid() . '.' . $ext;
         }
-        $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $content);
-        return Result::success($return == 'url' ? ($this->server['CDN_DOMAIN'] . $object) : $object);
+        try {
+            $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $content);
+            return Result::success($return == 'url' ? ($this->server['CDN_DOMAIN'] . $object) : $object);
+        } catch (OssException|RequestCore_Exception $e) {
+            return Result::error($e->getMessage());
+        }
     }
 
     /**
@@ -321,7 +325,7 @@ class Oss extends Aliyun {
         try {
             $this->client()->uploadFile($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $filePath);
             return Result::success($this->server['CDN_DOMAIN'] . $object);
-        } catch (OssException $e) {
+        } catch (OssException|RequestCore_Exception $e) {
             return Result::error($e->getMessage());
         }
     }
