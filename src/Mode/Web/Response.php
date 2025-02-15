@@ -230,6 +230,10 @@ EOT;
         $this->response->header(StringHelper::lower2camel($key), $val, $format);
     }
 
+    public function sendFile($filePath) {
+        $this->response->sendfile($filePath);
+    }
+
     public function json($data): void {
         $logger = ProcessLife::instance();
         Env::isDev() and $data['debug'] = $logger->requestDebugInfo();
