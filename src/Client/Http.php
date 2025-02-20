@@ -38,7 +38,6 @@ class Http {
      * @return static
      */
     public static function create($url, int $port = 0, array $certificate = null): static {
-        $cid = Coroutine::getCid();
         $parsedUrl = parse_url($url);
         $protocol = $parsedUrl['scheme'] ?? 'http';
         $host = $parsedUrl['host'];
@@ -65,15 +64,17 @@ class Http {
 //        }
         $class = static::class;
         $ssl = $protocol == 'https';
-        if (!isset(self::$_instances[md5($url) . '_' . $cid])) {
-            self::$_instances[md5($url) . '_' . $cid] = new $class($protocol, $host, $path, $port ?: ($ssl ? 443 : 80), $ssl, $certificate);
-        }
-        if ($cid > 0) {
-            Coroutine::defer(function () use ($url, $cid) {
-                unset(static::$_instances[md5($url) . '_' . $cid]);
-            });
-        }
-        return self::$_instances[md5($url) . '_' . $cid];
+        return new $class($protocol, $host, $path, $port ?: ($ssl ? 443 : 80), $ssl, $certificate);
+//        $cid = Coroutine::getCid();
+//        if (!isset(self::$_instances[md5($url) . '_' . $cid])) {
+//            self::$_instances[md5($url) . '_' . $cid] = new $class($protocol, $host, $path, $port ?: ($ssl ? 443 : 80), $ssl, $certificate);
+//        }
+//        if ($cid > 0) {
+//            Coroutine::defer(function () use ($url, $cid) {
+//                unset(static::$_instances[md5($url) . '_' . $cid]);
+//            });
+//        }
+//        return self::$_instances[md5($url) . '_' . $cid];
     }
 
     /**
