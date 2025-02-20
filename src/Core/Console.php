@@ -207,7 +207,8 @@ class Console {
 
     public static function write($str, $break = true): void {
         $str = $str . ($break ? "\n" : "");
-        fwrite(STDOUT, $str);
+        echo $str;
+        //fwrite(STDOUT, $str);
     }
 
     /**
@@ -266,14 +267,17 @@ class Console {
     public static function log(string $str, bool $push = true): void {
         if (defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
             //Coroutine::create(function () use ($str) {
-            $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
-            $client = Http::create('http://localhost:' . $port . '/@console.message@/');
-            $client->post([
-                'message' => $str
-            ]);
-            defer(function () use ($client) {
+            Timer::after(100, function () use ($str) {
+                $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
+                $client = Http::create('http://localhost:' . $port . '/@console.message@/');
+                $client->post([
+                    'message' => $str
+                ]);
                 $client->close();
             });
+//            defer(function () use ($client) {
+//                $client->close();
+//            });
             //});
         }
         if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
@@ -281,7 +285,8 @@ class Console {
         } else {
             $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
         }
-        fwrite(STDOUT, $str);
+        echo $str;
+        //fwrite(STDOUT, $str);
         flush();
     }
 }
