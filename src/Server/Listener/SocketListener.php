@@ -32,7 +32,6 @@ class SocketListener extends Listener {
      * @throws Exception
      */
     protected function onMessage(Server $server, Frame $frame): void {
-
         if (JsonHelper::is($frame->data)) {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
@@ -157,15 +156,15 @@ class SocketListener extends Listener {
                     }
                     $server->disconnect($frame->fd);
                     break;
-                case str_starts_with($frame->data, 'appoint_update'):
+                case str_starts_with($frame->data, 'appoint_update')://指定更新
                     $data = explode(":", $frame->data)[1];
                     $arr = explode("|", $data);
                     $type = $arr[0];
                     $version = $arr[1];
                     if (Http::instance()->appointUpdateTo($type, $version)) {
-                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "更新成功");
+                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新成功:{$type}=>{$version}");
                     } else {
-                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "更新失败");
+                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新失败:{$type}=>{$version}");
                     }
                     $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->disconnect($frame->fd);
                     break;

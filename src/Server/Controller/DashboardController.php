@@ -186,6 +186,7 @@ class DashboardController extends Controller {
             'version' => Request\Validator::required('版本号不能为空')
         ])->assign($type, $version);
         $manager = new NodeManager();
+        //向节点推送版本更新指令
         $result = $manager->appointUpdate($type, $version);
         if ($result->hasError()) {
             return Result::error($result->getMessage());

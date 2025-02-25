@@ -88,7 +88,7 @@ return [
     'components' => [
         //日志推送服务配置
         'Scf\Component\SocketMessager' => [
-            'broker' => 'mqtt.dmool.com',
+            'broker' => 'mqtt.lkyapp.com',
             'port' => 1883,
             'client_id' => 'logger_publisher',
             'username' => 'admin',

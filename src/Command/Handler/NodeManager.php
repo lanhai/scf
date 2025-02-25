@@ -175,17 +175,17 @@ class NodeManager {
                             $reply = $websocket->recv(1);
                             if ($reply) {
                                 if (!$reply->data) {
-                                    Console::log("【" . $node->ip . "】日志监听连接已断开", false);
+                                    Console::info("【NODE-" . $node->ip . "】日志监听连接已断开", false);
                                     break;
                                 } else {
-                                    Console::log("【" . $node->ip . "】" . Color::green($reply), false);
+                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
                                 }
                             }
                             Coroutine::sleep(0.1);
                         }
                     });
                 } catch (RequestException $exception) {
-                    Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
+                    Console::error("【NODE-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
                 }
             }
         });
@@ -218,17 +218,17 @@ class NodeManager {
                             $reply = $websocket->recv(1);
                             if ($reply) {
                                 if (!$reply->data) {
-                                    Console::log("【" . $node->ip . "】升级完成", false);
+                                    Console::info("【NODE-" . $node->ip . "】升级完成", false);
                                     break;
                                 } else {
-                                    Console::log("【" . $node->ip . "】" . Color::green($reply), false);
+                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
                                 }
                             }
                             Coroutine::sleep(0.1);
                         }
                     });
                 } catch (RequestException $exception) {
-                    Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
+                    Console::error("【NODE-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
                 }
             }
         });
@@ -268,17 +268,17 @@ class NodeManager {
                         if ($reply) {
                             if (!$reply->data) {
                                 $count++;
-                                Console::log("【" . $node->ip . "】升级完成", false);
+                                //Console::info("【NODE-" . $node->ip . "】升级完成", false);
                                 break;
                             } else {
-                                Console::log("【" . $node->ip . "】" . Color::green($reply), false);
+                                Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
                             }
                         }
                         Coroutine::sleep(0.5);
                     }
 
                 } catch (RequestException $exception) {
-                    Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
+                    Console::error("【node-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
                 }
             });
         }

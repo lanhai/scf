@@ -29,7 +29,7 @@ abstract class Server {
      * @param string $str
      */
     protected function log(string $str): void {
-        Console::log("【Server】" . $str, false);
+        Console::info("【Server】" . $str, false);
     }
 
     /**

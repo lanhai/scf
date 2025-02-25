@@ -112,7 +112,7 @@ class Log {
         $logId = Counter::instance()->incr($this->idCounterKey);
         $table->set($logId, ['type' => 'error', 'log' => $log]);
         //推送到控制台
-        Console::push(Color::red($log['message'] . ' @ ' . $log['file']));
+        Console::error($log['message'] . ' @ ' . $log['file']);
         //通知机器人
         try {
             SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
@@ -137,9 +137,8 @@ class Log {
         $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
         $table->set($logId, ['type' => 'info', 'log' => $log]);
-
         //推送到控制台
-        Console::push(Color::notice(JsonHelper::toJson($msg)));
+        Console::info(JsonHelper::toJson($msg));
         //通知机器人
         try {
             $m['time'] = date('Y-m-d H:i:s');
