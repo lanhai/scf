@@ -230,7 +230,7 @@ EOT;
         $this->response->header(StringHelper::lower2camel($key), $val, $format);
     }
 
-    public function sendFile($filePath) {
+    public function sendFile($filePath): void {
         $this->response->sendfile($filePath);
     }
 

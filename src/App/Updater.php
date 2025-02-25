@@ -5,6 +5,7 @@ namespace Scf\App;
 use PhpZip\Exception\ZipException;
 use PhpZip\ZipFile;
 use Scf\Client\Http;
+use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\App;
@@ -38,7 +39,7 @@ class Updater {
     public function updateApp(bool $isInstall = false): bool {
         $version = $this->getRemoteVersion();
         if (is_null($version) || !isset($version['app'])) {
-            Log::instance()->error('升级失败:获取版本服务器版本号失败!');
+            Log::instance()->error('【Server】升级失败:获取版本服务器版本号失败!');
             return false;
         }
         return $this->changeAppVersion($version['app']['version'], $isInstall);
@@ -56,20 +57,20 @@ class Updater {
         $versionInfo = null;
         $app = App::info();
         if (!$app->update_server) {
-            Log::instance()->error('应用未设置更新服务器');
+            Log::instance()->error('【Server】应用未设置更新服务器');
             return false;
         }
         try {
             $client = Http::create($app->update_server . '?time=' . time());
             $result = $client->get();
             if ($result->hasError()) {
-                Log::instance()->error('获取云端版本号失败:' . Color::red($result->getMessage()));
+                Log::instance()->error('【Server】获取云端版本号失败:' . Color::red($result->getMessage()));
                 return false;
             }
             $remote = $result->getData();
             $appVersion = $remote['app'];
         } catch (\Error $error) {
-            Log::instance()->error('获取版本服务器版本号失败:' . $error->getMessage());
+            Log::instance()->error('【Server】获取版本服务器版本号失败:' . $error->getMessage());
             return false;
         }
         foreach ($appVersion as $v) {
@@ -79,7 +80,7 @@ class Updater {
             }
         }
         if (is_null($versionInfo)) {
-            Log::instance()->error('升级失败:未查询到版本:' . $version);
+            Log::instance()->error('【Server】升级失败:未查询到版本:' . $version);
             return false;
         }
         if (!is_null($appoint)) {
@@ -120,7 +121,7 @@ class Updater {
             $client->download($versionInfo['public_object'], $publicFilePath);
             $code = $client->getStatusCode();
             if ($code !== 200) {
-                Log::instance()->error('升级失败:资源包下载失败:' . $client->errMsg . '(' . $code . ')');
+                Log::instance()->error('【Server】升级失败:资源包下载失败:' . $client->errMsg . '(' . $code . ')');
                 return false;
             }
             //Log::instance()->info("资源包下载完成:" . $publicFilePath);
@@ -132,7 +133,7 @@ class Updater {
                 $zipFile->openFromString($stream)->setReadPassword($app->app_auth_key)->extractTo(APP_PUBLIC_PATH);
                 //Log::instance()->info("资源包解压成功");
             } catch (ZipException $e) {
-                Log::instance()->error("资源包解压失败:" . Color::red($e->getMessage()));
+                Log::instance()->error("【Server】资源包解压失败:" . Color::red($e->getMessage()));
                 return false;
             } finally {
                 $zipFile->close();
@@ -141,7 +142,7 @@ class Updater {
             $installer->public_version = $publicVersion;
             $installer->updated = date('Y-m-d H:i:s');
             if (!$installer->update()) {
-                Log::instance()->error('升级失败:更新版本配置文件失败');
+                Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
                 return false;
             }
         }
@@ -161,7 +162,7 @@ class Updater {
             $client->download($versionInfo['app_object'], $updateFilePath);
             $code = $client->getStatusCode();
             if ($code !== 200) {
-                Log::instance()->error('升级失败:源码包下载失败:' . $client->errMsg . '(' . $code . ')');
+                Log::instance()->error('【Server】升级失败:源码包下载失败:' . $client->errMsg . '(' . $code . ')');
                 return false;
             }
             //Log::instance()->info("开始写入文件:" . $appFile);
@@ -171,11 +172,11 @@ class Updater {
             }
             $updateContent = File::read($updateFilePath);
             if (!$code = Auth::decode($updateContent, $app->app_auth_key)) {
-                Log::instance()->error('升级失败:源码解析失败');
+                Log::instance()->error('【Server】升级失败:源码解析失败');
                 return false;
             }
             if (!File::write($appFile, $code)) {
-                Log::instance()->error('升级失败:更新写入失败');
+                Log::instance()->error('【Server】升级失败:更新写入失败');
                 return false;
             }
             //Log::instance()->info("源码包更新成功");
@@ -184,7 +185,7 @@ class Updater {
             $app->version = $version;
             $app->updated = date('Y-m-d H:i:s');
             if (!$app->update()) {
-                Log::instance()->error('升级失败:更新版本配置文件失败');
+                Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
                 return false;
             }
         }
@@ -194,7 +195,7 @@ class Updater {
             'remark' => $versionInfo['remark']
         ];
         File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
-        Log::instance()->info("已更新至版本:" . $version);
+        Log::instance()->info("【Server】{$appoint} 已更新至版本:" . $version);
         clearstatcache();
         return true;
     }
@@ -228,8 +229,8 @@ class Updater {
         } else if ($type == 'public' && !$versionInfo['public_object']) {
             return Result::error('未匹配到资源文件');
         }
-        if (($type == 'app' && !$this->changeAppVersion($version, appoint: 'app')) || ($type == 'public' && !$this->changeAppVersion($version, appoint: 'public'))) {
-            return Result::error('更新时间');
+        if (!$this->changeAppVersion($version, appoint: $type)) {
+            return Result::error('更新失败');
         }
         return Result::success(App::info()->toArray());
     }
