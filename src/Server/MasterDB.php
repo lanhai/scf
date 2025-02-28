@@ -2,11 +2,7 @@
 
 namespace Scf\Server;
 
-use Monolog\Handler\RotatingFileHandler;
-use Monolog\Handler\StreamHandler;
-use Monolog\Logger;
 use Scf\Core\Console;
-use Scf\Core\Traits\Singleton;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\App;
 use Scf\Command\Color;
@@ -19,25 +15,13 @@ use Swoole\Redis\Server;
 use Swoole\Timer;
 use Throwable;
 
+/**
+ * master节点的redis服务器,用于存储所有节点的运行状态数据和日志归一化
+ */
 class MasterDB {
-    use Singleton;
-
-    protected array $_config = [
-        'enable_save_to_table' => false,
-        'enable_sql' => true,
-        'enable_error' => true,
-        'enable_message' => true,
-        'enable_access' => true,
-        'check_dir' => true,
-        'error_level' => Logger::NOTICE, // 错误日志记录等级
-    ];
 
     protected array $data = [];
-    /**
-     * 日志对象集合
-     * @var array(Logger)
-     */
-    protected array $_loggers = [];
+
 
     public static function start(int $port = 16379): void {
         if (!App::isMaster()) {
@@ -45,7 +29,8 @@ class MasterDB {
         }
         $process = new Process(function () use ($port) {
             try {
-                MasterDB::instance()->create(Manager::instance()->issetOpt('d'), $port);
+                $class = new static();
+                $class->create(Manager::instance()->issetOpt('d'), $port);
             } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
@@ -55,14 +40,14 @@ class MasterDB {
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
         });
         Event::wait();
+        // 检查主进程是否启动
         if (!Process::kill($masterDbPid, 0)) {
-            Console::error('【MasterDB】服务启动失败');
+            Console::error("【MasterDB】服务启动失败");
             exit();
         } else {
             Console::info("【MasterDB】服务启动完成!PID:" . $masterDbPid . ",PORT:" . $port);
         }
     }
-
 
     /**
      * @param bool $daemonize
@@ -71,7 +56,7 @@ class MasterDB {
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
         try {
-            ini_set('memory_limit', '256M');
+            ini_set('memory_limit', '512M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
             $setting = [
                 'worker_num' => 1,
@@ -79,11 +64,8 @@ class MasterDB {
                 'pid_file' => SERVER_MASTER_DB_PID_FILE
             ];
             $server->set($setting);
-            if (is_file(APP_RUNTIME_DB)) {
-                $this->data = unserialize(file_get_contents(APP_RUNTIME_DB)) ?: [];
-            } else {
-                $this->data = [];
-            }
+            $this->data = is_file(APP_RUNTIME_DB) ? (unserialize(file_get_contents(APP_RUNTIME_DB)) ?: []) : [];
+
             $server->setHandler('lLen', function ($fd, $data) use ($server) {
                 $key = $data[0];
                 if (empty($this->data[$key])) {
@@ -387,10 +369,10 @@ class MasterDB {
 //
 //            });
             $server->on('WorkerStart', function (Server $server) {
-                Timer::tick(1000 * 10, function () use ($server) {
-                    //Console::log("【MasterDB】数据持久化大小:" . strlen(serialize($this->data)));
-                    File::write(APP_RUNTIME_DB, serialize($this->data));
-                    //file_put_contents(APP_RUNTIME_DB, serialize($this->data));
+                Timer::tick(1000 * 30, function () use ($server) {
+                    Console::log("【MasterDB】数据大小:" . round((strlen(serialize($this->data)) / 1024 / 1024), 2) . "MB");
+                    System::writeFile(APP_RUNTIME_DB, serialize($this->data));
+                    //File::write(APP_RUNTIME_DB, serialize($this->data));
                 });
             });
 //            $server->on('start', function (Server $server) {
@@ -418,71 +400,5 @@ class MasterDB {
             $line = (int)$arr[0];
         }
         return $line;
-    }
-
-    /**
-     * 设置日志记录器
-     * @param $name
-     * @param Logger $logger
-     * @return void
-     */
-    public function setLogger($name, Logger $logger): void {
-        $this->_loggers[$name] = $logger;
-    }
-
-    /**
-     * @param $name
-     * @return ?Logger
-     */
-    public function getLogger($name): ?Logger {
-        if (!isset($this->_loggers[$name])) {
-            switch ($name) {
-                case 'error':
-                    $this->setLogger('error', $this->createLogger('error', $this->_config['error_level']));
-                    break;
-                case 'access':
-                    if ($this->_config['enable_access']) {
-                        $this->setLogger('access', $this->createLogger('access'));
-                    }
-                    break;
-                case 'message':
-                    if ($this->_config['enable_message']) {
-                        $logger = $this->createLogger('message');
-                        $this->setLogger('message', $logger);
-                    }
-                    break;
-                case 'sql';
-                    if ($this->_config['enable_sql']) {
-                        $this->setLogger('sql', $this->createLogger('sql'));
-                    }
-                    break;
-                default:
-                    $this->setLogger($name, $this->createLogger($name));
-                    break;
-            }
-        }
-        return $this->_loggers[$name] ?: null;
-    }
-
-
-    /**
-     * 创建日志记录器
-     * @param $name
-     * @param int $level
-     * @param bool $rotating
-     * @return Logger
-     */
-    public function createLogger($name, int $level = Logger::INFO, bool $rotating = true): Logger {
-        $dir = APP_LOG_PATH;
-        if ($this->_config['check_dir'] and !is_dir($dir)) {
-            mkdir($dir, 0775, true);
-        }
-        $handler = $rotating ?
-            new RotatingFileHandler($dir . '/' . $name . '.log', 100, $level) :
-            new StreamHandler($dir . '/' . $name . '.log', $level);
-        $logger = new Logger($name);
-        $logger->pushHandler($handler);
-
-        return $logger;
     }
 }
