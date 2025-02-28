@@ -7,6 +7,7 @@ use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\App;
 use Scf\Command\Color;
 use Scf\Command\Manager;
+use Scf\Server\Table\Runtime;
 use Scf\Util\File;
 use Swoole\Coroutine\System;
 use Swoole\Event;
@@ -22,17 +23,53 @@ class MasterDB {
 
     protected array $data = [];
 
+    protected static function kill($pid, $try = 0): bool {
+        if ($try >= 10) {
+            return false;
+        }
+        if (Process::kill($pid, 0)) {
+            $try++;
+            exec("kill -9 " . $pid);
+            sleep(1);
+            return self::kill($pid, $try);
+        }
+        return true;
+    }
 
     public static function start(int $port = 16379): void {
         if (!App::isMaster()) {
             return;
         }
+        if (\Scf\Core\Server::isPortInUse($port)) {
+            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
+            if (Process::kill($masterDbPid, 0)) {
+                Console::warning("【MasterDB】端口被占用,尝试重启:{$masterDbPid}");
+                if (!self::kill($masterDbPid)) {
+                    Console::error("【MasterDB】端口被占用[{$masterDbPid}],尝试重启失败");
+                    exit();
+                }
+            }
+        }
         $process = new Process(function () use ($port) {
-            try {
-                $class = new static();
-                $class->create(Manager::instance()->issetOpt('d'), $port);
-            } catch (Throwable $exception) {
-                Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
+            while (true) {
+                $masterDbPid = Runtime::instance()->get('masterDbPid');
+                if (!$masterDbPid || !Process::kill($masterDbPid, 0)) {
+                    // 启动服务器的独立进程
+                    $serverProcess = new Process(function () use ($port) {
+                        // 这里是启动服务器的逻辑
+                        $class = new static();
+                        $class->create(true, $port);
+                    });
+                    // 启动服务器进程
+                    $serverPid = $serverProcess->start();
+                    Console::success("【MasterDB】启动完成, PID: " . $serverPid);
+                    // 监听子进程状态
+                    $status = Process::wait(false);
+                    if ($status) {
+                        Console::warning("【MasterDB】子进程退出, PID: " . $status['pid'] . ", 退出状态: " . $status['code']);
+                    }
+                }
+                sleep(5);
             }
         });
         $process->start();
@@ -45,7 +82,7 @@ class MasterDB {
             Console::error("【MasterDB】服务启动失败");
             exit();
         } else {
-            Console::info("【MasterDB】服务启动完成!PID:" . $masterDbPid . ",PORT:" . $port);
+            Console::info("【MasterDB】服务启动完成!SERVER PID:" . $masterDbPid . ",Manager PID:" . $process->pid . ",PORT:" . $port);
         }
     }
 
@@ -56,16 +93,21 @@ class MasterDB {
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
         try {
-            ini_set('memory_limit', '512M');
+            ini_set('memory_limit', '256M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
+            if (!is_dir(APP_PATH . '/db/logs')) {
+                mkdir(APP_PATH . '/db/logs', 0777, true);
+            }
             $setting = [
                 'worker_num' => 1,
                 'daemonize' => $daemonize,
-                'pid_file' => SERVER_MASTER_DB_PID_FILE
+                'pid_file' => SERVER_MASTER_DB_PID_FILE,
+                'log_file' => APP_PATH . '/db/logs/log',
+                'log_date_format' => '%Y-%m-%d %H:%M:%S',
+                'log_rotation' => SWOOLE_LOG_ROTATION_DAILY
             ];
             $server->set($setting);
             $this->data = is_file(APP_RUNTIME_DB) ? (unserialize(file_get_contents(APP_RUNTIME_DB)) ?: []) : [];
-
             $server->setHandler('lLen', function ($fd, $data) use ($server) {
                 $key = $data[0];
                 if (empty($this->data[$key])) {
@@ -369,21 +411,26 @@ class MasterDB {
 //
 //            });
             $server->on('WorkerStart', function (Server $server) {
+                Runtime::instance()->set('masterDbPid', $server->master_pid);
+//                Timer::after(1000 * 5, function () use ($server) {
+//                    // 模拟内存耗尽
+//                    $largeArray = [];
+//                    for ($i = 0; $i < 1000000; $i++) {
+//                        $largeArray[] = str_repeat('a', 1024); // 每个元素占用 1KB 内存
+//                    }
+//                });
                 Timer::tick(1000 * 30, function () use ($server) {
-                    Console::log("【MasterDB】数据大小:" . round((strlen(serialize($this->data)) / 1024 / 1024), 2) . "MB");
+//                    Console::log("【MasterDB】数据大小:" . round((strlen(serialize($this->data)) / 1024 / 1024), 2) . "MB");
                     System::writeFile(APP_RUNTIME_DB, serialize($this->data));
                     //File::write(APP_RUNTIME_DB, serialize($this->data));
                 });
             });
 //            $server->on('start', function (Server $server) {
-//                Timer::tick(5000, function () use ($server) {
-//                    file_put_contents(APP_RUNTIME_DB, serialize($this->data));
-//                });
+//                Console::info('【MasterDB】服务启动成功:' . $server->master_pid);
 //            });
             $server->start();
         } catch (Throwable $exception) {
             Console::log('【MasterDB】服务启动失败:' . Color::red($exception->getMessage()));
-            exit();
         }
     }
 
