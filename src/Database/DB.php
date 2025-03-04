@@ -12,6 +12,7 @@ use Scf\Mode\Web\Log;
 use Scf\Server\Http;
 use Scf\Server\Table\Counter;
 use Scf\Server\Table\PdoPoolTable;
+use Swoole\Coroutine;
 use Swoole\Timer;
 use Throwable;
 
@@ -186,7 +187,10 @@ class DB {
                 'timer_id' => $idleCheckTimerId
             ]);
         }
-        //Console::success("#" . $this->poolId . " 连接池创建成功,db:" . $this->dbName);
+//        Console::success("#" . $this->poolId . " 连接池创建成功,db:" . $this->dbName);
+//        Coroutine::defer(function () {
+//            $this->destory();
+//        });
     }
 
     /**
@@ -198,7 +202,7 @@ class DB {
             Timer::clear($timerId);
             PdoPoolTable::instance()->delete($this->poolId);
             //Counter::instance()->decr(self::PDO_POOL_ID_KEY);
-            //Console::error("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
+           // Console::warning("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
         }
     }
 
@@ -206,13 +210,7 @@ class DB {
      * 销毁
      */
     public function __destruct() {
-        //清理空闲连接回收计时器
-        if ($timerId = PdoPoolTable::instance()->get($this->poolId, 'timer_id')) {
-            Timer::clear($timerId);
-            PdoPoolTable::instance()->delete($this->poolId);
-            //Counter::instance()->decr(self::PDO_POOL_ID_KEY);
-            //Console::error("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
-        }
+        $this->destory();
     }
 
     /**

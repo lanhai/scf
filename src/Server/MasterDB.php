@@ -6,7 +6,6 @@ use Scf\Core\Console;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\App;
 use Scf\Command\Color;
-use Scf\Command\Manager;
 use Scf\Server\Table\Runtime;
 use Scf\Util\File;
 use Swoole\Coroutine\System;
@@ -23,18 +22,6 @@ class MasterDB {
 
     protected array $data = [];
 
-    protected static function kill($pid, $try = 0): bool {
-        if ($try >= 10) {
-            return false;
-        }
-        if (Process::kill($pid, 0)) {
-            $try++;
-            exec("kill -9 " . $pid);
-            sleep(1);
-            return self::kill($pid, $try);
-        }
-        return true;
-    }
 
     public static function start(int $port = 16379): void {
         if (!App::isMaster()) {
@@ -42,10 +29,16 @@ class MasterDB {
         }
         if (\Scf\Core\Server::isPortInUse($port)) {
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-            if (Process::kill($masterDbPid, 0)) {
-                Console::warning("【MasterDB】端口被占用,尝试重启:{$masterDbPid}");
+            if ($masterDbPid && Process::kill($masterDbPid, 0)) {
+                Console::warning("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程");
                 if (!self::kill($masterDbPid)) {
-                    Console::error("【MasterDB】端口被占用[{$masterDbPid}],尝试重启失败");
+                    Console::error("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程失败");
+                    exit();
+                }
+            } else {
+                Console::warning("【MasterDB】端口被占用,尝试重启结束所有PHP进程");
+                if (!self::killall($port)) {
+                    Console::error("【MasterDB】端口被占用,尝试结束进程失败");
                     exit();
                 }
             }
@@ -61,8 +54,9 @@ class MasterDB {
                         $class->create(true, $port);
                     });
                     // 启动服务器进程
-                    $serverPid = $serverProcess->start();
-                    Console::success("【MasterDB】启动完成, PID: " . $serverPid);
+                    $serverProcessPid = $serverProcess->start();
+                    Console::success("【MasterDB】启动完成,PID: " . $serverProcessPid);
+                    Runtime::instance()->set('masterDbManagerPid', $serverProcessPid);
                     // 监听子进程状态
                     $status = Process::wait(false);
                     if ($status) {
@@ -84,6 +78,7 @@ class MasterDB {
         } else {
             Console::info("【MasterDB】服务启动完成!SERVER PID:" . $masterDbPid . ",Manager PID:" . $process->pid . ",PORT:" . $port);
         }
+
     }
 
     /**
@@ -419,6 +414,15 @@ class MasterDB {
 //                        $largeArray[] = str_repeat('a', 1024); // 每个元素占用 1KB 内存
 //                    }
 //                });
+                $managerPid = Runtime::instance()->get('masterDbManagerPid');
+                Timer::tick(1000 * 2, function () use ($server, $managerPid) {
+                    if ($managerPid && !Process::kill($managerPid, 0)) {
+                        //Console::log('【MasterDB】主进程已结束,关闭服务器,ManagerPID:' . $managerPid);
+                        //$server->shutdown();
+                        //$server->stop();
+                        exec("kill -9 " . $server->master_pid);
+                    }
+                });
                 Timer::tick(1000 * 30, function () use ($server) {
 //                    Console::log("【MasterDB】数据大小:" . round((strlen(serialize($this->data)) / 1024 / 1024), 2) . "MB");
                     System::writeFile(APP_RUNTIME_DB, serialize($this->data));
@@ -426,12 +430,60 @@ class MasterDB {
                 });
             });
 //            $server->on('start', function (Server $server) {
-//                Console::info('【MasterDB】服务启动成功:' . $server->master_pid);
+//                //Console::info('【MasterDB】服务启动成功:' . $server->master_pid);
 //            });
             $server->start();
         } catch (Throwable $exception) {
             Console::log('【MasterDB】服务启动失败:' . Color::red($exception->getMessage()));
         }
+    }
+
+    protected static function kill($pid, $try = 0): bool {
+        if ($try >= 10) {
+            return false;
+        }
+        if (Process::kill($pid, 0)) {
+            $try++;
+            exec("kill -9 " . $pid);
+            sleep(1);
+            return self::kill($pid, $try);
+        }
+        return true;
+    }
+
+    protected static function killall($port, $try = 0): bool {
+        if ($try >= 10) {
+            if (self::killProcessByPort($port)) {
+                return true;
+            }
+            return false;
+        }
+        if (\Scf\Core\Server::isPortInUse($port)) {
+            $try++;
+            //exec("killall php");
+            self::killProcessByPort($port);
+            sleep(1);
+            return self::killall($port, $try);
+        }
+        return true;
+    }
+
+    protected static function killProcessByPort(int $port): bool {
+        // 查找占用端口的进程
+        $output = shell_exec("lsof -ti :$port");
+        if (empty($output)) {
+            Console::info("【MasterDB】没有进程占用端口:$port");
+            return true;
+        }
+
+        $pids = explode("\n", trim($output));
+        foreach ($pids as $pid) {
+            if (!empty($pid)) {
+                Console::info("【MasterDB】结束进程 $pid 占用端口:$port");
+                exec("kill -9 $pid");
+            }
+        }
+        return true;
     }
 
     /**
