@@ -116,9 +116,8 @@ class Redis extends Cache {
      */
     private function createPool(string|array $server = 'main'): static {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
-        $server = Http::master();
-        var_dump(get_called_class());
-        $isTaskWorker = !is_null($server) && $server->taskworker;
+        $httpServer = Http::master();
+        $isTaskWorker = !is_null($httpServer) && $httpServer->taskworker;
         if ($isTaskWorker && (!isset($config['task_worker_enable']) || !$config['task_worker_enable'])) {
             return static::connect($server);
         }
