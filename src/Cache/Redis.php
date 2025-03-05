@@ -128,9 +128,9 @@ class Redis extends Cache {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
         $httpServer = Http::master();
         $isTaskWorker = !is_null($httpServer) && $httpServer->taskworker;
-        if ($isTaskWorker && (!isset($config['task_worker_enable']) || !$config['task_worker_enable'])) {
-            return static::connect($server);
-        }
+//        if ($isTaskWorker && (!isset($config['task_worker_enable']) || !$config['task_worker_enable'])) {
+//            return static::connect($server);
+//        }
         try {
             if (!$config['host']) {
                 throw new AppError('未配置redis服务器地址');
