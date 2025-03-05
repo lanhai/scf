@@ -2,6 +2,8 @@
 
 namespace Scf\Cache;
 
+use Mix\Redis\Connection;
+use Mix\Redis\Driver;
 use RedisException;
 use Scf\Cache\Connection\RedisPool;
 use Scf\Cache\Logger\RedisLogger;
@@ -35,16 +37,17 @@ class Redis extends Cache {
     ];
     public string $server = 'main';
 
-    protected \Redis|RedisPool $connection;
+    //protected \Redis|RedisPool $connection;
+    protected Connection|RedisPool $connection;
     private static array $pools = [];
 
     /**
-     * 创建一个新的连接,此连接在高并发下存在抢锁可能,只适用于非对外业务场景
+     * 创建一个新的连接,此连接在高并发下存在抢锁问题,只适用于非对外业务场景
      * @param string $server
      * @return static
      */
     public static function connect(string $server = 'main'): static {
-        $instance = self::instance();
+        $instance = new static();//self::instance();
         $instance->server = $server;
         $conf = $instance->getConfig('servers')[$server];
         return $instance->getConnection($conf);
@@ -61,17 +64,24 @@ class Redis extends Cache {
         $port = $config['port'];
         $this->keyPrefix = $config["key_prefix"] ?? APP_ID;
         try {
-            $connection = new \Redis;
-            !$connection->connect($host, $port) and die('redis server connect failed:' . $host . ':' . $port);
-            if (!empty($config['auth'])) {
-                $connection->auth($config['auth']);
-            }
+            $driver = new Driver(
+                $host,
+                $port,
+                $config['auth'],
+                0,
+                $config['wait_timeout'] ?? 0.0
+            );
+            $logger = new RedisLogger();
+            $connection = new Connection($driver, $logger);
+            //$connection = new \Redis;
+            //!$connection->connect($host, $port) and die('redis server connect failed:' . $host . ':' . $port);
+//            if (!empty($config['auth'])) {
+//                $connection->auth($config['auth']);
+//            }
         } catch (RedisException $exception) {
             die ('redis server connect failed:' . $exception->getMessage()) . PHP_EOL;
         }
         $this->connection = $connection;
-        $logger = new RedisLogger();
-        $this->connection->setLogger($logger);
         return $this;
     }
 

@@ -157,7 +157,7 @@ return [
                     'size' => 16,//连接池连接数
                     'max_idle' => 8,//最大闲置连接数
                     'max_life_time' => 600,//最大连接时间
-                    'task_worker_enable' => false,// 任务进程启用连接池
+                    'task_worker_enable' => true,// 任务进程启用连接池
                     'task_worker_max_open' => 2,
                     'task_worker_max_idle' => 1,
                 ]
