@@ -283,10 +283,10 @@ class Http {
      */
     protected function getResult(): Result {
         if ($this->client->errCode != 0) {
-            return Result::error('请求错误:' . socket_strerror($this->client->errCode) . '(' . $this->client->errMsg . ')', 'REQUEST_FAIL');
+            return Result::error('请求错误:' . $this->client->errMsg, 'REQUEST_FAIL', socket_strerror($this->client->errCode));
         }
         if ($this->client->statusCode != 200) {
-            return Result::error('状态码[' . $this->client->statusCode . ']', $this->client->statusCode);
+            return Result::error('请求失败:' . $this->client->statusCode, $this->client->statusCode);
         }
         $body = $this->client->body;
         $this->client->close();
