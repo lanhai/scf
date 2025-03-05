@@ -185,7 +185,6 @@ class Pdo {
         $host = $hosts[rand(0, count($hosts) - 1)];
         $this->database = new DB("mysql:host={$host};port={$this->serverConfig['port']};charset={$this->serverConfig['charset']};dbname={$this->serverConfig['name']}", $this->serverConfig['username'], $this->serverConfig['password'], [\PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC], $this->actor);//, \PDO::ATTR_PERSISTENT => true, \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true
         $this->database->setConfig($this->serverConfig);
-        $logger = new PdoLogger();
         $server = Http::master();
         $isTaskWorker = !is_null($server) && $server->taskworker;
         if ($isTaskWorker) {
@@ -205,8 +204,9 @@ class Pdo {
             $autoPing = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['connection_auto_ping_interval'] : $this->_config['pool']['connection_auto_ping_interval'];
             $idleTimeout = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['connection_idle_timeout'] : $this->_config['pool']['connection_idle_timeout'];
             $this->database->startPool($maxOpen, $maxIdle, $maxLifetime, $waitTimeout, $autoPing, $idleTimeout, is_array($config) ? $this->serverConfig['name'] : $config);
-            $this->database->setLogger($logger);
         }
+        $logger = new PdoLogger();
+        $this->database->setLogger($logger);
         return $this;
     }
 

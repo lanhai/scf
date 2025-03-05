@@ -11,6 +11,7 @@ use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
+use Scf\Server\Http;
 use Scf\Server\Worker\ProcessLife;
 use Scf\Util\Arr;
 use Throwable;
@@ -69,6 +70,8 @@ class Redis extends Cache {
             die ('redis server connect failed:' . $exception->getMessage()) . PHP_EOL;
         }
         $this->connection = $connection;
+        $logger = new RedisLogger();
+        $this->connection->setLogger($logger);
         return $this;
     }
 
@@ -113,15 +116,26 @@ class Redis extends Cache {
      */
     private function createPool(string|array $server = 'main'): static {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
+        $server = Http::master();
+        $isTaskWorker = !is_null($server) && $server->taskworker;
+        if ($isTaskWorker && (!isset($config['task_worker_enable']) || !$config['task_worker_enable'])) {
+            return static::connect($server);
+        }
         try {
             if (!$config['host']) {
                 throw new AppError('未配置redis服务器地址');
             }
             $this->connection = new RedisPool($config['host'], $config['port'], $config['auth'], 0);
-            $maxIdle = $config['max_idle'] ?? 32;        // 最大闲置连接数
-            $maxLifetime = $config['max_life_time'] ?? 3600;  // 连接的最长生命周期
+            if ($isTaskWorker) {
+                $maxOpen = $config['task_worker_max_open'] ?? 2;
+                $maxIdle = $config['task_worker_max_idle'] ?? 1;
+            } else {
+                $maxOpen = $config['size'] ?? 4;//最大开启连接数
+                $maxIdle = $config['max_idle'] ?? 2;// 最大闲置连接数
+            }
+            $maxLifetime = $config['max_life_time'] ?? 600;  // 连接的最长生命周期
             $waitTimeout = $config['wait_timeout'] ?? 0.0;   // 从池获取连接等待的时间, 0为一直等待
-            $this->connection->start($config['size'] ?? 16, $maxIdle, $maxLifetime, $waitTimeout);
+            $this->connection->start($maxOpen, $maxIdle, $maxLifetime, $waitTimeout);
             $logger = new RedisLogger();
             $this->connection->setLogger($logger);
             $this->keyPrefix = $config["key_prefix"] ?? APP_ID;
