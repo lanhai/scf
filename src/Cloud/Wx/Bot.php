@@ -3,13 +3,10 @@
 namespace Scf\Cloud\Wx;
 
 use Scf\Client\Http;
-use Scf\Cloud\Ali\Oss;
 use Scf\Component\Qrcode;
-use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Core\Traits\ComponentTrait;
-use Swoole\Timer;
 
 class Bot {
     use CoroutineSingleton, ComponentTrait;
@@ -181,7 +178,7 @@ class Bot {
             return Result::error($msg, $code);
         }
         if (empty($result['data'])) {
-            return Result::error("无数据返回", $code);
+            return Result::error($msg ?: "无数据返回", $code);
         }
         return Result::success($result['data']);
 
