@@ -3,11 +3,9 @@
 return [
     // 应用配置,在运行时赋值
     'app' => [
-        'master_host' => '127.0.0.1',
+        'master_host' => 'localhost',
         'module_style' => APP_MODULE_STYLE_MICRO
     ],
-    // 类映射
-    'class_map' => [],
     // 默认主题名
     'default_theme' => 'default',
     // 默认的输入过滤器
