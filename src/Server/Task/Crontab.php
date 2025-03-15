@@ -208,7 +208,7 @@ class Crontab {
             MasterDB::sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
         $this->attributes = $task;//定义任务属性
-        $this->executeTimeout = $task['timeout'] ?? 0;
+        $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒
         if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {
             Timer::tick(5000, function () {
                 $this->sync();
@@ -494,7 +494,7 @@ class Crontab {
             }
         });
         while (true) {
-            $result = $channel->pop($this->executeTimeout ?: 3600);//单个任务最多等待60分钟
+            $result = $channel->pop($this->executeTimeout);
             if (!$result) {
                 Console::warning("【Crontab#{$this->attributes['manager_id']}】{$this->attributes['name']} 执行超时:" . get_called_class());
             }
