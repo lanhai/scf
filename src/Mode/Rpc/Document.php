@@ -108,7 +108,7 @@ class Document {
                         case 'param':
                             if ($rc) {
                                 $rcArr = explode(" ", $rc);
-                                $methodDocument['param'][] = $rcArr[2];
+                                $methodDocument['param'][] = $rcArr[2] ?? "";
                             } else {
                                 $methodDocument['param'][] = "";
                             }

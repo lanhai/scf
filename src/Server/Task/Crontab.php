@@ -494,7 +494,7 @@ class Crontab {
             }
         });
         while (true) {
-            $result = $channel->pop($this->executeTimeout ?: 1800);//单个任务最多等待30分钟
+            $result = $channel->pop($this->executeTimeout ?: 3600);//单个任务最多等待60分钟
             if (!$result) {
                 Console::warning("【Crontab#{$this->attributes['manager_id']}】{$this->attributes['name']} 执行超时:" . get_called_class());
             }

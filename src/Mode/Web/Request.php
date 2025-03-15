@@ -107,6 +107,10 @@ class Request {
         return self::server('request_uri');
     }
 
+    public static function raw(): string {
+        return static::instance()->content();
+    }
+
     /**
      * @return bool|string
      */
@@ -263,7 +267,7 @@ class Request {
         } else {
             $isValid = !is_null($val) && $val != '';
         }
-        !$isValid and Response::interrupt(is_null($message) ? '参数:' . $key . '不能为空' : $message, 'PARAMS_NOT_VAILD',status: 200);
+        !$isValid and Response::interrupt(is_null($message) ? '参数:' . $key . '不能为空' : $message, 'PARAMS_NOT_VAILD', status: 200);
     }
 
     /**
