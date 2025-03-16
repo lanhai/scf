@@ -166,7 +166,7 @@ class Crontab {
     }
 
     /**
-     * 批量启动(所有任务在一个进程)
+     * 开启进程
      * @return int
      */
     public static function startProcess(): int {
@@ -192,20 +192,26 @@ class Crontab {
         $processList = [];
         if (SERVER_CRONTAB_ENABLE == SWITCH_ON && $taskList) {
             foreach ($taskList as $task) {
-                $process = new Process(function () use ($task) {
-                    App::mount();
-                    static::instance()->start($task);
-                    Event::wait();
-                });
-                $pid = $process->start();
+                $pid = static::instance()->createTaskProcess($task);
                 $processList[$pid] = $task;
-                Console::info("【Crontab#{$task['manager_id']}】{$task['name']}管理进程已启动,PID:" . $pid);
             }
         }
-        for ($n = count($taskList); $n--;) {
+        $processTask = null;
+        while (true) {
             $status = Process::wait();
-            $processTask = $processList[$status['pid']];
-            Console::warning("【Crontab#{$processTask['manager_id']}】{$processTask['name']}[{$processTask['namespace']}]管理进程已结束,PID:" . $status['pid']);
+            if (!$status) {
+                break;
+            }
+            $processTask = $processList[$status['pid']] ?? $processTask;
+            Console::warning("【Crontab#{$processTask['manager_id']}】{$processTask['name']}[{$processTask['namespace']}]管理进程已结束!code:{$status['code']},PID:" . $status['pid']);
+            unset($processList[$status['pid']]);
+            if ((int)$status['code'] !== 0) {
+                sleep($processTask['retry_timeout'] ?? 5);
+                if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
+                    $processTask = static::instance()->createTaskProcess($processTask, true);
+                }
+            }
+            usleep(500);
         }
         return $managerId;
 //        $process = new Process(function () {
@@ -221,6 +227,41 @@ class Crontab {
 //        $pid = $process->start();
 //        File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
 //        return $pid;
+    }
+
+    /**
+     * 创建任务进程
+     * @param $task
+     * @param bool $wait
+     * @return bool|int|array
+     */
+    protected function createTaskProcess($task, bool $wait = false): bool|int|array {
+        $process = new Process(function () use ($task) {
+            App::mount();
+            register_shutdown_function(function () use ($task) {
+                $error = error_get_last();
+                if ($error && $error['type'] === E_ERROR) {
+                    Console::error("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]致命错误: " . $error['message']);
+                }
+            });
+            static::instance()->start($task);
+            Event::wait();
+        });
+        $pid = $process->start();
+        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}管理进程已启动,PID:" . $pid);
+        if (!$wait) {
+            return $pid;
+        }
+        $status = Process::wait();
+        if ($status['code'] != 0) {
+            //Console::error("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]尝试重启");
+            sleep($task['retry_timeout'] ?? 5);
+            if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $task['manager_id']) {
+                return $this->createTaskProcess($task, true);
+            }
+        }
+        Console::warning("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]管理进程已结束!code:{$status['code']},PID:" . $status['pid']);
+        return $task;
     }
 
     /**
