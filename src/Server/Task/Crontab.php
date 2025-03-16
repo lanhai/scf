@@ -48,7 +48,7 @@ class Crontab {
      * 严格间隔执行
      */
     const RUN_MODE_INTERVAL = 3;
-    protected int $executeTimeout = 0;
+    protected int $executeTimeout = -1;
 
     /**
      * 加载定时任务
