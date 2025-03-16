@@ -26,6 +26,18 @@ class Bot {
     }
 
     /**
+     * 检查在线状态
+     * @param $appid
+     * @return Result
+     */
+
+    public function onlineCheck($appid): Result {
+        return $this->request('/login/checkOnline', [
+            'appId' => $appid,
+        ]);
+    }
+
+    /**
      * 发送消息
      * @param $to
      * @param $content
@@ -42,7 +54,14 @@ class Bot {
                     "content" => $content,
                     'ats' => $ats == 'all' ? 'notify@all' : $ats
                 ];
-                return $this->request('/message/postText', $body);
+                for ($i = 0; $i < 3; $i++) {
+                    $result = $this->request('/message/postText', $body);
+                    if (!$result->hasError()) {
+                        break;
+                    }
+                    sleep(5);
+                }
+                return $result;
             case 'image':
                 $url = $this->gateway . "/message/sendImageMsg";
                 $body = [
@@ -110,15 +129,26 @@ class Bot {
         if ($response->hasError()) {
             return $response;
         }
-        if (!$response->getData()) {
+        $result = $response->getData();
+        if (!$result) {
             return Result::success(0);
         }
-        $result = $response->getData();
         $status = $result['status'];
         if ($status == 2 && $result['loginInfo']) {
             return Result::success($result);
         }
         return Result::success($status);
+    }
+
+    /**
+     * 退出登录
+     * @param string $appid
+     * @return Result
+     */
+    public function logout(string $appid): Result {
+        return $this->request('/login/logout', [
+            'appId' => $appid
+        ]);
     }
 
     /**
@@ -177,7 +207,7 @@ class Bot {
         if ($code != 200) {
             return Result::error($msg, $code);
         }
-        if (empty($result['data'])) {
+        if (!isset($result['data'])) {
             return Result::error($msg ?: "无数据返回", $code);
         }
         return Result::success($result['data']);
