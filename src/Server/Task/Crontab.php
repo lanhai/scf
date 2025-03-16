@@ -13,6 +13,7 @@ use Scf\Core\Traits\Singleton;
 use Scf\Cache\MasterDB;
 use Scf\Helper\JsonHelper;
 use Scf\Command\Color;
+use Scf\Mode\Rpc\Document;
 use Scf\Server\Table\Counter;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Date;
@@ -22,6 +23,8 @@ use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
 class Crontab {
@@ -158,7 +161,7 @@ class Crontab {
             if (!method_exists($worker, 'run')) {
                 Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
             } else {
-                Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
+                //Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
                 $worker->register($task);
             }
         });
@@ -182,6 +185,9 @@ class Crontab {
         $process->start();
         Process::wait();
         $taskList = Runtime::instance()->get(Key::RUNTIME_CRONTAB_TASK_LIST);
+        if (!$taskList) {
+            return $managerId;
+        }
         $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
         if ($members) {
             MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
@@ -196,6 +202,28 @@ class Crontab {
                 $processList[$pid] = $task;
             }
         }
+        $output = new ConsoleOutput();
+        $table = new Table($output);
+        $renderData = [];
+        $modes = [
+            0 => '一次执行',
+            1 => '循环执行',
+            2 => '定时执行',
+            3 => '间隔执行'
+        ];
+        foreach ($processList as $pid => $item) {
+            $renderData[] = [
+                $item['name'],
+                $item['namespace'],
+                $modes[$item['mode']],
+                $item['interval'] ?? ($item['times'] ?? '一次'),
+                Color::green($pid)
+            ];
+        }
+        $table
+            ->setHeaders([Color::notice('任务名称'), Color::notice('任务脚本'), Color::notice('运行模式'), Color::notice('间隔时间(秒)'), Color::notice('PID')])
+            ->setRows($renderData);
+        $table->render();
         $processTask = null;
         while (true) {
             $status = Process::wait();
@@ -248,10 +276,10 @@ class Crontab {
             Event::wait();
         });
         $pid = $process->start();
-        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}管理进程已启动,PID:" . $pid);
         if (!$wait) {
             return $pid;
         }
+        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]已加入定时任务列表,PID:" . Color::green($pid));
         $status = Process::wait();
         if ($status['code'] != 0) {
             //Console::error("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]尝试重启");
