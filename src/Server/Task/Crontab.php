@@ -174,7 +174,7 @@ class Crontab {
      */
     public static function startProcess(): int {
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        if (!App::isReady()) {
+        if (!App::isReady() || SERVER_CRONTAB_ENABLE != SWITCH_ON) {
             return $managerId;
         }
         $process = new Process(function () {
@@ -196,11 +196,9 @@ class Crontab {
             }
         }
         $processList = [];
-        if (SERVER_CRONTAB_ENABLE == SWITCH_ON && $taskList) {
-            foreach ($taskList as $task) {
-                $pid = static::instance()->createTaskProcess($task);
-                $processList[$pid] = $task;
-            }
+        foreach ($taskList as $task) {
+            $pid = static::instance()->createTaskProcess($task);
+            $processList[$pid] = $task;
         }
         $output = new ConsoleOutput();
         $table = new Table($output);
