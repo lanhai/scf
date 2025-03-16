@@ -103,7 +103,7 @@ class Http extends \Scf\Core\Server {
      * @param $config
      */
     protected function addCrontabProcess($config): void {
-        $process = new Process(function () use ($config) {
+        $crontabProcess = new Process(function () use ($config) {
             //等待服务器启动完成
             while (true) {
                 if (Runtime::instance()->serverStatus()) {
@@ -111,8 +111,6 @@ class Http extends \Scf\Core\Server {
                 }
                 sleep(1);
             }
-            $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
-            $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
             $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             $started = false;
             define('IS_CRONTAB_PROCESS', true);
@@ -124,18 +122,56 @@ class Http extends \Scf\Core\Server {
                 }
                 if (!$started) {
                     Runtime::instance()->crontabProcessStatus(true);
-                    $pid = Crontab::startProcess();
-                    Console::info("【Server】定时任务#{$managerId} PID:" . $pid);
-                    if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-                        $pid = RQueue::startProcess();
-                        Console::info("【Server】Redis队列#{$managerId} PID:" . $pid);
-                    }
+                    Crontab::startProcess();
                     $started = true;
                 }
-                sleep(30);
+                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                    Runtime::instance()->crontabProcessStatus(false);
+                    Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,运行状态已重置");
+                    sleep(1);
+                } else {
+                    sleep(10);
+                }
             }
         });
-        $this->server->addProcess($process);
+        $pid = $this->server->addProcess($crontabProcess);
+        $this->log("Crontab 管理进程ID编号:{$pid}");
+        //redis队列管理进程
+        $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
+        $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+        if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
+            $redisQueueProcess = new Process(function () use ($config) {
+                //等待服务器启动完成
+                while (true) {
+                    if (Runtime::instance()->serverStatus()) {
+                        break;
+                    }
+                    sleep(1);
+                }
+                $managerId = Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                $started = false;
+                while (true) {
+                    if (!Runtime::instance()->redisQueueProcessStatus()) {
+                        $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                        $started = false;
+                    }
+                    if (!$started) {
+                        Runtime::instance()->redisQueueProcessStatus(true);
+                        RQueue::startProcess();
+                        $started = true;
+                    }
+                    if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS)) {
+                        Runtime::instance()->redisQueueProcessStatus(false);
+                        Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,运行状态已重置");
+                        sleep(1);
+                    } else {
+                        sleep(10);
+                    }
+                }
+            });
+            $pid = $this->server->addProcess($redisQueueProcess);
+            $this->log("RedisQueue 管理进程ID编号:{$pid}");
+        }
     }
 
     /**
@@ -263,6 +299,7 @@ class Http extends \Scf\Core\Server {
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
             //定时任务迭代
             Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+            Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
             //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {

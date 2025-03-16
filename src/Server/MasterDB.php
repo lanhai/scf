@@ -55,7 +55,6 @@ class MasterDB {
                     });
                     // 启动服务器进程
                     $serverProcessPid = $serverProcess->start();
-                    Console::success("【MasterDB】启动完成,PID: " . $serverProcessPid);
                     Runtime::instance()->set('masterDbManagerPid', $serverProcessPid);
                     // 监听子进程状态
                     $status = Process::wait(false);
@@ -76,7 +75,8 @@ class MasterDB {
             Console::error("【MasterDB】服务启动失败");
             exit();
         } else {
-            Console::info("【MasterDB】服务启动完成!SERVER PID:" . $masterDbPid . ",Manager PID:" . $process->pid . ",PORT:" . $port);
+            $serverProcessPid = Runtime::instance()->get('masterDbManagerPid');
+            Console::info("【MasterDB】服务启动完成!服务器进程管理PID:{$serverProcessPid},SERVER PID:" . $masterDbPid . ",管理进程PID:" . $process->pid . ",PORT:" . $port);
         }
 
     }

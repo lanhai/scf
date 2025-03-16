@@ -32,6 +32,18 @@ class Runtime extends Table {
     }
 
     /**
+     * Redis队列任务状态
+     * @param bool|null $status
+     * @return bool
+     */
+    public function redisQueueProcessStatus(?bool $status = null): bool {
+        if (!is_null($status)) {
+            return $this->set(Key::RUNTIME_REDIS_QUEUE_STATUS, $status);
+        }
+        return $this->get(Key::RUNTIME_REDIS_QUEUE_STATUS) ?: false;
+    }
+
+    /**
      * 服务器启动状态
      * @param ?bool $status
      * @return bool
