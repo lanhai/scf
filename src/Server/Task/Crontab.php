@@ -161,7 +161,6 @@ class Crontab {
             if (!method_exists($worker, 'run')) {
                 Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
             } else {
-                //Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
                 $worker->register($task);
             }
         });
