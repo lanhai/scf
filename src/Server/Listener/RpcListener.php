@@ -22,8 +22,8 @@ class RpcListener extends Listener {
         $header = substr($data, 0, 4);
         $response = new Response();
         if (strlen($header) != 4) {
-            $response->setStatus($response::STATUS_PACKAGE_READ_TIMEOUT);
-            $response->setMsg("数据包接收超时");
+            $response->setStatus($response::STATUS_PACKAGE_HEADER_LENGTH_ERROR);
+            $response->setMsg("数据包HEADER长度错误");
             $this->reply($server, $fd, $response);
             return;
         }
@@ -38,7 +38,7 @@ class RpcListener extends Listener {
         $data = Protocol::unpack($data);
         if (strlen($data) != $allLength) {
             $response->setStatus($response::STATUS_PACKAGE_READ_TIMEOUT);
-            $response->setMsg("数据包接收超时");
+            $response->setMsg("数据包长度不匹配");
             $this->reply($server, $fd, $response);
             return;
         }
