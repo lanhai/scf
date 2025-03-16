@@ -28,14 +28,15 @@ class RQueue {
     protected int $managerId = 0;
 
     public static function startProcess(): int {
+        $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
         if (!App::isReady()) {
-            return 0;
+            return $managerId;
         }
-        $process = new Process(function () {
+        $process = new Process(function () use ($managerId) {
             App::mount();
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
-                Console::warning("【Redis Queue】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
+                Console::warning("【RedisQueue#{$managerId}】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
                 self::instance()->watch($config['redis_queue_mc'] ?? 512);
@@ -44,13 +45,17 @@ class RQueue {
         });
         $pid = $process->start();
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        return $pid;
+        Console::info("【RedisQueue#{$managerId}】队列管理进程已启动,PID:" . $pid);
+        Process::wait();
+        Console::warning("【RedisQueue#{$managerId}】队列管理进程已结束,PID:" . $pid);
+        return $managerId;
     }
+
 
     public static function startByWorker(): void {
         $pool = Redis::pool();
         if ($pool instanceof NullPool) {
-            Console::warning("【Redis Queue】Redis服务不可用,队列管理未启动");
+            Console::warning("【RedisQueue】Redis服务不可用,队列管理未启动");
         } else {
             $config = Config::server();
             self::instance()->watch($config['redis_queue_mc'] ?? 512);
@@ -72,11 +77,11 @@ class RQueue {
                 });
             }
         }
-        $this->managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        $this->managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
         Coroutine::create(function () use ($mc) {
             //每一秒读取一次队列列表
             Timer::tick(1000, function ($tickerId) use ($mc) {
-                $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+                $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                 if ($this->managerId != $latestManagerId) {
                     Timer::clear($tickerId);
                 }
@@ -87,7 +92,7 @@ class RQueue {
                             $successed++;
                         }
                     });
-                    Env::isDev() and Console::log('【Redis Queue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
+                    Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
                 }
             });
         });
@@ -143,7 +148,7 @@ class RQueue {
         try {
             return Redis::pool()->lLength(QueueStatus::IN->is($status) || $status == QueueStatus::DELAY->is($status) ? QueueStatus::matchKey($status) : QueueStatus::matchKey($status) . '_' . $day);
         } catch (Throwable $err) {
-            Env::isDev() and Console::warning('【Redis Queue】查询队列任务错误:' . $err->getMessage());
+            Env::isDev() and Console::warning('【RedisQueue】查询队列任务错误:' . $err->getMessage());
             return 0;
         }
 

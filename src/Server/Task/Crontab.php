@@ -55,6 +55,7 @@ class Crontab {
      * @return bool
      */
     public static function load(): bool {
+        self::$tasks = [];
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         $serverConfig = Config::server();
         $list = [];
@@ -113,42 +114,128 @@ class Crontab {
         }
         return self::hasTask();
     }
+//    /**
+//     * 开始任务(单进程模式)
+//     * @return int
+//     */
+//    public function start(): int {
+//        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . $this->id());
+//        if ($members) {
+//            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
+//            foreach ($members as $id) {
+//                MasterDB::delete('-crontabs-' . $id);
+//            }
+//        }
+//        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+//        self::aliveCheck();
+//        foreach (self::$tasks as &$task) {
+//            Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
+//            $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
+//                $worker = $this->createWorker($task['namespace']);
+//                if (!method_exists($worker, 'run')) {
+//                    Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
+//                } else {
+//                    Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
+//
+//                    Timer::after(1000, function () use ($worker, $task) {
+//                        $worker->register($task);
+//                    });
+//                }
+//            });
+//        }
+//        return $managerId;
+//    }
+    /**
+     * 开始任务(多进程模式)
+     * @param $task
+     * @return int
+     */
+    public function start($task): int {
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
+        $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
+            $worker = $this->createWorker($task['namespace']);
+            if (!method_exists($worker, 'run')) {
+                Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
+            } else {
+                Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
+                $worker->register($task);
+            }
+        });
+        return $managerId;
+    }
 
     /**
+     * 批量启动(所有任务在一个进程)
      * @return int
      */
     public static function startProcess(): int {
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         if (!App::isReady()) {
-            return 0;
+            return $managerId;
         }
         $process = new Process(function () {
             App::mount();
-            if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
-                self::instance()->start();
-            } else {
-                //没有定时任务也启动一个计时器
-                self::processCheck();
-            }
-            Event::wait();
+            self::load();
+            Runtime::instance()->set(Key::RUNTIME_CRONTAB_TASK_LIST, self::$tasks);
         });
-        $pid = $process->start();
-        File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
-        return $pid;
+        $process->start();
+        Process::wait();
+        $taskList = Runtime::instance()->get(Key::RUNTIME_CRONTAB_TASK_LIST);
+        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
+        if ($members) {
+            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
+            foreach ($members as $id) {
+                MasterDB::delete('-crontabs-' . $id);
+            }
+        }
+        $processList = [];
+        if (SERVER_CRONTAB_ENABLE == SWITCH_ON && $taskList) {
+            foreach ($taskList as $task) {
+                $process = new Process(function () use ($task) {
+                    App::mount();
+                    static::instance()->start($task);
+                    Event::wait();
+                });
+                $pid = $process->start();
+                $processList[$pid] = $task;
+                Console::info("【Crontab#{$task['manager_id']}】{$task['name']}管理进程已启动,PID:" . $pid);
+            }
+        }
+        for ($n = count($taskList); $n--;) {
+            $status = Process::wait();
+            $processTask = $processList[$status['pid']];
+            Console::warning("【Crontab#{$processTask['manager_id']}】{$processTask['name']}[{$processTask['namespace']}]管理进程已结束,PID:" . $status['pid']);
+        }
+        return $managerId;
+//        $process = new Process(function () {
+//            App::mount();
+//            if (SERVER_CRONTAB_ENABLE == SWITCH_ON && self::load()) {
+//                self::instance()->start();
+//            } else {
+//                //没有定时任务也启动一个计时器
+//                self::aliveCheck();
+//            }
+//            Event::wait();
+//        });
+//        $pid = $process->start();
+//        File::write(SERVER_CRONTAB_MANAGER_PID_FILE, $pid);
+//        return $pid;
     }
 
     /**
      * 启动一个进程过期检测定时器
      * @return void
      */
-    public static function processCheck(): void {
+    public static function aliveCheck(): void {
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        Timer::tick(10000, function () use ($managerId) {
+        Timer::tick(5000, function () use ($managerId) {
             //Console::info("【Crontab#" . $managerId . "】当前计时器:" . Timer::stats()['num']);
             //服务已重启,终止现有计时器
             if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                 Timer::clearAll();
-                Coroutine::sleep(3);
-                Runtime::instance()->crontabProcessStatus(false);
+                //Coroutine::sleep(3);
+                //Runtime::instance()->crontabProcessStatus(false);
                 Console::warning("【Crontab#" . $managerId . "】管理进程已迭代,所有定时器已清除");
             }
         });
@@ -161,40 +248,11 @@ class Crontab {
      */
     public function isAlive(int $id = 1): bool {
         if ($this->isOrphan() || $id !== $this->id) {
-            Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】" . $this->attributes['namespace'] . " 是孤儿进程,已取消执行");
+            Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[{$this->attributes['namespace']}]是孤儿进程,已取消执行");
             return false;
         }
         $this->updateTask('latest_alive', time());
         return true;
-    }
-
-    /**
-     * 开始任务
-     * @return int
-     */
-    public function start(): int {
-        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . $this->id());
-        if ($members) {
-            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
-            foreach ($members as $id) {
-                MasterDB::delete('-crontabs-' . $id);
-            }
-        }
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        self::processCheck();
-        foreach (self::$tasks as &$task) {
-            Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
-            $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
-                $worker = $this->createWorker($task['namespace']);
-                if (!method_exists($worker, 'run')) {
-                    Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
-                } else {
-                    Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
-                    $worker->register($task);
-                }
-            });
-        }
-        return $managerId;
     }
 
 
@@ -210,7 +268,14 @@ class Crontab {
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒
         if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {
-            Timer::tick(5000, function () {
+            $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+            Timer::tick(5000, function () use ($managerId, $task) {
+                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                    Timer::clearAll();
+                    //Coroutine::sleep(3);
+                    //Runtime::instance()->crontabProcessStatus(false);
+                    //Console::warning("【Crontab#" . $managerId . "】{$task['name']}[{$task['namespace']}]管理进程已迭代,所有定时器已清除");
+                }
                 $this->sync();
                 if ($this->isExpired()) {
                     //迭代
