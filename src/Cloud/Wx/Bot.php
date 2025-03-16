@@ -55,7 +55,7 @@ class Bot {
                     "content" => $content,
                     'ats' => $ats == 'all' ? 'notify@all' : $ats
                 ];
-                for ($i = 0; $i < 3; $i++) {
+                for ($i = 1; $i <= 3; $i++) {
                     $result = $this->request('/message/postText', $body);
                     if (!$result->hasError()) {
                         break;
