@@ -7,6 +7,7 @@ use Scf\Component\Qrcode;
 use Scf\Core\Result;
 use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Core\Traits\ComponentTrait;
+use Swoole\Coroutine;
 
 class Bot {
     use CoroutineSingleton, ComponentTrait;
@@ -59,7 +60,7 @@ class Bot {
                     if (!$result->hasError()) {
                         break;
                     }
-                    sleep(5);
+                    Coroutine::sleep(5);
                 }
                 return $result;
             case 'image':
