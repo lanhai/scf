@@ -2,6 +2,8 @@
 
 namespace Scf\Command\DefaultCommand;
 
+use JetBrains\PhpStorm\NoReturn;
+use Phar;
 use PhpZip\ZipFile;
 use Scf\Cloud\Ali\Oss;
 use Scf\Core\App;
@@ -13,6 +15,8 @@ use Scf\Command\Color;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
+use Scf\Helper\StringHelper;
+use Scf\Root;
 use Scf\Server\Core;
 use Scf\Util\Auth;
 use Scf\Util\Dir;
@@ -34,6 +38,7 @@ class Build implements CommandInterface {
         $commandHelp->addAction('release', '打包应用');
         $commandHelp->addAction('rollback', '版本回滚');
         $commandHelp->addAction('history', '查看发布记录');
+        $commandHelp->addAction('framework', '打包框架');
         $apps = App::all();
         $names = [];
         foreach ($apps as $app) {
@@ -52,9 +57,11 @@ class Build implements CommandInterface {
             !defined('APP_RUN_MODE') and define('APP_RUN_MODE', 'src');
             define("Scf\Command\DefaultCommand\APP_RUN_MODE", 'DIR');
             define("Scf\Command\DefaultCommand\BUILD_PATH", dirname(SCF_ROOT) . '/build/');
-            Core::initialize();
-            Config::init();
-            define("Scf\Command\DefaultCommand\VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');
+            if ($action !== 'framework') {
+                Core::initialize();
+                Config::init();
+                define("Scf\Command\DefaultCommand\VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');
+            }
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());
@@ -73,6 +80,56 @@ class Build implements CommandInterface {
             exit();
         }
         $this->release($version);
+    }
+
+
+    #[NoReturn] public function framework(): void {
+        Console::log('开始构建框架:' . Root::root());
+        $buildDir = BUILD_PATH . 'framework/';
+        if (!is_dir($buildDir)) {
+            mkdir($buildDir, 0775);
+        }
+        $buildFilePath = $buildDir . '/scf.phar';
+        $versionData = require Root::root() . '/src/version.php';
+        $version = StringHelper::incrementVersion($versionData['version']);
+        //将版本信息写入version文件
+        $versionFile = Root::root() . '/src/version.php';
+        $versionInputData = stripslashes(var_export([
+            'build' => date('Y-m-d H:i:s'),
+            'version' => $version
+        ], true));
+        $versionFileContent = "<?php\n  return $versionInputData;";
+        if (!File::write($versionFile, $versionFileContent)) {
+            Console::log('文件写入失败:' . $versionFile);
+            exit();
+        }
+        Console::log(Color::green('开始打包源码文件'));
+        if (file_exists($buildFilePath)) {
+            unlink($buildFilePath);
+        }
+        $phar = new Phar($buildFilePath, 0, 'scf');
+        $phar->compress(Phar::GZ);
+        $phar->buildFromDirectory(Root::root() . '/src');
+        $phar->setDefaultStub('version.php', 'version.php');
+        $localFile = $buildDir . "/" . $version . ".core";
+        exec('mv ' . $buildFilePath . ' ' . $localFile);
+        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
+        Console::log(Color::green('打包完成'));
+        if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
+            'build' => date('Y-m-d H:i:s'),
+            'version' => $version,
+            'url' => "https://chengdu.asset.lkyapp.com/scf/v" . $version . ".core"
+        ]))) {
+            Console::warning('版本文件更新失败!');
+        }
+        $versionInputData = stripslashes(var_export([
+            'build' => 'development',
+            'version' => $version
+        ], true));
+        $versionFileContent = "<?php\n  return $versionInputData;";
+        if (!File::write($versionFile, $versionFileContent)) {
+            Console::log('文件写入失败:' . $versionFile);
+        }
     }
 
     /**
@@ -175,8 +232,8 @@ class Build implements CommandInterface {
             if (file_exists($encryptedFilePath)) {
                 unlink($encryptedFilePath);
             }
-            $phar = new \Phar($buildFilePath, 0, 'src');
-            $phar->compress(\Phar::GZ);
+            $phar = new Phar($buildFilePath, 0, 'src');
+            $phar->compress(Phar::GZ);
             $phar->buildFromDirectory(APP_PATH . '/src');
             $phar->setDefaultStub('version.php', 'version.php');
             //源代码加密

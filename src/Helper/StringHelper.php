@@ -5,6 +5,37 @@ namespace Scf\Helper;
 class StringHelper {
 
     /**
+     * 递增版本号
+     * @param string $version 当前版本号（格式：X.Y.Z）
+     * @return string 递增后的版本号
+     */
+    public static function incrementVersion(string $version): string {
+        // 将版本号拆分为数组
+        $parts = explode('.', $version);
+        if (count($parts) !== 3) {
+            throw new \InvalidArgumentException("版本号格式必须为 X.Y.Z");
+        }
+        // 提取 X, Y, Z
+        $x = (int)$parts[0];
+        $y = (int)$parts[1];
+        $z = (int)$parts[2];
+        // 递增 Z
+        $z++;
+        if ($z > 99) {
+            $z = 0;
+            $y++;
+
+            if ($y > 99) {
+                $y = 0;
+                $x++;
+            }
+        }
+
+        // 返回新版本号
+        return sprintf('%d.%d.%d', $x, $y, $z);
+    }
+
+    /**
      * @param string|null $value
      * @return string
      */

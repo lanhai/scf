@@ -3,7 +3,6 @@
 namespace Scf\Command;
 
 use Scf\Core\Traits\Singleton;
-use Scf\Util\Dir;
 
 class Manager {
     use Singleton;
