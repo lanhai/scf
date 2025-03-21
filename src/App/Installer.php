@@ -151,8 +151,8 @@ class Installer extends Struct {
      * @return string
      */
     public function src(): string {
-        $package = APP_BIN_DIR . '/v-' . $this->version . '.app';
-        return APP_RUN_MODE === 'phar' ? 'phar://' . $package : APP_PATH . '/src';
+        //$package = APP_BIN_DIR . '/v-' . $this->version . '.app';
+        return APP_RUN_MODE === 'phar' ? 'phar://' . App::core($this->version) : APP_PATH . '/src';
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace Scf\Server;
 
 use Scf\App\Updater;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Core\Traits\Singleton;
@@ -13,7 +14,6 @@ use Scf\Mode\Web\Response;
 use Scf\Command\Color;
 use Scf\Command\Manager;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
-use Scf\Root;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
 use Scf\Server\Table\Runtime;
@@ -35,9 +35,15 @@ class Dashboard {
         if (!App::isMaster() && App::isReady()) {
             return;
         }
-        $process = new Process(function () {
+        if (!App::isReady()) {
+            $port = (SERVER_PORT ?: 9580) + 2;
+        } else {
+            $serverConfig = Config::server();
+            $port = \Scf\Core\Server::getUseablePort(($serverConfig['port'] ?? 9580) + 2);
+        }
+        $process = new Process(function () use ($port) {
             try {
-                $port = Http::getUseablePort(8580);
+                $port = Http::getUseablePort($port);
                 Runtime::instance()->dashboardPort($port);
                 self::instance()->create($port, Manager::instance()->issetOpt('d'));
             } catch (Throwable $exception) {
@@ -115,7 +121,7 @@ class Dashboard {
                     'log_file' => APP_PATH . '/log/server.log',
                     'pid_file' => SERVER_DASHBOARD_PID_FILE,
                 ];
-                $setting['document_root'] = Root::root() . '/public';
+                $setting['document_root'] = SCF_ROOT . '/build/public';
                 $setting['enable_static_handler'] = true;
                 $setting['http_autoindex'] = true;
                 $setting['static_handler_locations'] = ['/dashboard'];

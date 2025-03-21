@@ -10,6 +10,7 @@ use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
 use Scf\Command\Manager;
+use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Runtime\Table;
 use Scf\Server\Struct\Node;
@@ -341,6 +342,9 @@ class Http extends \Scf\Core\Server {
             $host = SERVER_HOST;
             $version = swoole_version();
             $fingerprint = APP_FINGERPRINT;
+            $frameworkRoot = Root::dir();
+            $serverBuildTime = FRAMEWORK_BUILD_TIME;
+            $frameworkVersion = $serverBuildTime == 'development' ? 'development' : FRAMEWORK_BUILD_VERSION;
             $info = <<<INFO
 ------------------Server启动完成------------------
 应用指纹：{$fingerprint}
@@ -351,7 +355,10 @@ class Http extends \Scf\Core\Server {
 节点角色：{$role}
 文件加载：{$files}
 环境版本：{$version}
+框架源码：{$frameworkRoot}
 框架版本：{$scfVersion}
+打包版本：{$frameworkVersion}
+打包时间：{$serverBuildTime}
 工作进程：{$serverConfig['worker_num']}
 任务进程：{$serverConfig['task_worker_num']}
 主机地址：{$host}
@@ -438,6 +445,8 @@ INFO;
         $node->threads = count(Coroutine::list());
         $node->thread_status = Coroutine::stats();
         $node->server_run_mode = APP_RUN_MODE;
+        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
+        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/latest.core');
         $this->server->addProcess(SubProcess::heartbeat($this->server, $node));
     }
 

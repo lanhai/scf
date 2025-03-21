@@ -11,6 +11,7 @@ use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
+use Scf\Root;
 use Scf\Util\Auth;
 use Scf\Util\File;
 use Swoole\Coroutine\Http\Client;
@@ -207,6 +208,26 @@ class Updater {
      * @return Result
      */
     public function appointUpdateTo($type, $version): Result {
+        if ($type == 'framework') {
+            $client = Http::create(FRAMEWORK_REMOTE_VERSION . '?time=' . time());
+            $versionResult = $client->get();
+            if ($versionResult->hasError()) {
+                return Result::error('获取框架版本失败:' . $versionResult->getMessage());
+            }
+            $versionData = $versionResult->getData();
+            $saveDir = SCF_ROOT . '/build';
+            if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
+                return Result::error('创建更新目录失败');
+            }
+            $saveFile = $saveDir . '/latest.core';
+            $client = Http::create($versionData['url']);
+            $downloadResult = $client->download($saveFile, 1800);
+            if ($downloadResult->hasError()) {
+                return Result::error('框架升级包下载失败:' . $downloadResult->getMessage());
+            }
+            Log::instance()->info("【Server】框架升级包下载成功:" . $version);
+            return Result::success("框架升级包下载成功:" . $version);
+        }
         $result = $this->getRemoteVersionsRecord();
         if ($result->hasError()) {
             return Result::error($result->getMessage());

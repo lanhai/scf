@@ -7,10 +7,52 @@ const SCF_ROOT = __DIR__;
 ini_set('date.timezone', 'Asia/Shanghai');
 require __DIR__ . '/vendor/autoload.php';
 
+$isDev = in_array('-dev', $argv);
+$isPhar = in_array('-phar', $argv);
+$isBuild = in_array('build', $argv);
+$isPublish = in_array('publish', $argv);
+$isToolbox = in_array('toolbox', $argv);
+$isHttpServer = in_array('server', $argv);
+define('FRAMEWORK_IS_PHAR', $isPhar || (!$isDev && $isHttpServer));
 //root 必须优先加载,因为含系统常量
+//require __DIR__ . '/build/autoload.php';
+$coreFile = __DIR__ . '/build/app.core';
+$latestFile = __DIR__ . '/build/latest.core';
+if (FRAMEWORK_IS_PHAR) {
+    if (file_exists($latestFile)) {
+        file_exists($coreFile) and unlink($coreFile);
+        clearstatcache();
+        if (!rename($latestFile, $coreFile)) {
+            die("写入更新文件失败!");
+        }
+        clearstatcache();
+    }
+    if (!file_exists($coreFile)) {
+        die("内核文件不存在");
+    }
+}
+spl_autoload_register(function ($class) use ($coreFile) {
+    // 将命名空间 Scf 映射到 PHAR 文件中的 src 目录
+    if (str_starts_with($class, 'Scf\\')) {
+        $classPath = str_replace('Scf\\', '', $class);
+        if (FRAMEWORK_IS_PHAR) {
+            $filePath = 'phar://' . $coreFile . '/' . str_replace('\\', '/', $classPath) . '.php';
+        } else {
+            $filePath = __DIR__ . '/src/' . str_replace('\\', '/', $classPath) . '.php';
+        }
+        if (file_exists($filePath)) {
+            require $filePath;
+        }
+    }
+});
+
 use Scf\Root;
 
 require Root::dir() . '/Const.php';
+$serverBuild = require Root::dir() . '/version.php';
+const FRAMEWORK_REMOTE_VERSION = 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json';
+define('FRAMEWORK_BUILD_TIME', $serverBuild['build']);
+define('FRAMEWORK_BUILD_VERSION', $serverBuild['version']);
 
 use Scf\Command\Caller;
 use Scf\Command\Runner;

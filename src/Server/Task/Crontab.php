@@ -13,7 +13,6 @@ use Scf\Core\Traits\Singleton;
 use Scf\Cache\MasterDB;
 use Scf\Helper\JsonHelper;
 use Scf\Command\Color;
-use Scf\Mode\Rpc\Document;
 use Scf\Server\Table\Counter;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Date;

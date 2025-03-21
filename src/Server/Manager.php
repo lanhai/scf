@@ -69,6 +69,7 @@ class Manager extends Component {
         $node->app_version = $profile->version;
         $node->public_version = $profile->public_version ?: '--';
         $node->heart_beat = time();
+        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/latest.core');
         $node->tables = Table::list();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
         $node->stack_useage = memory_get_usage(true);
@@ -110,7 +111,7 @@ class Manager extends Component {
     /**
      * @return array
      */
-    #[ArrayShape(['event' => "string", 'info' => "array", 'servers' => "array", 'logs' => "array[]"])]
+    #[ArrayShape(['event' => "string", 'info' => "array", 'servers' => "array", 'framework_update_ready' => "boolean", 'logs' => "array[]"])]
     public function getStatus(): array {
         $servers = $this->getServers();
         $master = 0;
