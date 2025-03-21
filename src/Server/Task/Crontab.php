@@ -233,7 +233,7 @@ class Crontab {
                 $item['namespace'],
                 $modes[$item['mode']],
                 isset($item['times']) ? $item['times'][0] . "..." . $item['times'][count($item['times']) - 1] : $item['interval'] ?? '一次',
-                Color::green($pid)
+                Color::cyan($pid)
             ];
         }
         $table
