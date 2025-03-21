@@ -2,6 +2,7 @@
 
 namespace Scf\Mode\Web;
 
+use ReflectionClass;
 use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Helper\ArrayHelper;
@@ -54,9 +55,8 @@ class App extends Lifetime {
         }
     }
 
-
     /**
-     * @return ?Result
+     * @return string|Result
      * @throws NotFoundException
      * @throws AppException
      */
@@ -119,7 +119,7 @@ class App extends Lifetime {
             }
         }
         $router->setCtrlPath($ctrlPath);
-        $ref = new \ReflectionClass($ctrlClass);
+        $ref = new ReflectionClass($ctrlClass);
         if ($ref->isAbstract() or $ref->isInterface()) {
             Response::instance()->setHeader('Error-Info', 'controller can not be abstract:' . $ctrlClass);
             throw new NotFoundException('控制器为抽象类:' . $ctrlClass);

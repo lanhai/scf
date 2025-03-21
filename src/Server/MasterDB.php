@@ -27,6 +27,7 @@ class MasterDB {
         if (!App::isMaster()) {
             return;
         }
+        $port = \Scf\Core\Server::getUseablePort($port);
         if (\Scf\Core\Server::isPortInUse($port)) {
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
             if ($masterDbPid && Process::kill($masterDbPid, 0)) {
@@ -76,7 +77,8 @@ class MasterDB {
             exit();
         } else {
             $serverProcessPid = Runtime::instance()->get('masterDbManagerPid');
-            Console::info("【MasterDB】服务启动完成!服务器进程管理PID:{$serverProcessPid},SERVER PID:" . $masterDbPid . ",管理进程PID:" . $process->pid . ",PORT:" . $port);
+            Runtime::instance()->set('MASTERDB_PID', "Master:{$process->pid},Manager:{$serverProcessPid},Server:{$masterDbPid}");
+            Console::info("【MasterDB】" . Color::green("服务启动完成"));
         }
 
     }
@@ -87,6 +89,7 @@ class MasterDB {
      * @return void
      */
     public function create(bool $daemonize = false, int $port = 16379): void {
+        Runtime::instance()->masterDbPort($port);
         try {
             ini_set('memory_limit', '256M');
             $server = new Server('0.0.0.0', $port, SWOOLE_BASE);
@@ -429,7 +432,8 @@ class MasterDB {
                     //File::write(APP_RUNTIME_DB, serialize($this->data));
                 });
             });
-//            $server->on('start', function (Server $server) {
+//            $server->on('start', function (Server $server) use ($port) {
+//                Runtime::instance()->masterDbPort($port);
 //                //Console::info('【MasterDB】服务启动成功:' . $server->master_pid);
 //            });
             $server->start();
@@ -452,7 +456,7 @@ class MasterDB {
     }
 
     protected static function killall($port, $try = 0): bool {
-        if ($try >= 10) {
+        if ($try >= 3) {
             if (self::killProcessByPort($port)) {
                 return true;
             }
