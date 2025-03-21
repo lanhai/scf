@@ -68,7 +68,6 @@ class Dao extends Struct {
      */
     protected array|null $snapshot = null;
 
-
     /**
      * @var ?WhereBuilder 查询语句构造器
      */
@@ -751,7 +750,6 @@ class Dao extends Struct {
         self::$_instances[$key] = $ar;
         if ($cid > 0) {
             Coroutine::defer(function () use ($key) {
-                //Console::log('释放AR资源:' . $key);
                 unset(self::$_instances[$key]);
             });
         }

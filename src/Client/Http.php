@@ -53,9 +53,6 @@ class Http {
 //        if (!empty($result[6])) {
 //            $path .= $result[6];
 //        }
-//        var_dump($protocol);
-//        var_dump($host);
-//        var_dump($path);
         //提取URL里的端口号
 //        if (str_contains($host, ":")) {
 //            $hostArr = explode(":", $host);
@@ -283,9 +280,11 @@ class Http {
      */
     protected function getResult(): Result {
         if ($this->client->errCode != 0) {
+            $this->client->close();
             return Result::error('请求错误:' . $this->client->errMsg, 'REQUEST_FAIL', socket_strerror($this->client->errCode));
         }
         if ($this->client->statusCode != 200) {
+            $this->client->close();
             return Result::error('请求失败:' . $this->client->statusCode, $this->client->statusCode);
         }
         $body = $this->client->body;

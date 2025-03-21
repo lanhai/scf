@@ -9,6 +9,7 @@ use Scf\Rpc\Protocol\Request;
 use Scf\Rpc\Protocol\Response;
 use Scf\Rpc\Service\AbstractService;
 use Swoole\WebSocket\Server;
+use Throwable;
 
 class RpcListener extends Listener {
     protected int $maxPackageSize = 1024 * 1024 * 8;
@@ -22,8 +23,8 @@ class RpcListener extends Listener {
         $header = substr($data, 0, 4);
         $response = new Response();
         if (strlen($header) != 4) {
-            $response->setStatus($response::STATUS_PACKAGE_HEADER_LENGTH_ERROR);
-            $response->setMsg("数据包HEADER长度错误");
+            $response->setStatus($response::STATUS_PACKAGE_HEAD_LENGTH_ERROR);
+            $response->setMsg("数据包HEAD长度错误");
             $this->reply($server, $fd, $response);
             return;
         }
@@ -65,7 +66,7 @@ class RpcListener extends Listener {
                 $response->setMsg("不存在的服务");
                 $response->setStatus($response::STATUS_SERVICE_NOT_EXIST);
             }
-        } catch (\Throwable) {
+        } catch (Throwable) {
             $response->setStatus(Response::STATUS_SERVICE_ERROR);
         }
         $this->reply($server, $fd, $response);
