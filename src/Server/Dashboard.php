@@ -44,7 +44,7 @@ class Dashboard {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
         });
-        $process->start();
+        $masterPid = $process->start();
         $pid = "";
         Timer::after(500, function () use (&$pid) {
             $pid = File::read(SERVER_DASHBOARD_PID_FILE);
@@ -54,7 +54,8 @@ class Dashboard {
             Console::info("【Dashboard】" . Color::red("服务启动失败"));
             exit();
         }
-        Runtime::instance()->set('DASHBOARD_PID', $pid);
+        usleep(1000 * 100);
+        Runtime::instance()->set('DASHBOARD_PID', "Master:{$masterPid},Server:" . Runtime::instance()->get('DASHBOARD_SERVER_PID'));
         Console::info("【Dashboard】" . Color::green("服务启动完成"));
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
@@ -214,6 +215,7 @@ class Dashboard {
                 });
                 //服务器完成启动
                 $this->_SERVER->on('start', function (Server $server) {
+                    Runtime::instance()->set('DASHBOARD_SERVER_PID', $server->master_pid);
                     if (!App::isReady()) {
                         Console::info("【Dashboard】等待安装配置文件就绪...");
                         $this->waittingInstall();

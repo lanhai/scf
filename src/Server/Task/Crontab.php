@@ -237,7 +237,7 @@ class Crontab {
             ];
         }
         $table
-            ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('PID')])
+            ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('进程ID')])
             ->setRows($renderData);
         $table->render();
         $processTask = null;
