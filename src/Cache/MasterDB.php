@@ -11,6 +11,7 @@ use Scf\Database\Exception\NullMasterDb;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
+use Scf\Server\Table\Runtime;
 use Scf\Util\Arr;
 use Scf\Util\Time;
 
@@ -33,9 +34,11 @@ class MasterDB {
 
 
     protected function connection(): Redis|NullMasterDb {
+        $host = \Scf\Mode\Web\App::isMaster() ? '127.0.0.1' : (Config::get('app')['master_host'] ?? '127.0.0.1');
+        $port = \Scf\Mode\Web\App::isMaster() ? Runtime::instance()->masterDbPort() : (Config::get('app')['master_port'] ?? MDB_PORT);
         $pool = Redis::instance()->create([
-            'host' => App::isReady() ? Config::get('app')['master_host'] ?? '127.0.0.1' : '127.0.0.1',
-            'port' => App::isReady() ? Config::get('app')['master_port'] ?? MDB_PORT : MDB_PORT,
+            'host' => $host,
+            'port' => $port,
             'auth' => '',
             'db_index' => 0,
             'time_out' => 10,//连接超时时间

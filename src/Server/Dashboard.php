@@ -51,10 +51,11 @@ class Dashboard {
         });
         Event::wait();
         if (!$pid || !Process::kill($pid, 0)) {
-            Console::error('【Dashboard】服务启动失败');
+            Console::info("【Dashboard】" . Color::red("服务启动失败"));
             exit();
         }
-        Console::info("【Dashboard】服务启动完成!PID:{$pid},PORT:" . Runtime::instance()->dashboardPort());
+        Runtime::instance()->set('DASHBOARD_PID', $pid);
+        Console::info("【Dashboard】" . Color::green("服务启动完成"));
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {

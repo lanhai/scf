@@ -22,6 +22,7 @@ use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
 
@@ -192,11 +193,12 @@ class Http extends \Scf\Core\Server {
         Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
         Dashboard::start();
+        //usleep(1000 * 500);
         //启动masterDB(redis协议)服务器
         MasterDB::start(MDB_PORT);
         //加载服务器配置
         $serverConfig = Config::server();
-        $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);
+        $this->bindPort = \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
         !defined('APP_MODULE_STYLE') and define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_LARGE);
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
@@ -243,8 +245,8 @@ class Http extends \Scf\Core\Server {
         $this->server->set($setting);
         //监听HTTP请求
         try {
-            $httpPortListener = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
-            $httpPortListener->set([
+            $httpServer = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
+            $httpServer->set([
                 'package_max_length' => $serverConfig['package_max_length'] ?? 8 * 1024 * 1024,
                 'open_http_protocol' => true,
                 'open_http2_protocol' => true,
@@ -256,10 +258,10 @@ class Http extends \Scf\Core\Server {
             exit(1);
         }
         //监听SOCKET请求
+        $socketPort = self::getUseablePort($this->bindPort + 1);
         try {
-            $socketPort = self::getUseablePort($this->bindPort + 1);
-            $socketPortListener = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
-            $socketPortListener->set([
+            $socketServer = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
+            $socketServer->set([
                 'open_http_protocol' => false,
                 'open_http2_protocol' => false,
                 'open_websocket_protocol' => true
@@ -272,14 +274,15 @@ class Http extends \Scf\Core\Server {
         //监听RPC服务(tcp)请求
         if (isset($serverConfig['rpc_port'])) {
             try {
-                /** @var Server $rpcPort */
-                $rpcPort = $this->server->listen('0.0.0.0', $serverConfig['rpc_port'], SWOOLE_SOCK_TCP);
-                $rpcPort->set([
+                $rpcPort = self::getUseablePort($serverConfig['rpc_port']);
+                /** @var Server $rpcServer */
+                $rpcServer = $this->server->listen('0.0.0.0', $rpcPort, SWOOLE_SOCK_TCP);
+                $rpcServer->set([
                     'open_http_protocol' => false,
                     'open_http2_protocol' => false,
                     'open_websocket_protocol' => false
                 ]);
-                Runtime::instance()->rpcPort($serverConfig['rpc_port']);
+                Runtime::instance()->rpcPort($rpcPort);
             } catch (Throwable $exception) {
                 Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
                 exit(1);
@@ -327,15 +330,12 @@ class Http extends \Scf\Core\Server {
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
             define("SERVER_MANAGER_PID", $managerPid);
-            $this->log(Color::cyan("主进程PID:" . $masterPid));
-            $this->log(Color::cyan("管理进程PID:" . $managerPid));
             File::write(SERVER_MANAGER_PID_FILE, $managerPid);
             $scfVersion = SCF_VERSION;
             $role = SERVER_ROLE;
             $env = APP_RUN_ENV;
             $mode = APP_RUN_MODE;
             $alias = SERVER_ALIAS;
-            $port = $this->bindPort;
             $files = count(get_included_files());
             $os = SERVER_ENV;
             $host = SERVER_HOST;
@@ -343,8 +343,6 @@ class Http extends \Scf\Core\Server {
             $fingerprint = APP_FINGERPRINT;
             $info = <<<INFO
 ------------------Server启动完成------------------
-监听端口：{$port}
-主机地址：{$host}
 应用指纹：{$fingerprint}
 运行系统：{$os}
 运行环境：{$env}
@@ -356,9 +354,25 @@ class Http extends \Scf\Core\Server {
 框架版本：{$scfVersion}
 工作进程：{$serverConfig['worker_num']}
 任务进程：{$serverConfig['task_worker_num']}
+主机地址：{$host}
 --------------------------------------------------
 INFO;
             Console::write(Color::cyan($info));
+            $renderData = [
+                ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green($this->bindPort)],
+                ['SOCKET', "--", Color::green(Runtime::instance()->socketPort())],
+                ['DASHBOARD', Color::cyan(Runtime::instance()->get('DASHBOARD_PID')), Color::green(Runtime::instance()->dashboardPort())],
+                ['MasterDB', Color::cyan(Runtime::instance()->get('MASTERDB_PID')), Color::green(Runtime::instance()->masterDbPort())],
+            ];
+            if ($rpcPort = Runtime::instance()->rpcPort()) {
+                $renderData[] = ['RPC', "--", Color::green($rpcPort)];
+            }
+            $output = new ConsoleOutput();
+            $table = new \Symfony\Component\Console\Helper\Table($output);
+            $table
+                ->setHeaders([Color::cyan('服务'), Color::cyan('进程ID'), Color::cyan('端口号')])
+                ->setRows($renderData);
+            $table->render();
             //自动更新
             APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
         });

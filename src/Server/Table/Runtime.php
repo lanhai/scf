@@ -68,6 +68,18 @@ class Runtime extends Table {
     }
 
     /**
+     * masterDB服务端口
+     * @param int|null $port
+     * @return bool|mixed
+     */
+    public function masterDbPort(?int $port = null): mixed {
+        if ($port) {
+            return $this->set(Key::RUNTIME_MASTERDB_PORT, $port);
+        }
+        return $this->get(Key::RUNTIME_MASTERDB_PORT);
+    }
+
+    /**
      * Socket服务端口
      * @param int|null $port
      * @return bool|mixed
@@ -92,7 +104,7 @@ class Runtime extends Table {
     }
 
     /**
-     * Http服务端口
+     * 控制面板服务端口
      * @param int|null $port
      * @return bool|mixed
      */
