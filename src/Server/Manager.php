@@ -69,6 +69,7 @@ class Manager extends Component {
         $node->app_version = $profile->version;
         $node->public_version = $profile->public_version ?: '--';
         $node->heart_beat = time();
+        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
         $node->framework_update_ready = file_exists(SCF_ROOT . '/build/latest.core');
         $node->tables = Table::list();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
