@@ -118,7 +118,7 @@ class Build implements CommandInterface {
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
             'version' => $version,
-            'url' => "https://chengdu.asset.lkyapp.com/scf/v" . $version . ".core"
+            'url' => "https://chengdu.asset.lkyapp.com/scf/" . $version . ".core"
         ]))) {
             Console::warning('版本文件更新失败!');
         }
