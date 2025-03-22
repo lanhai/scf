@@ -45,7 +45,7 @@ class Node extends Struct {
      */
     public int $heart_beat;
     /**
-     * @var ?string 框架版本
+     * @var string|null 框架版本
      */
     public ?string $framework_build_version;
     /**
