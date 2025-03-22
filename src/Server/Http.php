@@ -368,8 +368,8 @@ INFO;
             $renderData = [
                 ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green($this->bindPort)],
                 ['SOCKET', "--", Color::green(Runtime::instance()->socketPort())],
-                ['DASHBOARD', Color::cyan(Runtime::instance()->get('DASHBOARD_PID')), Color::green(Runtime::instance()->dashboardPort())],
-                ['MasterDB', Color::cyan(Runtime::instance()->get('MASTERDB_PID')), Color::green(Runtime::instance()->masterDbPort())],
+                ['DASHBOARD', \Scf\Core\App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', \Scf\Core\App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
+                ['MasterDB', \Scf\Core\App::isMaster() ? Color::cyan(Runtime::instance()->get('MASTERDB_PID')) : '--', \Scf\Core\App::isMaster() ? Color::green(Runtime::instance()->masterDbPort()) : '--'],
             ];
             if ($rpcPort = Runtime::instance()->rpcPort()) {
                 $renderData[] = ['RPC', "--", Color::green($rpcPort)];
