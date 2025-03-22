@@ -50,6 +50,8 @@ class Manager extends Component {
     public function update($id, $updateKey, $value): bool {
         $key = App::id() . '-node-' . $id;
         if ($node = MasterDB::get($key)) {
+            $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
+            $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
             $node = Node::factory($node);
             $node->heart_beat = time();
             $node->$updateKey = $value;
@@ -158,6 +160,8 @@ class Manager extends Component {
         /** @var Node $master */
         $master = null;
         foreach ($servers as $item) {
+            $item['framework_build_version'] = $item['framework_build_version'] ?? '--';
+            $item['framework_update_ready'] = $item['framework_update_ready'] ?? false;
             $node = Node::factory($item);
             if ($node->role == 'master') {
                 $master = $node;

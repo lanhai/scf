@@ -58,6 +58,8 @@ class NodeManager {
             if (!$n) {
                 continue;
             }
+            $n['framework_build_version'] = $n['framework_build_version'] ?? '--';
+            $n['framework_update_ready'] = $n['framework_update_ready'] ?? false;
             $node = Node::factory($n);
             $status = (time() - $node->heart_beat) <= 5;
             if (filter_var($node->ip, FILTER_VALIDATE_IP) !== false) {
@@ -157,6 +159,8 @@ class NodeManager {
                 if (!$node) {
                     continue;
                 }
+                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
+                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
                 $node = Node::factory($node);
                 if (time() - $node->heart_beat >= 3) {
                     continue;
@@ -201,6 +205,8 @@ class NodeManager {
                 if (!$node) {
                     continue;
                 }
+                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
+                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
                 $node = Node::factory($node);
                 if (time() - $node->heart_beat >= 3) {
                     continue;
@@ -251,6 +257,8 @@ class NodeManager {
                 continue;
             }
             Coroutine::create(function () use ($barrier, $node, $type, $version, &$count) {
+                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
+                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
                 $node = Node::factory($node);
                 if (time() - $node->heart_beat >= 3) {
                     return;
