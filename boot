@@ -50,9 +50,11 @@ use Scf\Root;
 
 require Root::dir() . '/Const.php';
 $serverBuild = require Root::dir() . '/version.php';
+var_dump(Root::dir());
 const FRAMEWORK_REMOTE_VERSION = 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json';
 define('FRAMEWORK_BUILD_TIME', $serverBuild['build']);
 define('FRAMEWORK_BUILD_VERSION', $serverBuild['version']);
+var_dump($serverBuild);
 
 use Scf\Command\Caller;
 use Scf\Command\Runner;
