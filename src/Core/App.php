@@ -121,6 +121,8 @@ class App {
         //项目库路径
         !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . '/lib');
         Config::init();
+        !defined('APP_MASTER_DB_HOST') and define('APP_MASTER_DB_HOST', self::isMaster() ? 'master' : (Config::get('app')['master_host'] ?? 'master'));
+        !defined('APP_MASTER_DB_PORT') and define('APP_MASTER_DB_PORT', (self::isMaster() ? \Scf\Server\Table\Runtime::instance()->masterDbPort() : (Config::get('app')['master_port'] ?? MDB_PORT)) ?: MDB_PORT);
         //加载应用第三方库
         $vendorLoader = self::src() . '/vendor/autoload.php';
         if (file_exists($vendorLoader)) {
@@ -308,6 +310,7 @@ class App {
     public static function profile(): Installer {
         return self::installer();
     }
+
     /**
      * 当前版本
      * @return string|null

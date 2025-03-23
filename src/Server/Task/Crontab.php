@@ -196,6 +196,13 @@ class Crontab {
         }
         $process = new Process(function () {
             App::mount();
+            $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
+            if ($members) {
+                MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
+                foreach ($members as $id) {
+                    MasterDB::delete('-crontabs-' . $id);
+                }
+            }
             self::load();
             Runtime::instance()->set(Key::RUNTIME_CRONTAB_TASK_LIST, self::$tasks);
         });
@@ -204,13 +211,6 @@ class Crontab {
         $taskList = Runtime::instance()->get(Key::RUNTIME_CRONTAB_TASK_LIST);
         if (!$taskList) {
             return $managerId;
-        }
-        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
-        if ($members) {
-            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
-            foreach ($members as $id) {
-                MasterDB::delete('-crontabs-' . $id);
-            }
         }
         $processList = [];
         foreach ($taskList as $task) {

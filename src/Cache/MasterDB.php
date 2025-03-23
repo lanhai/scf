@@ -2,7 +2,6 @@
 
 namespace Scf\Cache;
 
-use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Traits\ComponentTrait;
@@ -11,6 +10,7 @@ use Scf\Database\Exception\NullMasterDb;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
+use Scf\Mode\Web\App;
 use Scf\Server\Table\Runtime;
 use Scf\Util\Arr;
 use Scf\Util\Time;
@@ -34,11 +34,9 @@ class MasterDB {
 
 
     protected function connection(): Redis|NullMasterDb {
-        $host = \Scf\Mode\Web\App::isMaster() ? 'master' : (Config::get('app')['master_host'] ?? 'master');
-        $port = Runtime::instance()->masterDbPort() ?: (Config::get('app')['master_port'] ?? MDB_PORT);
         $pool = Redis::instance()->create([
-            'host' => $host,
-            'port' => $port,
+            'host' => APP_MASTER_DB_HOST,
+            'port' => APP_MASTER_DB_PORT,
             'auth' => '',
             'db_index' => 0,
             'time_out' => 10,//连接超时时间
