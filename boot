@@ -13,7 +13,8 @@ define('IS_BUILD', in_array('build', $argv));
 define('IS_PUBLISH', in_array('publish', $argv));
 define('IS_TOOLBOX', in_array('toolbox', $argv));
 define('IS_HTTP_SERVER', in_array('server', $argv));
-const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD);
+define('IS_PACKAGE', in_array('package', $argv));
+const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);
 //root 必须优先加载,因为含系统常量
 //require __DIR__ . '/build/autoload.php';
 $coreFile = __DIR__ . '/build/app.core';
