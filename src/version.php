@@ -1,5 +1,5 @@
 <?php
   return array (
   'build' => 'development',
-  'version' => '1.0.39',
+  'version' => '1.0.40',
 );
