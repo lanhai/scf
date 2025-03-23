@@ -6,15 +6,14 @@ const SCF_ROOT = __DIR__;
 //TODO 根据加载的APP配置设置时区
 ini_set('date.timezone', 'Asia/Shanghai');
 require __DIR__ . '/vendor/autoload.php';
-
-$isDev = in_array('-dev', $argv);
-$isPhar = in_array('-phar', $argv);
-$isSrc = in_array('-src', $argv);
-$isBuild = in_array('build', $argv);
-$isPublish = in_array('publish', $argv);
-$isToolbox = in_array('toolbox', $argv);
-$isHttpServer = in_array('server', $argv);
-define('FRAMEWORK_IS_PHAR', $isPhar || (!$isDev && !$isSrc));
+define('IS_DEV', in_array('-dev', $argv));
+define('IS_PHAR', in_array('-phar', $argv));
+define('IS_SRC', in_array('-src', $argv));
+define('IS_BUILD', in_array('build', $argv));
+define('IS_PUBLISH', in_array('publish', $argv));
+define('IS_TOOLBOX', in_array('toolbox', $argv));
+define('IS_HTTP_SERVER', in_array('server', $argv));
+const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD);
 //root 必须优先加载,因为含系统常量
 //require __DIR__ . '/build/autoload.php';
 $coreFile = __DIR__ . '/build/app.core';
