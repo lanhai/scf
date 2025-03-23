@@ -113,7 +113,7 @@ class Build implements CommandInterface {
         $phar->setDefaultStub('version.php', 'version.php');
         $localFile = $buildDir . "/" . $version . ".core";
         exec('mv ' . $buildFilePath . ' ' . $localFile);
-        //exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
+        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
