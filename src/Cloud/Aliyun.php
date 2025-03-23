@@ -16,9 +16,9 @@ abstract class Aliyun {
      */
     private static array $_instances = [];
 
-    protected array $accounts;
-    protected string $accessId;
-    protected string $accessKey;
+    protected array $accounts = [];
+    protected string $accessId = "";
+    protected string $accessKey = "";
 
     /**
      * 构造器
@@ -54,12 +54,11 @@ abstract class Aliyun {
      */
     final public static function instance(array $conf = null): static {
         $class = static::class;
-        $instanceName = $class . ($conf['default_server'] ?? '');
+        $_configs = !is_null($conf) ? $conf : Config::get('aliyun');
+        $instanceName = $class . ($_configs[$class]['default_server'] ?? '');
         if (!isset(self::$_instances[$instanceName])) {
-            $_configs = Config::get('aliyun');
-            $insanceConfig = $_configs[$class] ?? [];
-            $config = is_array($conf) ? Arr::merge($insanceConfig, $conf) : $insanceConfig;
-            self::$_instances[$instanceName] = new $class($config, $_configs['accounts']);
+            //$config = is_array($conf) ? Arr::merge($instanceConfig, $conf) : $instanceConfig;
+            self::$_instances[$instanceName] = new $class($_configs[$class] ?? [], $_configs['accounts'] ?? []);
         }
         return self::$_instances[$instanceName];
     }

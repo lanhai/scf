@@ -9,11 +9,12 @@ require __DIR__ . '/vendor/autoload.php';
 
 $isDev = in_array('-dev', $argv);
 $isPhar = in_array('-phar', $argv);
+$isSrc = in_array('-src', $argv);
 $isBuild = in_array('build', $argv);
 $isPublish = in_array('publish', $argv);
 $isToolbox = in_array('toolbox', $argv);
 $isHttpServer = in_array('server', $argv);
-define('FRAMEWORK_IS_PHAR', $isPhar || (!$isDev && $isHttpServer));
+define('FRAMEWORK_IS_PHAR', $isPhar || (!$isDev && !$isSrc));
 //root 必须优先加载,因为含系统常量
 //require __DIR__ . '/build/autoload.php';
 $coreFile = __DIR__ . '/build/app.core';

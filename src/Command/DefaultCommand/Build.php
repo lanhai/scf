@@ -113,22 +113,38 @@ class Build implements CommandInterface {
         $phar->setDefaultStub('version.php', 'version.php');
         $localFile = $buildDir . "/" . $version . ".core";
         exec('mv ' . $buildFilePath . ' ' . $localFile);
-        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
+        //exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
             'version' => $version,
-            'url' => "https://chengdu.asset.lkyapp.com/scf/" . $version . ".core"
+            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".core"
         ]))) {
             Console::warning('版本文件更新失败!');
         }
+        Console::log(Color::green('开始上传源码包文件'));
+        //上传更新文件到OSS
+        $config = require $buildDir . '/config.php';
+        $oss = Oss::instance($config);
+        $packageUploadResult = $oss->uploadFile($localFile,  "/scf/{$version}.core");
+        if ($packageUploadResult->hasError()) {
+            Console::log('源码包上传失败:' . Color::red($packageUploadResult->getMessage()));
+            exit();
+        }
+        $jsonUploadResult = $oss->uploadFile($buildDir . '/version.json', "/scf/version.json");
+        if ($jsonUploadResult->hasError()) {
+            Console::log('配置文件上传失败:' . Color::red($jsonUploadResult->getMessage()));
+            exit();
+        }
+        Console::log('源码包上传成功:' . Color::green($packageUploadResult->getData()));
+        //还原本地配置文件
         $versionInputData = stripslashes(var_export([
             'build' => 'development',
             'version' => $version
         ], true));
         $versionFileContent = "<?php\n  return $versionInputData;";
         if (!File::write($versionFile, $versionFileContent)) {
-            Console::log('文件写入失败:' . $versionFile);
+            Console::log('本地版本文件还原写入失败:' . $versionFile);
         }
     }
 
