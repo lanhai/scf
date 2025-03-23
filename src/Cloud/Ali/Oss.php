@@ -70,7 +70,7 @@ class Oss extends Aliyun {
      */
     public function _init(): void {
         parent::_init();
-        if (!isset($this->_config['default_server']) || !isset($this->_config['server'])) {
+        if (!isset($this->_config['default_server']) || !isset($this->_config['server']) || !$this->accounts) {
             throw new AppError('阿里云OSS配置信息不存在');
         }
         $this->serverId = $this->_config['default_server'];

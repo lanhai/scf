@@ -7,6 +7,7 @@ use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Core\Console;
 use Scf\Helper\JsonHelper;
+use Scf\Helper\StringHelper;
 use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\Event;
@@ -36,9 +37,7 @@ class Package implements CommandInterface {
         System::exec("git add " . SCF_ROOT)['output'];
         System::exec('git commit -m "auto commit at ' . date('Y-m-d H:i:s') . '"')['output'];
         System::exec("git push")['output'];
-        $arr = explode('.', $latestVersion);
-        $arr[count($arr) - 1] = (int)$arr[count($arr) - 1] + 1;
-        $defaultVersionNum = implode('.', $arr);
+        $defaultVersionNum = StringHelper::incrementVersion($latestVersion);
         $version = Console::input('请输入版本号', $defaultVersionNum);
         Console::info('正在推送版本标签:v' . $version);
         System::exec("git tag -a v$version -m 'release v$version'")['output'];
