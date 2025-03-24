@@ -108,11 +108,15 @@ class Log {
         //推送到控制台
         $log = ['message' => $error['error'], 'file' => $error['file'] . ':' . $error['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'backtrace' => $this->formatBackTrace($backTrace), 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
         //存到节点内存等待转存
-        $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
-        $table->set($logId, ['type' => 'error', 'log' => $log]);
+        if (IS_HTTP_SERVER) {
+            $table = LogTable::instance();
+            $table->set($logId, ['type' => 'error', 'log' => $log]);
+        } else {
+            MasterDB::addLog('error', $log);
+        }
         //推送到控制台
-        Console::error($log['message'] . ' @ ' . $log['file']);
+        Console::error("#{$logId} " . $log['message'] . ' @ ' . $log['file']);
         //通知机器人
         try {
             SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
@@ -134,11 +138,15 @@ class Log {
         ];
         $log = ['message' => $msg, 'file' => $m['file'] . ':' . $m['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
         //存到节点内存等待转存
-        $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
-        $table->set($logId, ['type' => 'info', 'log' => $log]);
+        if (IS_HTTP_SERVER) {
+            $table = LogTable::instance();
+            $table->set($logId, ['type' => 'info', 'log' => $log]);
+        } else {
+            MasterDB::addLog('info', $log);
+        }
         //推送到控制台
-        Console::info(JsonHelper::toJson($msg));
+        Console::info("#{$logId} " . JsonHelper::toJson($msg));
         //通知机器人
         try {
             $m['time'] = date('Y-m-d H:i:s');
@@ -167,10 +175,13 @@ class Log {
             'node_id' => SERVER_NODE_ID
         ];
         //存到节点内存等待转存
-        $table = LogTable::instance();
-        $logId = Counter::instance()->incr($this->idCounterKey);
-        $table->set($logId, ['type' => 'slow', 'log' => $log]);
-
+        if (IS_HTTP_SERVER) {
+            $table = LogTable::instance();
+            $logId = Counter::instance()->incr($this->idCounterKey);
+            $table->set($logId, ['type' => 'slow', 'log' => $log]);
+        } else {
+            MasterDB::addLog('slow', $log);
+        }
     }
 
     /**
