@@ -14,11 +14,15 @@ use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Log;
 use Scf\Command\Color;
 use Scf\Server\Env;
+use Scf\Server\Table\LogTable;
 use Scf\Util\Dir;
 use Scf\Util\File;
 use Swoole\Coroutine\Http\Client;
+use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Runtime;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Output\ConsoleOutput;
 use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
 
@@ -84,6 +88,47 @@ class App {
      */
     public static function path(): ?string {
         return self::installer()->app_path;
+    }
+
+    public static function countMemory($showAll = false): void {
+        // 获取所有 PHP 进程的内存占用量
+        $output = System::exec("ps -eo pid,comm,etime,rss,stat | grep -w 'php'");
+        // 提取 RSS 列并计算总内存占用量（KB）
+        $memoryUsage = array_filter(explode("\n", trim($output['output'])), function ($line) {
+            return !empty($line);
+        });
+        $totalMemoryKB = 0;
+        $renderData = [];
+        foreach ($memoryUsage as $line) {
+            $columns = preg_split('/\s+/', $line);
+            $totalMemoryKB += (int)$columns[3]; // RSS 是第三列
+            if ($showAll) {
+                $renderData[] = [
+                    $columns[0],
+                    $columns[1],
+                    $columns[2],
+                    round((int)$columns[3] / 1024, 2),
+                    $columns[4]
+                ];
+            }
+        }
+        // 转换为 MB
+        $totalMemoryMB = round($totalMemoryKB / 1024, 2);
+        $logCount = LogTable::instance()->count();
+        Console::log("当前PHP进程数:" . Color::cyan(count($memoryUsage)) . ";内存占用:" . Color::cyan($totalMemoryMB) . "MB;日志数量:" . Color::cyan($logCount) . "条");
+        if ($showAll) {
+            $headers = ['进程ID', '进程名称', '运行时间', '内存占用(MB)', '状态'];
+            array_walk($headers, function (&$value) {
+                $value = Color::cyan($value);
+            });
+            $output = new ConsoleOutput();
+            $table = new Table($output);
+            $table
+                ->setHeaders($headers)
+                ->setRows($renderData);
+            $table->render();
+        }
+
     }
 
     public static function clearTemplateCache(): void {

@@ -384,7 +384,7 @@ INFO;
             APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
         });
 //        Timer::tick(3000, function () {
-//            $this->countMemory();
+//            \Scf\Core\App::countMemory();
 //        });
         try {
             //日志备份进程
@@ -401,22 +401,6 @@ INFO;
         }
     }
 
-    protected function countMemory(): void {
-        // 获取所有 PHP 进程的内存占用量
-        $output = Coroutine\System::exec("ps -eo pid,comm,rss | grep -w 'php'");
-        // 提取 RSS 列并计算总内存占用量（KB）
-        $memoryUsage = array_filter(explode("\n", trim($output['output'])), function ($line) {
-            return !empty($line);
-        });
-        $totalMemoryKB = 0;
-        foreach ($memoryUsage as $line) {
-            $columns = preg_split('/\s+/', $line);
-            $totalMemoryKB += (int)$columns[2]; // RSS 是第三列
-        }
-        // 转换为 MB
-        $totalMemoryMB = round($totalMemoryKB / 1024, 2);
-        Console::log("当前PHP进程数:" . Color::cyan(count($memoryUsage)) . ";内存占用:" . Color::cyan($totalMemoryMB) . "MB");
-    }
 
     /**
      * 创建心跳进程

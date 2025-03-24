@@ -19,6 +19,7 @@ use Scf\Util\Auth;
 use Scf\Util\File;
 use Swoole\Event;
 use Swoole\ExitException;
+use Swoole\Timer;
 use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
 
@@ -34,6 +35,7 @@ class Toolbox implements CommandInterface {
     }
 
     public function help(Help $commandHelp): Help {
+        $commandHelp->addAction('memory', '内存占用');
         $commandHelp->addAction('cli', '控制台应用');
         $commandHelp->addAction('rpc', 'RPC服务更新');
         $commandHelp->addAction('ar', '活动记录对象创建');
@@ -45,6 +47,24 @@ class Toolbox implements CommandInterface {
 
         $commandHelp->addActionOpt('-app', '应用目录');
         return $commandHelp;
+    }
+
+    public function memory(): void {
+        //设置内存使用大小限制为256M
+        //ini_set('memory_limit', 4194304 * 2);
+        go(function () {
+            \Scf\Core\App::countMemory(true);
+        });
+        Timer::tick(2000, function () use (&$times) {
+//            for ($i = 0; $i < 1000; $i++) {
+//                $backTrace = debug_backtrace();
+//                $file = $backTrace[count($backTrace) - 2]['file'] ?? null;
+//                $line = $backTrace[count($backTrace) - 2]['line'] ?? null;
+//                Log::instance()->info($file . ':' . $line . ' function:' . $backTrace[count($backTrace) - 1]['function']);
+//            }
+            \Scf\Core\App::countMemory(true);
+        });
+        Event::wait();
     }
 
     public function rpc(): void {
