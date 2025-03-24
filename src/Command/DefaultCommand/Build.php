@@ -21,8 +21,6 @@ use Scf\Server\Core;
 use Scf\Util\Auth;
 use Scf\Util\Dir;
 use Scf\Util\File;
-use const Scf\Command\DefaultCommand\BUILD_PATH;
-use const Scf\Command\DefaultCommand\VERSION_FILE;
 
 
 class Build implements CommandInterface {
@@ -118,7 +116,8 @@ class Build implements CommandInterface {
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
             'version' => $version,
-            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".core"
+            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".core",
+            'boot' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot"
         ]))) {
             Console::warning('版本文件更新失败!');
         }
@@ -126,7 +125,12 @@ class Build implements CommandInterface {
         //上传更新文件到OSS
         $config = require $buildDir . '/config.php';
         $oss = Oss::instance($config);
-        $packageUploadResult = $oss->uploadFile($localFile,  "/scf/{$version}.core");
+        $bootUploadResult = $oss->uploadFile(SCF_ROOT . '/boot', "/scf/boot");
+        if ($bootUploadResult->hasError()) {
+            Console::log('引导文件上传失败:' . Color::red($bootUploadResult->getMessage()));
+            exit();
+        }
+        $packageUploadResult = $oss->uploadFile($localFile, "/scf/{$version}.core");
         if ($packageUploadResult->hasError()) {
             Console::log('源码包上传失败:' . Color::red($packageUploadResult->getMessage()));
             exit();

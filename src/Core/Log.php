@@ -116,7 +116,7 @@ class Log {
             MasterDB::addLog('error', $log);
         }
         //推送到控制台
-        Console::error("#{$logId} " . $log['message'] . ' @ ' . $log['file']);
+        Console::error($log['message'] . ' @ ' . $log['file']);
         //通知机器人
         try {
             SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
@@ -146,7 +146,7 @@ class Log {
             MasterDB::addLog('info', $log);
         }
         //推送到控制台
-        Console::info("#{$logId} " . JsonHelper::toJson($msg));
+        Console::info($msg);
         //通知机器人
         try {
             $m['time'] = date('Y-m-d H:i:s');
