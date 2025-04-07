@@ -420,7 +420,7 @@ INFO;
         $node->thread_status = Coroutine::stats();
         $node->server_run_mode = APP_RUN_MODE;
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
-        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/latest.core');
+        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
         $this->server->addProcess(SubProcess::heartbeat($this->server, $node));
     }
 
