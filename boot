@@ -16,27 +16,27 @@ define('IS_HTTP_SERVER', in_array('server', $argv));
 define('IS_PACKAGE', in_array('package', $argv));
 const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);
 //root 必须优先加载,因为含系统常量
-$coreFile = __DIR__ . '/build/src.pack';
-$latestFile = __DIR__ . '/build/update.pack';
+$srcPack = __DIR__ . '/build/src.pack';
+$updatePack = __DIR__ . '/build/update.pack';
 if (FRAMEWORK_IS_PHAR) {
-    if (file_exists($latestFile)) {
-        file_exists($coreFile) and unlink($coreFile);
+    if (file_exists($updatePack)) {
+        file_exists($srcPack) and unlink($srcPack);
         clearstatcache();
-        if (!rename($latestFile, $coreFile)) {
+        if (!rename($updatePack, $srcPack)) {
             die("写入更新文件失败!");
         }
         clearstatcache();
     }
-    if (!file_exists($coreFile)) {
+    if (!file_exists($srcPack)) {
         die("内核文件不存在");
     }
 }
-spl_autoload_register(function ($class) use ($coreFile) {
+spl_autoload_register(function ($class) use ($srcPack) {
     // 将命名空间 Scf 映射到 PHAR 文件中的 src 目录
     if (str_starts_with($class, 'Scf\\')) {
         $classPath = str_replace('Scf\\', '', $class);
         if (FRAMEWORK_IS_PHAR) {
-            $filePath = 'phar://' . $coreFile . '/' . str_replace('\\', '/', $classPath) . '.php';
+            $filePath = 'phar://' . $srcPack . '/' . str_replace('\\', '/', $classPath) . '.php';
         } else {
             $filePath = __DIR__ . '/src/' . str_replace('\\', '/', $classPath) . '.php';
         }
