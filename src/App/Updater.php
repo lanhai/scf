@@ -209,25 +209,19 @@ class Updater {
      */
     public function appointUpdateTo($type, $version): Result {
         if ($type == 'framework') {
-            $client = Http::create(FRAMEWORK_REMOTE_VERSION . '?time=' . time());
-            $versionResult = $client->get();
-            if ($versionResult->hasError()) {
-                return Result::error('获取框架版本失败:' . $versionResult->getMessage());
-            }
-            $versionData = $versionResult->getData();
             $saveDir = SCF_ROOT . '/build';
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
                 return Result::error('创建更新目录失败');
             }
             $updateFile = $saveDir . '/update.pack';
-            $client = Http::create($versionData['url']);
+            $client = Http::create(FRAMEWORK_REMOTE_VERSION['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
                 return Result::error('框架升级包下载失败:' . $downloadResult->getMessage());
             }
             //下载引导文件
             $bootFile = SCF_ROOT . '/boot';
-            $client = Http::create($versionData['boot']);
+            $client = Http::create(FRAMEWORK_REMOTE_VERSION['boot']);
             $downloadResult = $client->download($bootFile, 1800);
             if ($downloadResult->hasError()) {
                 return Result::error('引导文件下载失败:' . $downloadResult->getMessage());

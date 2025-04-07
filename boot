@@ -46,16 +46,33 @@ spl_autoload_register(function ($class) use ($srcPack) {
     }
 });
 
+use Scf\Core\Console;
+use Swoole\Event;
+use function Swoole\Coroutine\run;
+use Scf\Client\Http;
 use Scf\Root;
 
 require Root::dir() . '/Const.php';
 $serverBuild = require Root::dir() . '/version.php';
-const FRAMEWORK_REMOTE_VERSION = 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json';
+$versionResponse = null;
+run(function () use (&$versionResponse) {
+    $client = Http::create('https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
+    $versionResponse = $client->get();
+});
+Event::wait();
+if ($versionResponse->hasError()) {
+    Console::warning('远程版本获取失败:' . $versionResponse->getMessage());
+    $remoteVersion = $serverBuild;
+} else {
+    $remoteVersion = $versionResponse->getData();
+}
+define("FRAMEWORK_REMOTE_VERSION", $remoteVersion);
 define('FRAMEWORK_BUILD_TIME', $serverBuild['build']);
 define('FRAMEWORK_BUILD_VERSION', $serverBuild['version']);
 
 use Scf\Command\Caller;
 use Scf\Command\Runner;
+
 
 $caller = new Caller();
 $caller->setScript(current($argv));
