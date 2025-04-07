@@ -366,16 +366,11 @@ class DashboardController extends Controller {
         $status = Manager::instance()->getStatus();
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');
         $status['latest_version'] = App::latestVersion();
-        $client = \Scf\Client\Http::create(FRAMEWORK_REMOTE_VERSION . '?time=' . time());
-        $result = $client->get();
-        if ($result->hasError()) {
-            return Result::error('获取框架版本失败:' . $result->getMessage());
-        }
         $status['framework'] = [
             'is_phar' => FRAMEWORK_IS_PHAR,
             'version' => FRAMEWORK_BUILD_VERSION,
-            'latest_version' => $result->getData()['version'] ?? FRAMEWORK_BUILD_VERSION,
-            'latest_build' => $result->getData()['build'] ?? FRAMEWORK_BUILD_TIME,
+            'latest_version' => FRAMEWORK_REMOTE_VERSION['version'] ?? FRAMEWORK_BUILD_VERSION,
+            'latest_build' => FRAMEWORK_REMOTE_VERSION['build'] ?? FRAMEWORK_BUILD_TIME,
             'build' => FRAMEWORK_BUILD_TIME
         ];
         return Result::success($status);

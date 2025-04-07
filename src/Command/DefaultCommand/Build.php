@@ -94,7 +94,9 @@ class Build implements CommandInterface {
         $versionFile = Root::root() . '/src/version.php';
         $versionInputData = stripslashes(var_export([
             'build' => date('Y-m-d H:i:s'),
-            'version' => $version
+            'version' => $version,
+            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".update",
+            'boot' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot"
         ], true));
         $versionFileContent = "<?php\n  return $versionInputData;";
         if (!File::write($versionFile, $versionFileContent)) {
@@ -144,7 +146,9 @@ class Build implements CommandInterface {
         //还原本地配置文件
         $versionInputData = stripslashes(var_export([
             'build' => 'development',
-            'version' => $version
+            'version' => $version,
+            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".update",
+            'boot' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot"
         ], true));
         $versionFileContent = "<?php\n  return $versionInputData;";
         if (!File::write($versionFile, $versionFileContent)) {
