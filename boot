@@ -53,22 +53,22 @@ use Scf\Client\Http;
 use Scf\Root;
 
 require Root::dir() . '/Const.php';
-$serverBuild = require Root::dir() . '/version.php';
-$versionResponse = null;
-run(function () use (&$versionResponse) {
+$serverBuildVersion = require Root::dir() . '/version.php';
+$remoteVersionResponse = null;
+run(function () use (&$remoteVersionResponse) {
     $client = Http::create('https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
-    $versionResponse = $client->get();
+    $remoteVersionResponse = $client->get();
 });
 Event::wait();
-if ($versionResponse->hasError()) {
-    Console::warning('远程版本获取失败:' . $versionResponse->getMessage());
-    $remoteVersion = $serverBuild;
+if ($remoteVersionResponse->hasError()) {
+    Console::warning('远程版本获取失败:' . $remoteVersionResponse->getMessage());
+    $remoteVersion = $serverBuildVersion;
 } else {
-    $remoteVersion = $versionResponse->getData();
+    $remoteVersion = $remoteVersionResponse->getData();
 }
 define("FRAMEWORK_REMOTE_VERSION", $remoteVersion);
-define('FRAMEWORK_BUILD_TIME', $serverBuild['build']);
-define('FRAMEWORK_BUILD_VERSION', $serverBuild['version']);
+define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
+define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
 
 use Scf\Command\Caller;
 use Scf\Command\Runner;
