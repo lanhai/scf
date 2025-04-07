@@ -109,14 +109,14 @@ class Build implements CommandInterface {
         $phar->compress(Phar::GZ);
         $phar->buildFromDirectory(Root::root() . '/src');
         $phar->setDefaultStub('version.php', 'version.php');
-        $localFile = $buildDir . "/" . $version . ".core";
+        $localFile = $buildDir . "/" . $version . ".update";
         exec('mv ' . $buildFilePath . ' ' . $localFile);
-        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/latest.core");
+        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/update.pack");
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
             'version' => $version,
-            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".core",
+            'url' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/" . $version . ".update",
             'boot' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot"
         ]))) {
             Console::warning('版本文件更新失败!');
@@ -130,7 +130,7 @@ class Build implements CommandInterface {
             Console::log('引导文件上传失败:' . Color::red($bootUploadResult->getMessage()));
             exit();
         }
-        $packageUploadResult = $oss->uploadFile($localFile, "/scf/{$version}.core");
+        $packageUploadResult = $oss->uploadFile($localFile, "/scf/{$version}.update");
         if ($packageUploadResult->hasError()) {
             Console::log('源码包上传失败:' . Color::red($packageUploadResult->getMessage()));
             exit();

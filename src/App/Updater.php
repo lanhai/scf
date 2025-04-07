@@ -219,7 +219,7 @@ class Updater {
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
                 return Result::error('创建更新目录失败');
             }
-            $updateFile = $saveDir . '/latest.core';
+            $updateFile = $saveDir . '/update.pack';
             $client = Http::create($versionData['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
