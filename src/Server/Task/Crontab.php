@@ -303,7 +303,7 @@ class Crontab {
         if (!$wait) {
             return $pid;
         }
-        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]已加入定时任务列表,PID:" . Color::green($pid));
+        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]已重启,PID:" . Color::green($pid));
         $status = Process::wait();
         $errorCount = Counter::instance()->get('CRONTAB_' . md5($task['namespace']) . '_ERROR') ?: 0;
         Console::warning("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]管理进程已结束!code:{$status['code']},PID:" . $status['pid'] . ",错误次数:" . $errorCount);

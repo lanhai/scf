@@ -114,25 +114,20 @@ class Http extends \Scf\Core\Server {
                 sleep(1);
             }
             $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-            $started = false;
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 if (!Runtime::instance()->crontabProcessStatus()) {
-//                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                     $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                    $started = false;
-                }
-                if (!$started) {
-                    Runtime::instance()->crontabProcessStatus(true);
                     Crontab::startProcess();
-                    $started = true;
+                    Runtime::instance()->crontabProcessStatus(true);
                 }
-                if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                //使用管理进程id判断是否迭代,迭代则重新启动进程
+                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                     Runtime::instance()->crontabProcessStatus(false);
-                    Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,运行状态已重置");
+                    Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,重启所有任务进程");
                     sleep(1);
                 } else {
-                    sleep(10);
+                    sleep(5);
                 }
             }
         });
@@ -151,23 +146,18 @@ class Http extends \Scf\Core\Server {
                     sleep(1);
                 }
                 $managerId = Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                $started = false;
                 while (true) {
                     if (!Runtime::instance()->redisQueueProcessStatus()) {
                         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                        $started = false;
-                    }
-                    if (!$started) {
-                        Runtime::instance()->redisQueueProcessStatus(true);
                         RQueue::startProcess();
-                        $started = true;
+                        Runtime::instance()->redisQueueProcessStatus(true);
                     }
-                    if ($started && $managerId !== Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS)) {
+                    if ($managerId !== Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS)) {
                         Runtime::instance()->redisQueueProcessStatus(false);
-                        Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,运行状态已重置");
+                        Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,重启队列进程");
                         sleep(1);
                     } else {
-                        sleep(10);
+                        sleep(5);
                     }
                 }
             });
@@ -199,7 +189,7 @@ class Http extends \Scf\Core\Server {
         MasterDB::start(MDB_PORT);
         //加载服务器配置
         $serverConfig = Config::server();
-        $this->bindPort = \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
+        $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
         !defined('APP_MODULE_STYLE') and define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_LARGE);
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);

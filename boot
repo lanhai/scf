@@ -17,7 +17,7 @@ define('IS_PACKAGE', in_array('package', $argv));
 const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);
 //root 必须优先加载,因为含系统常量
 //require __DIR__ . '/build/autoload.php';
-$coreFile = __DIR__ . '/build/app.core';
+$coreFile = __DIR__ . '/build/src.core';
 $latestFile = __DIR__ . '/build/latest.core';
 if (FRAMEWORK_IS_PHAR) {
     if (file_exists($latestFile)) {
