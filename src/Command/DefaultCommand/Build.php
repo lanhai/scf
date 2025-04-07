@@ -174,10 +174,8 @@ class Build implements CommandInterface {
             File::write(VERSION_FILE, json_encode(['app' => [], 'scf' => ['version' => 'latest', 'release_date' => date('Y-m-d H:i:s')]]));
         }
         $version = $this->getReleaseVersion();
-        if (isset($version[0])) {
-            $arr = explode('.', $version[0]['version']);
-            $arr[count($arr) - 1] = (int)$arr[count($arr) - 1] + 1;
-            $autoVersionNum = implode('.', $arr);
+        if (isset($version[0]['version'])) {
+            $autoVersionNum = StringHelper::incrementVersion($version[0]['version']);
         } else {
             $autoVersionNum = "0.0.1";
         }

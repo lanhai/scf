@@ -41,13 +41,34 @@ class Bot {
     /**
      * 发送消息
      * @param $to
-     * @param $content
+     * @param array|string $content
      * @param string $ats
      * @param string $type
+     * @param string $thumbUrl
+     * @param int $duration
      * @return Result|void
      */
-    public function sendMessage($to, $content, string $ats = "", string $type = 'text') {
+    public function sendMessage($to, array|string $content, string $ats = "", string $type = 'text', string $thumbUrl = '', int $duration = 0) {
         switch ($type) {
+            case 'link':
+                $body = [
+                    "appId" => $this->appid,
+                    "toWxid" => $to,
+                    "title" => $content['title'],
+                    'desc' => $content['desc'],
+                    'linkUrl' => $content['link'],
+                    'thumbUrl' => $content['thumb_url'],
+                ];
+                return $this->request('/message/postLink', $body);
+            case 'video':
+                $body = [
+                    "appId" => $this->appid,
+                    "toWxid" => $to,
+                    "videoUrl" => $content['video_url'],
+                    'thumbUrl' => $content['thumb_url'],
+                    'videoDuration' => $content['duration']
+                ];
+                return $this->request('/message/postVideo', $body);
             case 'text':
                 $body = [
                     "appId" => $this->appid,
@@ -55,14 +76,7 @@ class Bot {
                     "content" => $content,
                     'ats' => $ats == 'all' ? 'notify@all' : $ats
                 ];
-                for ($i = 1; $i <= 3; $i++) {
-                    $result = $this->request('/message/postText', $body);
-                    if (!$result->hasError()) {
-                        break;
-                    }
-                    Coroutine::sleep(5);
-                }
-                return $result;
+                return $this->request('/message/postText', $body);
             case 'image':
                 $url = $this->gateway . "/message/sendImageMsg";
                 $body = [
@@ -198,7 +212,7 @@ class Bot {
         $url = $this->gateway . $path;
         $client = Http::create($url);
         $client->setHeader('X-GEWE-TOKEN', $this->token);
-        $response = $client->JPost($body);
+        $response = $client->JPost($body, 900);
         if ($response->hasError()) {
             return Result::error("请求失败:" . $response->getMessage(), $response->getErrCode());
         }
