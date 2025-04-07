@@ -213,15 +213,21 @@ class Updater {
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
                 return Result::error('创建更新目录失败');
             }
+            $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
+            $remoteVersionResponse = $client->get();
+            if ($remoteVersionResponse->hasError()) {
+                return Result::error('远程版本获取失败:' . $remoteVersionResponse->getMessage());
+            }
+            $remoteVersion = $remoteVersionResponse->getData();
             $updateFile = $saveDir . '/update.pack';
-            $client = Http::create(FRAMEWORK_REMOTE_VERSION['url']);
+            $client = Http::create($remoteVersion['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
                 return Result::error('框架升级包下载失败:' . $downloadResult->getMessage());
             }
             //下载引导文件
             $bootFile = SCF_ROOT . '/boot';
-            $client = Http::create(FRAMEWORK_REMOTE_VERSION['boot']);
+            $client = Http::create($remoteVersion['boot']);
             $downloadResult = $client->download($bootFile, 1800);
             if ($downloadResult->hasError()) {
                 return Result::error('引导文件下载失败:' . $downloadResult->getMessage());

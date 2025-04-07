@@ -3,9 +3,7 @@ declare(strict_types=1);
 version_compare(PHP_VERSION, '8.1.0', '<') and die('运行此应用需PHP8.1(含)以上版本, 当前环境版本: ' . PHP_VERSION);
 //系统路径
 const SCF_ROOT = __DIR__;
-//TODO 根据加载的APP配置设置时区
-ini_set('date.timezone', 'Asia/Shanghai');
-require __DIR__ . '/vendor/autoload.php';
+//读取运行参数
 define('IS_DEV', in_array('-dev', $argv));
 define('IS_PHAR', in_array('-phar', $argv));
 define('IS_SRC', in_array('-src', $argv));
@@ -15,7 +13,7 @@ define('IS_TOOLBOX', in_array('toolbox', $argv));
 define('IS_HTTP_SERVER', in_array('server', $argv));
 define('IS_PACKAGE', in_array('package', $argv));
 const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);
-//root 必须优先加载,因为含系统常量
+//替换升级包
 $srcPack = __DIR__ . '/build/src.pack';
 $updatePack = __DIR__ . '/build/update.pack';
 if (FRAMEWORK_IS_PHAR) {
@@ -31,6 +29,7 @@ if (FRAMEWORK_IS_PHAR) {
         die("内核文件不存在");
     }
 }
+//注册scf命名空间
 spl_autoload_register(function ($class) use ($srcPack) {
     // 将命名空间 Scf 映射到 PHAR 文件中的 src 目录
     if (str_starts_with($class, 'Scf\\')) {
@@ -45,28 +44,17 @@ spl_autoload_register(function ($class) use ($srcPack) {
         }
     }
 });
+//TODO 根据加载的APP配置设置时区
+ini_set('date.timezone', 'Asia/Shanghai');
+//三方库自动加载
+require __DIR__ . '/vendor/autoload.php';
 
-use Scf\Core\Console;
-use Swoole\Event;
-use function Swoole\Coroutine\run;
-use Scf\Client\Http;
+//优先引入root,因为含系统常量
 use Scf\Root;
 
 require Root::dir() . '/Const.php';
 $serverBuildVersion = require Root::dir() . '/version.php';
-$remoteVersionResponse = null;
-run(function () use (&$remoteVersionResponse) {
-    $client = Http::create('https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
-    $remoteVersionResponse = $client->get();
-});
-Event::wait();
-if ($remoteVersionResponse->hasError()) {
-    Console::warning('远程版本获取失败:' . $remoteVersionResponse->getMessage());
-    $remoteVersion = $serverBuildVersion;
-} else {
-    $remoteVersion = $remoteVersionResponse->getData();
-}
-define("FRAMEWORK_REMOTE_VERSION", $remoteVersion);
+const FRAMEWORK_REMOTE_VERSION_SERVER = 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json';
 define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
 define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
 

@@ -366,11 +366,21 @@ class DashboardController extends Controller {
         $status = Manager::instance()->getStatus();
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');
         $status['latest_version'] = App::latestVersion();
+
+        $client = \Scf\Client\Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
+        $remoteVersionResponse = $client->get();
+        $remoteVersion = [
+            'version' => FRAMEWORK_BUILD_VERSION,
+            'build' => FRAMEWORK_BUILD_TIME,
+        ];
+        if (!$remoteVersionResponse->hasError()) {
+            $remoteVersion = $remoteVersionResponse->getData();
+        }
         $status['framework'] = [
             'is_phar' => FRAMEWORK_IS_PHAR,
             'version' => FRAMEWORK_BUILD_VERSION,
-            'latest_version' => FRAMEWORK_REMOTE_VERSION['version'] ?? FRAMEWORK_BUILD_VERSION,
-            'latest_build' => FRAMEWORK_REMOTE_VERSION['build'] ?? FRAMEWORK_BUILD_TIME,
+            'latest_version' => $remoteVersion['version'],
+            'latest_build' => $remoteVersion['build'],
             'build' => FRAMEWORK_BUILD_TIME
         ];
         return Result::success($status);
