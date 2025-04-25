@@ -132,9 +132,9 @@ class Console {
      * @param int $start 0:获取对应的键值;1:获取index
      * @param string|null $label
      * @param int $scroll
-     * @return string
+     * @return string|int
      */
-    public static function select(array $options = [], mixed $default = 0, int $start = 1, ?string $label = null, int $scroll = 20): string {
+    public static function select(array $options = [], mixed $default = 0, int $start = 1, ?string $label = null, int $scroll = 20): string|int {
         if (ArrayHelper::isAssociative($options)) {
             return select(
                 label: $label ?: '请选择要执行的操作',
@@ -281,9 +281,9 @@ class Console {
             //});
         }
         if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
-            $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
+            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
         } else {
-            $str = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
+            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
         }
         echo $str;
         //fwrite(STDOUT, $str);

@@ -291,9 +291,6 @@ class Http extends \Scf\Core\Server {
             //Runtime::instance()->serverStatus(false);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
-            //定时任务迭代
-            Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-            Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
             //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {
@@ -491,6 +488,9 @@ INFO;
             $countdown--;
             if ($countdown == 0) {
                 Timer::clear($id);
+                //定时任务迭代
+                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
                 $this->server->reload();
                 //重启控制台
                 if (App::isMaster()) {

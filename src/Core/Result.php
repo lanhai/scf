@@ -43,11 +43,11 @@ class Result {
 
     /**
      * @param IEnum|string $message
-     * @param string|array $code
+     * @param string|array|int $code
      * @param string|array $data
      * @return Result|static
      */
-    public static function error(IEnum|string $message, string|array $code = 'SERVICE_ERROR', string|array $data = ''): Result|static {
+    public static function error(IEnum|string $message, string|array|int $code = 'SERVICE_ERROR', string|array $data = ''): Result|static {
         if ($message instanceof IEnum) {
             $data = $code != 'SERVICE_ERROR' ? $code : '';
             $enum = $message;

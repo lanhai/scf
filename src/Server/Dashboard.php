@@ -56,7 +56,7 @@ class Dashboard {
             $pid = File::read(SERVER_DASHBOARD_PID_FILE);
         });
         Event::wait();
-        if (!$pid || !Process::kill($pid, 0)) {
+        if (!$pid || !Process::kill((int)$pid, 0)) {
             Console::info("【Dashboard】" . Color::red("服务启动失败"));
             exit();
         }
@@ -193,7 +193,7 @@ class Dashboard {
                             } else {
                                 $client->post(Request::post()->pack());
                             }
-                            $response->status($client->statusCode());
+                            $response->status((int)$client->statusCode());
                             $response->end($client->body());
                         } else {
                             App::instance()->start();

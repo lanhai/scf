@@ -30,7 +30,7 @@ class MasterDB {
         $port = \Scf\Core\Server::getUseablePort($port);
         if (\Scf\Core\Server::isPortInUse($port)) {
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-            if ($masterDbPid && Process::kill($masterDbPid, 0)) {
+            if ($masterDbPid && Process::kill((int)$masterDbPid, 0)) {
                 Console::warning("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程");
                 if (!self::kill($masterDbPid)) {
                     Console::error("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程失败");
@@ -72,7 +72,7 @@ class MasterDB {
         });
         Event::wait();
         // 检查主进程是否启动
-        if (!Process::kill($masterDbPid, 0)) {
+        if (!Process::kill((int)$masterDbPid, 0)) {
             Console::error("【MasterDB】服务启动失败");
             exit();
         } else {

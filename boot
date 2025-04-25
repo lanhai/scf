@@ -40,6 +40,11 @@ spl_autoload_register(function ($class) use ($srcPack) {
             $filePath = __DIR__ . '/src/' . str_replace('\\', '/', $classPath) . '.php';
         }
         if (file_exists($filePath)) {
+//            $fileContent = file_get_contents($filePath);
+//            if (!str_contains($fileContent, 'declare(strict_types=1);')) {
+//                $fileContent = str_replace('<?php', '<?php declare(strict_types=1);', $fileContent);
+//                file_put_contents($filePath, $fileContent);
+//            }
             require $filePath;
         }
     }
@@ -51,7 +56,6 @@ require __DIR__ . '/vendor/autoload.php';
 
 //优先引入root,因为含系统常量
 use Scf\Root;
-
 require Root::dir() . '/Const.php';
 $serverBuildVersion = require Root::dir() . '/version.php';
 const FRAMEWORK_REMOTE_VERSION_SERVER = 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json';
