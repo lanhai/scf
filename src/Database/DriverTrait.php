@@ -7,9 +7,9 @@ use Mix\ObjectPool\AbstractObjectPool;
 trait DriverTrait {
 
     /**
-     * @var AbstractObjectPool
+     * @var ?AbstractObjectPool
      */
-    public AbstractObjectPool $pool;
+    public ?AbstractObjectPool $pool = null;
 
     public string $id;
 

@@ -173,7 +173,7 @@ class DB {
         $this->pool->setIdleTimeout($idleTimeout);
         $this->pool->setId($this->poolId);
         $server = Http::master();
-        if ($autoPing && (is_null($server) || $server->taskworker === false)) {
+        if ($autoPing && (is_null($server) || $server->taskworker === false) && !IS_TOOLBOX && !defined('IS_CRONTAB_PROCESS')) {
             $table = PdoPoolTable::instance();
             $idleCheckTimerId = $this->pool->idleCheck();
             $table->set($this->poolId, [
@@ -202,7 +202,7 @@ class DB {
             Timer::clear($timerId);
             PdoPoolTable::instance()->delete($this->poolId);
             //Counter::instance()->decr(self::PDO_POOL_ID_KEY);
-           // Console::warning("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
+            // Console::warning("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
         }
     }
 
@@ -318,7 +318,8 @@ class DB {
      */
     public function setLogger($logger): void {
         $this->logger = $logger;
-        $this->pool->setLogger($logger);
+        $this->pool?->setLogger($logger);
+
     }
 
     /**

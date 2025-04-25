@@ -3,6 +3,7 @@
 namespace Scf\Mode\Cli;
 
 use Scf\Command\Color;
+use Scf\Command\Manager;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Helper\StringHelper;
@@ -30,6 +31,12 @@ class App extends \Scf\Core\App {
         $options = [];
         foreach ($this->_apps as $app) {
             $options[] = ($app['name'] ?? $app);
+        }
+        $params = Manager::instance()->getOpts();
+        $controller = $params['controller'] ?? '';
+        if ($controller && in_array($controller, $options)) {
+            //查询控制器在options数组里是第几个
+            $cmdNum = array_search($controller, $options) + 1;
         }
         if (!$cmdNum) {
             $cmdNum = Console::select($options, 1, 1, "请选择要执行的操作,当前运行环境:" . (\Scf\Core\App::isDevEnv() ? Color::green('开发环境') : Color::yellow('生产环境')));
@@ -63,8 +70,14 @@ class App extends \Scf\Core\App {
         if (!class_exists($ctrlClass)) {
             Console::log('控制器不存在:' . $ctrlClass);
         }
+        $params = Manager::instance()->getOpts();
+        $selectNum = $params['select'] ?? 0;
         $app = new $ctrlClass();
-        $app->run();
+        if ($selectNum) {
+            $app->run($selectNum);
+        } else {
+            $app->run();
+        }
         return true;
     }
 
