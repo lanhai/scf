@@ -1,8 +1,6 @@
 <?php
 
-
 namespace Scf\Core\Traits;
-
 
 use Swoole\Coroutine;
 

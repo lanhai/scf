@@ -2,6 +2,7 @@
 
 namespace Scf\Component;
 
+use Scf\Core\App;
 use Scf\Core\Coroutine\Component;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Lifetime;
@@ -46,7 +47,7 @@ class SocketMessager extends Component {
             $message = [
                 'type' => $type,
                 'time' => date('Y-m-d H:i:s.') . substr($millisecond, -3),
-                'env' => Lifetime::isDevEnv() ? 'dev' : 'pro',
+                'env' => App::isDevEnv() ? 'dev' : 'pro',
                 'content' => $content
             ];
             try {

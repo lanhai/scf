@@ -2,11 +2,10 @@
 
 namespace Scf\Mode\Web;
 
-use Scf\Core\App;
 use Scf\Core\Traits\ProcessLifeSingleton;
 use Scf\Util\Time;
 
-class Lifetime extends App {
+class Lifetime {
     use ProcessLifeSingleton;
 
     /**

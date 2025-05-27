@@ -5,6 +5,7 @@ namespace Scf\Core;
 use Scf\Util\Arr;
 use Symfony\Component\Yaml\Yaml;
 use Scf\Util\File;
+use Throwable;
 
 /**
  * 配置管理
@@ -74,7 +75,7 @@ class Config {
         $config = is_array($path) ? $path : (is_file($path) ? require($path) : []);
         try {
             self::$_cache = Arr::merge(self::$_cache, is_array($config) ? $config : []);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             Console::error($path . "=>" . $e->getMessage());
         }
     }

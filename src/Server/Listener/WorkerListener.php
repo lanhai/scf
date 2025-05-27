@@ -4,16 +4,17 @@ namespace Scf\Server\Listener;
 
 use Scf\Cloud\Ali\Oss;
 use Scf\Command\Color;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
-use Scf\Mode\Web\App;
-use Scf\Mode\Web\Route\AnnotationRouteRegister;
+use Scf\Mode\Web\Router;
 use Scf\Server\Http;
-use Scf\Server\Table\Runtime;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Throwable;
 
 class WorkerListener extends Listener {
 
@@ -35,11 +36,11 @@ class WorkerListener extends Listener {
             Console::error($e->getMessage());
         }
         if ($workerId == 0) {
-            //注册注解路由
-            AnnotationRouteRegister::instance()->load();
             $srcPath = App::src();
             $version = App::version();
             $publicVersion = App::publicVersion();
+            //注册路由
+            Router::instance()->loadRoutes();
             App::updateDatabase();
             $serverConfig = Config::server();
             //升级/创建统计数据表
@@ -47,8 +48,13 @@ class WorkerListener extends Listener {
             if ($enableStatistics && App::isMaster()) {
                 StatisticModel::instance()->updateDB();
             }
-            Oss::instance()->createTable();
+            try {
+                Oss::instance()->createTable();
+            }catch (Throwable $throwable){
+                Console::error($throwable->getMessage());
+            }
             Runtime::instance()->serverStatus(true);
+
             $info = <<<INFO
 ---------Workers启动完成---------
 内核版本：{$version}

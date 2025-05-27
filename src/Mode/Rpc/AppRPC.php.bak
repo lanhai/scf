@@ -14,7 +14,7 @@ use Scf\Rpc\Rpc;
 use Scf\Command\Color;
 use Scf\Server\Http;
 use Scf\Server\Listener\CgiListener;
-use Scf\Server\Table\Runtime;
+use Scf\Core\Table\Table\Runtime;
 use Scf\Util\Dir;
 use Scf\Util\Random;
 use Swoole\Event;

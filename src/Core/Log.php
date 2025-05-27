@@ -4,15 +4,13 @@ namespace Scf\Core;
 
 use JetBrains\PhpStorm\ArrayShape;
 use Monolog\Logger;
-use Scf\Component\SocketMessager;
 use Scf\Cache\MasterDB;
+use Scf\Component\SocketMessager;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\LogTable;
 use Scf\Core\Traits\Singleton;
-use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
-use Scf\Command\Color;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\LogTable;
 use Scf\Util\Time;
 use Throwable;
 
@@ -65,7 +63,7 @@ class Log {
         $backTraceList = [];
         foreach ($backTrace as $item) {
             $backTraceList[] = [
-                'file' => $item['file'] ?? $item['class'],
+                'file' => $item['file'] ?? $item['class'] ?? '--',
                 'line' => $item['line'] ?? $item['function'],
                 'class' => $item['class'] ?? '--',
                 'function' => $item['function'] ?? '--',

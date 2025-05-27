@@ -4,6 +4,7 @@ namespace Scf\Server;
 
 use Scf\Core\App;
 use Scf\Command\Manager;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Util\File;
 use Scf\Util\Random;
@@ -128,6 +129,10 @@ class Core {
         App::clearTemplateCache();
         if ($mode != MODE_CGI && $mode != MODE_NATIVE) {
             App::mount($mode);
+        }
+        if (App::isReady()) {
+            $serverConfig = Config::server();
+            define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_LARGE);
         }
     }
 }

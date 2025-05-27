@@ -188,8 +188,7 @@ class Pdo {
         $server = Http::master();
         $isTaskWorker = !is_null($server) && $server->taskworker;
         if ($isTaskWorker) {
-            $isTaskWorker = true;
-            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? $this->_config['pool']['task_worker_enable'];
+            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? false;
         }
         if ($this->enablePool) {
             if (!$isTaskWorker) {

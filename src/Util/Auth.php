@@ -62,9 +62,6 @@ class Auth {
                     return false;
                 }
                 $string = str_replace($eski, $yeni, $string);
-//            if (!is_base64($string)) {
-//                \HuiYun\Component\Log::instance()->error('解密失败:[' . $string . ']');
-//            }
                 $output = @openssl_decrypt(StringHelper::urlsafe_b64decode($string), $encrypt_method, $key, 0, $iv);
             }
             return $output;

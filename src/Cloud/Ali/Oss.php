@@ -78,12 +78,11 @@ class Oss extends Aliyun {
         $account = $this->accounts[$this->server['account']];
         $this->accessId = $account['accessId'];
         $this->accessKey = $account['accessKey'];
-        //Endpoint以杭州为例，其它Region请按实际情况填写。
-        try {
-            $this->_client = new OssClient($this->accessId, $this->accessKey, $this->server['ENDPOINT'], $this->server['IS_CNNAME']);
-        } catch (OssException $e) {
-            throw new AppError($e->getMessage());
+        if (!$this->accessId || !$this->accessKey) {
+            throw new AppError('阿里云OSS配置信息不存在');
         }
+        //Endpoint以杭州为例，其它Region请按实际情况填写。
+        $this->_client = new OssClient($this->accessId, $this->accessKey, $this->server['ENDPOINT'], $this->server['IS_CNNAME']);
     }
 
     /**

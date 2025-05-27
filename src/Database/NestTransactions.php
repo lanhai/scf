@@ -2,12 +2,11 @@
 
 namespace Scf\Database;
 
-use Scf\Core\Console;
+use PDOException;
 use Scf\Core\Coroutine;
 use Scf\Core\Traits\ProcessLifeSingleton;
-use Scf\Mode\Web\Log;
+use Scf\Core\Log;
 use Scf\Util\Time;
-use Throwable;
 
 class NestTransactions {
     use ProcessLifeSingleton;
@@ -186,7 +185,7 @@ class NestTransactions {
                 try {
                     $transaction->commit();
                     $commitCount++;
-                } catch (\PDOException $exception) {
+                } catch (PDOException $exception) {
                     Log::instance()->error("事务提交失败:" . $exception->getMessage());
                 }
             }
@@ -209,7 +208,7 @@ class NestTransactions {
                 try {
                     $transaction->rollback();
                     $rollbackCount++;
-                } catch (\PDOException $exception) {
+                } catch (PDOException $exception) {
                     Log::instance()->error("事务回滚失败:" . $exception->getMessage());
                 }
             }
@@ -227,9 +226,6 @@ class NestTransactions {
         $this->data['connections'][$key] = $transaction;
     }
 
-    /**
-     * @throws Throwable
-     */
     public function getConnenction($key): ?Transaction {
         return $this->data['connections'][$key] ?? null;
     }

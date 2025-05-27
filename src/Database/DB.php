@@ -4,15 +4,13 @@ namespace Scf\Database;
 
 use Closure;
 use PDOException;
-use Scf\Core\Console;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\PdoPoolTable;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Pool\ConnectionPool;
 use Scf\Database\Pool\Dialer;
 use Scf\Mode\Web\Log;
 use Scf\Server\Http;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\PdoPoolTable;
-use Swoole\Coroutine;
 use Swoole\Timer;
 use Throwable;
 
@@ -172,21 +170,21 @@ class DB {
         $this->pool->setPingInterval($autoPing);
         $this->pool->setIdleTimeout($idleTimeout);
         $this->pool->setId($this->poolId);
-        $server = Http::master();
-        if ($autoPing && (is_null($server) || $server->taskworker === false) && !IS_TOOLBOX && !defined('IS_CRONTAB_PROCESS')) {
-            $table = PdoPoolTable::instance();
-            $idleCheckTimerId = $this->pool->idleCheck();
-            $table->set($this->poolId, [
-                'id' => $this->poolId,
-                'hash' => substr(md5(spl_object_hash($this) . getmypid()), 8, 16),
-                'object_id' => spl_object_hash($this->pool),
-                'db' => $this->dbName,
-                'dsn' => $this->dsn,
-                'pid' => getmypid(),
-                'created' => date('Y-m-d H:i:s'),
-                'timer_id' => $idleCheckTimerId
-            ]);
-        }
+//        $server = Http::master();
+//        if ($autoPing && (is_null($server) || $server->taskworker === false) && !IS_TOOLBOX && !defined('IS_CRONTAB_PROCESS')) {
+//            $table = PdoPoolTable::instance();
+//            $idleCheckTimerId = $this->pool->idleCheck();
+//            $table->set($this->poolId, [
+//                'id' => $this->poolId,
+//                'hash' => substr(md5(spl_object_hash($this) . getmypid()), 8, 16),
+//                'object_id' => spl_object_hash($this->pool),
+//                'db' => $this->dbName,
+//                'dsn' => $this->dsn,
+//                'pid' => getmypid(),
+//                'created' => date('Y-m-d H:i:s'),
+//                'timer_id' => $idleCheckTimerId
+//            ]);
+//        }
 //        Console::success("#" . $this->poolId . " 连接池创建成功,db:" . $this->dbName);
 //        Coroutine::defer(function () {
 //            $this->destory();
@@ -201,8 +199,6 @@ class DB {
         if ($timerId = PdoPoolTable::instance()->get($this->poolId, 'timer_id')) {
             Timer::clear($timerId);
             PdoPoolTable::instance()->delete($this->poolId);
-            //Counter::instance()->decr(self::PDO_POOL_ID_KEY);
-            // Console::warning("#" . $this->poolId . " 连接池销毁,timerId:" . $timerId);
         }
     }
 
@@ -241,7 +237,8 @@ class DB {
     protected function borrow(): Connection|Transaction {
         if ($this->actor == DBS_MASTER) {
             try {
-                if ($transaction = $this->getTransaction()) {
+                $transaction = $this->getTransaction();
+                if ($transaction) {
                     //避免取出不同表前缀的事务连接,重新设置前缀
                     $transaction->setPrefix($this->config['prefix'] ?? '');
                     return $transaction;

@@ -2,19 +2,11 @@
 
 namespace Scf\Mode\Web\Route;
 
-use ReflectionClass;
-use ReflectionMethod;
 use Scf\Core\Component;
-use Scf\Core\Console;
-use Scf\Mode\Web\App;
-use Scf\Mode\Web\Controller;
-use Scf\Mode\Native\Controller as NativeController;
-use Scf\Server\Table\RouteTable;
-use Scf\Util\Dir;
-use Throwable;
+use Scf\Core\Table\RouteCache;
+use Scf\Core\Table\RouteTable;
 
 class AnnotationRouteRegister extends Component {
-    protected array $routes = [];
 
     // 获取类型对应的正则表达式
     private function getRegexForType($type): string {
@@ -31,95 +23,30 @@ class AnnotationRouteRegister extends Component {
 
     // 匹配路由
     public function match($method, $path): ?array {
-        $routes = $this->routes();
-        //TODO 缓存路由不用每次循环
-        foreach ($routes as $route) {
-            $allowMethods = explode(',', $route['method']);
-            if ($route['method'] !== 'all' && !in_array(strtolower($method), $allowMethods)) {
-                continue;
-            }
-            $routePattern = preg_replace_callback('/\{(\w+)(?::([^}]+))?\}/', function ($matches) {
-                $param = $matches[1];
-                $type = $matches[2] ?? 'string';
-                $regex = $this->getRegexForType($type);
-                return '(?P<' . $param . '>' . $regex . ')';
-            }, $route['route']);
-
-            $routePattern = '#^' . $routePattern . '$#';
-            if (preg_match($routePattern, $path, $matches)) {
-                return [
-                    'route' => $route,
-                    'params' => array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY)
-                ];
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 加载注解路由
-     * @return void
-     */
-    public function load(): void {
-        clearstatcache();
-        $entryScripts = Dir::scan(APP_LIB_PATH, 4);
-        $excludeFiles = [
-            '_config.php',
-            '_module_.php',
-            'config.php',
-            'service.php',
-            '_service.php'
-        ];
-        $routesCache = RouteTable::instance()->rows();
-        if ($routesCache) {
-            $routeTable = RouteTable::instance();
-            array_map([$routeTable, 'delete'], array_keys($routesCache));
-        }
-        $routes = [];
-        foreach ($entryScripts as $entryScript) {
-            $arr = explode(DIRECTORY_SEPARATOR, $entryScript);
-            $fileName = array_pop($arr);
-            if (in_array($fileName, $excludeFiles)) {
-                continue;
-            }
-            $classFilePath = str_replace(APP_LIB_PATH . DIRECTORY_SEPARATOR, '', $entryScript);
-            $maps = explode(DIRECTORY_SEPARATOR, $classFilePath);
-            $maps[count($maps) - 1] = str_replace('.php', '', $fileName);
-            $namespace = App::buildControllerPath(...$maps);
-            $reader = AnnotationReader::instance();
-            try {
-                if (!is_subclass_of($namespace, Controller::class) && !is_subclass_of($namespace, NativeController::class)) {
+        $matched = RouteCache::instance()->get(md5($path . $method)) ?: null;
+        if (!$matched) {
+            $routes = RouteTable::instance()->rows();
+            foreach ($routes as $route) {
+                $allowMethods = explode(',', $route['method']);
+                if ($route['type'] !== 2 || ($route['method'] !== 'all' && !in_array(strtolower($method), $allowMethods))) {
                     continue;
                 }
-                $cls = new ReflectionClass($namespace);
-                $methods = $cls->getMethods(ReflectionMethod::IS_PUBLIC);
-                foreach ($methods as $method) {
-                    $annotations = $reader->getAnnotations($method);
-                    if (!isset($annotations['Route'])) {
-                        continue;
-                    }
-                    if (isset($routes[$annotations['Route']])) {
-                        Console::warning("[{$method->getName()}@{$namespace}]已忽略重复的路由定义：" . $annotations['Route']);
-                        continue;
-                    }
-                    $routes[$annotations['Route']] = $namespace . $method->getName();
-                    RouteTable::instance()->set(md5($annotations['Route']), [
-                        'route' => $annotations['Route'],
-                        'method' => $annotations['Method'] ?? 'all',
-                        'action' => $method->getName(),
-                        'module' => $maps[0],
-                        'controller' => $maps[count($maps) - 1],
-                        'space' => $namespace,
-
-                    ]);
+                $routePattern = preg_replace_callback('/\{(\w+)(?::([^}]+))?\}/', function ($matches) {
+                    $param = $matches[1];
+                    $type = $matches[2] ?? 'string';
+                    $regex = $this->getRegexForType($type);
+                    return '(?P<' . $param . '>' . $regex . ')';
+                }, $route['route']);
+                $routePattern = '#^' . $routePattern . '$#';
+                if (preg_match($routePattern, $path, $matches)) {
+                    $matched = [
+                        'route' => $route,
+                        'params' => array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY)
+                    ];
+                    $matched and RouteCache::instance()->set(md5($path . $method), $matched);
                 }
-            } catch (Throwable $exception) {
-                Console::error($exception->getMessage());
             }
         }
-    }
-
-    public function routes(): array {
-        return RouteTable::instance()->rows();
+        return $matched;
     }
 }

@@ -2,16 +2,15 @@
 
 namespace Scf\Server\Task;
 
+use Scf\Cache\Redis;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Key;
+use Scf\Core\Table\Counter;
 use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
-use Scf\Cache\Redis;
-use Scf\Mode\Web\App;
-use Scf\Command\Color;
 use Scf\Server\Env;
-use Scf\Server\Table\Counter;
 use Scf\Service\Enum\QueueStatus;
 use Scf\Service\Struct\QueueStruct;
 use Scf\Util\Date;
@@ -39,7 +38,7 @@ class RQueue {
                 Console::warning("【RedisQueue#{$managerId}】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
-                self::instance()->watch($config['redis_queue_mc'] ?? 512);
+                self::instance()->watch($config['redis_queue_mc'] ?? 32);
                 Event::wait();
             }
         });
@@ -58,7 +57,7 @@ class RQueue {
             Console::warning("【RedisQueue】Redis服务不可用,队列管理未启动");
         } else {
             $config = Config::server();
-            self::instance()->watch($config['redis_queue_mc'] ?? 512);
+            self::instance()->watch($config['redis_queue_mc'] ?? 32);
         }
     }
 
@@ -67,7 +66,8 @@ class RQueue {
      * @param int $mc
      * @return int
      */
-    public function watch(int $mc = 512): int {
+    public function watch(int $mc = 32): int {
+        $mc = min($mc, 32);
         //将待重试加入队列
         if ($retryCount = $this->count(2)) {
             for ($i = 0; $i < $retryCount; $i++) {
@@ -79,14 +79,25 @@ class RQueue {
         }
         $this->managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
         Coroutine::create(function () use ($mc) {
-            //每一秒读取一次队列列表
-            Timer::tick(1000, function ($tickerId) use ($mc) {
-                $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                if ($this->managerId != $latestManagerId) {
-                    Timer::clear($tickerId);
-                }
+            $this->loop($mc);
+        });
+        return $this->managerId;
+    }
+
+    protected function loop($mc): void {
+        //每一秒读取一次队列列表
+        Timer::after(1000, function () use ($mc) {
+            $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+            if ($this->managerId != $latestManagerId) {
+                Timer::clearAll();
+            } else {
                 if ($count = $this->count()) {
                     $successed = 0;
+//                    for ($i = 0; $i <= min($count, $mc); $i++) {
+//                        if ($this->pop()) {
+//                            $successed++;
+//                        }
+//                    }
                     Coroutine\parallel(min($count, $mc), function () use (&$successed) {
                         if ($this->pop()) {
                             $successed++;
@@ -94,9 +105,9 @@ class RQueue {
                     });
                     Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
                 }
-            });
+                $this->loop($mc);
+            }
         });
-        return $this->managerId;
     }
 
     /**
@@ -107,7 +118,6 @@ class RQueue {
         if ($queue = Redis::pool()->rPop(QueueStatus::IN->key())) {
             $queue = QueueStruct::factory($queue);
             return call_user_func('\\' . $queue->handler . '::start', $queue);
-            //return $handler->handler::start($queue);
         }
         return false;
     }
@@ -165,6 +175,4 @@ class RQueue {
         $day = $day ?: Date::today('Y-m-d');
         return Redis::pool()->lRange(QueueStatus::IN->is($status) || $status == QueueStatus::DELAY->is($status) ? QueueStatus::matchKey($status) : QueueStatus::matchKey($status) . '_' . $day, 0 - $length);
     }
-
-
 }

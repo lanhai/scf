@@ -2,9 +2,9 @@
 
 namespace Scf\Mode\Native;
 
+use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\JsonHelper;
-use Scf\Server\Table\Runtime;
 use Scf\Server\Native;
 
 abstract class App {

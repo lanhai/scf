@@ -2,7 +2,7 @@
 
 namespace Scf\Component;
 
-use JetBrains\PhpStorm\Pure;
+use RuntimeException;
 use Scf\Core\Coroutine\Component;
 use Scf\Helper\JsonHelper;
 use Swoole\Coroutine;
@@ -15,6 +15,9 @@ abstract class ActiveRecord extends Component {
      * @return static
      */
     public static function lookup(...$args): static {
+        if (!property_exists(static::class, '_ar')) {
+            throw new RuntimeException(get_called_class() . ':必须定义[$_ar]属性');
+        }
         $cid = Coroutine::getCid();
         $instanceKey = md5(get_called_class() . JsonHelper::toJson($args)) . $cid;
         if (!isset(static::$_AR_INSTANCE[$instanceKey])) {
@@ -41,7 +44,7 @@ abstract class ActiveRecord extends Component {
 
     abstract public function ar();
 
-    #[Pure] public function exist(): bool {
+    public function exist(): bool {
         return isset($this->_ar) && $this->_ar->exist();
     }
 }

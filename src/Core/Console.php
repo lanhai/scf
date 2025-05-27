@@ -5,15 +5,15 @@ namespace Scf\Core;
 use JetBrains\PhpStorm\NoReturn;
 use Scf\Client\Http;
 use Scf\Command\Color;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
-use Scf\Server\Table\Runtime;
 use Scf\Util\Time;
-use Swoole\Timer;
 use Swoole\Coroutine;
+use Swoole\Timer;
+use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
-use function Laravel\Prompts\confirm;
 
 /**
  * 带推送功能的控制台打印

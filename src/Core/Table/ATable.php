@@ -1,12 +1,13 @@
 <?php
 
-namespace Scf\Server\Runtime;
+namespace Scf\Core\Table;
 
 use Scf\Core\Console;
 use Scf\Helper\JsonHelper;
 use Scf\Util\Arr;
+use Swoole\Table;
 
-class Table {
+abstract class ATable {
 
     public static array $_instances;
 
@@ -16,9 +17,9 @@ class Table {
      */
     protected array $_config = [];
     /**
-     * @var \Swoole\Table
+     * @var Table
      */
-    protected \Swoole\Table $table;
+    protected Table $table;
 
     /**
      * 构造器
@@ -28,8 +29,8 @@ class Table {
         if ($this->_config) {
             $this->_config = Arr::merge($this->_config, is_array($config) ? $config : []);
         }
-        $table = new \Swoole\Table($this->_config['size'] ?? 1024);
-        $colums = $this->_config['colums'] ?? ['_value' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 1024]];
+        $table = new Table($this->_config['size'] ?? 1024);
+        $colums = $this->_config['colums'] ?? ['_value' => ['type' => Table::TYPE_STRING, 'size' => 1024]];
         foreach ($colums as $name => $colum) {
             $table->column($name, $colum['type'], $colum['size'] ?? 0);
         }
@@ -94,7 +95,7 @@ class Table {
         $rows = [];
         foreach ($this->table as $k => $row) {
             if (count($row) == 1 and isset($row['_value'])) {
-                $rows[$k] = $row['_value'];
+                $rows[$k] = JsonHelper::is($row['_value']) ? JsonHelper::recover($row['_value']) : $row['_value'];
             } else {
                 $rows[$k] = $row;
             }
@@ -217,4 +218,5 @@ class Table {
     public function count(): int {
         return $this->table->count();
     }
+
 }

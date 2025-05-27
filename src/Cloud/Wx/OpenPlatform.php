@@ -5,13 +5,13 @@ namespace Scf\Cloud\Wx;
 
 use App\Common\Model\ConfigModel;
 use App\Db\Wx\WxAccountTable;
-use App\Wx\Component\WxAccount;
 use Scf\Client\Http;
 use Scf\Cloud\Wx\Util\MsgCrypt;
 use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Core\Traits\ComponentTrait;
 use Scf\Core\Traits\Singleton;
+use WxAccountAR;
 
 class OpenPlatform {
     use Singleton, ComponentTrait;
@@ -42,7 +42,7 @@ class OpenPlatform {
         if (!$review) {
             return Result::error('暂无过审版本');
         }
-        $account = WxAccount::lookup($appid);
+        $account = WxAccountAR::lookup($appid);
         $account->ar()->audit_version = $review;
         $account->ar()->save();
         $result = $account->release();
@@ -65,7 +65,7 @@ class OpenPlatform {
      */
     public function setPrivacySetting(array $setting): Result {
         $appid = Config::get('demo_wxa_appid');
-        $result = WxAccount::lookup($appid)->setPrivacySetting($setting);
+        $result = WxAccountAR::lookup($appid)->setPrivacySetting($setting);
         if ($result->hasError()) {
             return $result;
         }
@@ -78,7 +78,7 @@ class OpenPlatform {
      */
     public function undoAudit(): Result {
         $appid = Config::get('demo_wxa_appid');
-        $result = WxAccount::lookup($appid)->undoAudit();
+        $result = WxAccountAR::lookup($appid)->undoAudit();
         if ($result->hasError()) {
             return $result;
         }
@@ -93,7 +93,7 @@ class OpenPlatform {
      */
     public function getAuditStatus(string $auditId): Result {
         $appid = Config::get('demo_wxa_appid');
-        return WxAccount::lookup($appid)->getAuditStatus($auditId);
+        return WxAccountAR::lookup($appid)->getAuditStatus($auditId);
     }
 
     /**
@@ -106,32 +106,12 @@ class OpenPlatform {
         if (!$demo) {
             return Result::error('暂无体验版本');
         }
-        $result = WxAccount::lookup($appid)->submitAudit();
+        $result = WxAccountAR::lookup($appid)->submitAudit();
         if ($result->hasError()) {
             return $result;
         }
         ConfigModel::instance()->update(ConfigModel::KEY_WXA_VERSION_UNDER_REVIEW, $result->getData());
         return Result::success($result->getData());
-    }
-
-    /**
-     * 设为体验版
-     * @param $template
-     * @return Result
-     */
-    public function wxaSetDemo($template): Result {
-        $appid = Config::get('demo_wxa_appid');
-        $account = WxAccountTable::select()->where(['appid' => $appid])->ar();
-        if ($account->notExist() || $account->auth_type !== 2) {
-            return Result::error('体验版小程序未授权接入');
-        }
-        $wxAccount = WxAccount::lookup($appid);
-        $demo = $wxAccount->wxaSetDemo($template);
-        if ($demo->hasError()) {
-            return $demo;
-        }
-        ConfigModel::instance()->update(ConfigModel::KEY_WXA_VERSION_DEMO, $demo->getData());
-        return Result::success($demo->getData());
     }
 
     /**
@@ -382,6 +362,9 @@ class OpenPlatform {
             $token = $json['component_access_token'];
             $config->update(ConfigModel::KEY_WX_ACCESS_TOKEN, $token);
             $config->update(ConfigModel::KEY_WX_ACCESS_TOKEN_EXPIRED, time() + $json['expires_in']);
+        }
+        if (!$token) {
+            return Result::error('access_token获取失败');
         }
         return Result::success($token);
     }

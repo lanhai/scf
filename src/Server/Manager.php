@@ -3,18 +3,17 @@
 namespace Scf\Server;
 
 use JetBrains\PhpStorm\ArrayShape;
+use Scf\Cache\MasterDB;
+use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Component;
 use Scf\Core\Console;
 use Scf\Core\Exception;
-use Scf\Cache\MasterDB;
 use Scf\Core\Key;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\ATable;
 use Scf\Helper\ArrayHelper;
-use Scf\Command\Color;
-use Scf\Server\Runtime\Table;
 use Scf\Server\Struct\Node;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\Runtime;
 use Scf\Server\Task\Crontab;
 use Scf\Util\Date;
 use Swlib\SaberGM;
@@ -73,7 +72,7 @@ class Manager extends Component {
         $node->heart_beat = time();
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
         $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
-        $node->tables = Table::list();
+        $node->tables = ATable::list();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
         $node->stack_useage = memory_get_usage(true);
         $node->threads = count(Coroutine::list());

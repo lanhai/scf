@@ -2,7 +2,6 @@
 
 namespace Scf\Server\Worker;
 
-use JetBrains\PhpStorm\ArrayShape;
 use Scf\Core\Traits\ProcessLifeSingleton;
 use Scf\Mode\Web\App;
 use Scf\Util\Random;
@@ -113,7 +112,7 @@ class ProcessLife {
      * 调试信息
      * @return array
      */
-    #[ArrayShape(['cid' => "mixed", 'runtime' => "string", 'status' => "bool", 'database' => "array", 'redis' => "array"])] public function requestDebugInfo(): array {
+    public function requestDebugInfo(): array {
         return [
             'cid' => Coroutine::getCid(),
             'runtime' => App::instance()->consume() . 'ms',

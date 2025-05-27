@@ -2,20 +2,18 @@
 
 namespace Scf\Server;
 
-use Scf\App\Updater;
+use Scf\Command\Color;
+use Scf\Command\Manager;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Key;
-use Scf\Mode\Web\App;
-use Scf\Mode\Web\Log;
-use Scf\Command\Color;
-use Scf\Command\Manager;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ATable;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
-use Scf\Server\Runtime\Table;
 use Scf\Server\Struct\Node;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\Runtime;
 use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
 use Scf\Util\File;
@@ -79,7 +77,6 @@ class Http extends \Scf\Core\Server {
         $this->ip = SERVER_HOST;
     }
 
-
     /**
      * 创建一个服务器对象
      * @param $role
@@ -95,75 +92,27 @@ class Http extends \Scf\Core\Server {
         return self::$_instances[$class];
     }
 
+    public static function allowCrossOrigin(): bool {
+        return defined('ALLOW_CROSS_ORIGIN') && ALLOW_CROSS_ORIGIN;
+    }
 
-    public static function bgs(): void {
-        MasterDB::start();
+    public static function server(): ?Server {
+        try {
+            return self::instance()->_master();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**
-     * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
-     * @param $config
+     * @return ?Server
      */
-    protected function addCrontabProcess($config): void {
-        $crontabProcess = new Process(function () use ($config) {
-            //等待服务器启动完成
-            while (true) {
-                if (Runtime::instance()->serverStatus()) {
-                    break;
-                }
-                sleep(1);
-            }
-            $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-            define('IS_CRONTAB_PROCESS', true);
-            while (true) {
-                if (!Runtime::instance()->crontabProcessStatus()) {
-                    $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                    Crontab::startProcess();
-                    Runtime::instance()->crontabProcessStatus(true);
-                }
-                //使用管理进程id判断是否迭代,迭代则重新启动进程
-                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                    Runtime::instance()->crontabProcessStatus(false);
-                    Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,重启所有任务进程");
-                    sleep(1);
-                } else {
-                    sleep(5);
-                }
-            }
-        });
-        $pid = $this->server->addProcess($crontabProcess);
-        $this->log("Crontab 管理进程ID编号:{$pid}");
-        //redis队列管理进程
-        $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
-        $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
-        if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-            $redisQueueProcess = new Process(function () use ($config) {
-                //等待服务器启动完成
-                while (true) {
-                    if (Runtime::instance()->serverStatus()) {
-                        break;
-                    }
-                    sleep(1);
-                }
-                $managerId = Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                while (true) {
-                    if (!Runtime::instance()->redisQueueProcessStatus()) {
-                        $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                        RQueue::startProcess();
-                        Runtime::instance()->redisQueueProcessStatus(true);
-                    }
-                    if ($managerId !== Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS)) {
-                        Runtime::instance()->redisQueueProcessStatus(false);
-                        Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,重启队列进程");
-                        sleep(1);
-                    } else {
-                        sleep(5);
-                    }
-                }
-            });
-            $pid = $this->server->addProcess($redisQueueProcess);
-            $this->log("RedisQueue 管理进程ID编号:{$pid}");
-        }
+    public static function master(): ?Server {
+        return self::server();
+    }
+
+    public static function bgs(): void {
+        MasterDB::start();
     }
 
     /**
@@ -174,17 +123,18 @@ class Http extends \Scf\Core\Server {
         //一键协程化
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
         //初始化内存表,放在最前面保证所有进程间能共享
-        Table::register([
-            'Scf\Server\Table\PdoPoolTable',
-            'Scf\Server\Table\LogTable',
-            'Scf\Server\Table\Counter',
-            'Scf\Server\Table\Runtime',
-            'Scf\Server\Table\RouteTable',
+        ATable::register([
+            'Scf\Core\Table\PdoPoolTable',
+            'Scf\Core\Table\LogTable',
+            'Scf\Core\Table\Counter',
+            'Scf\Core\Table\Runtime',
+            'Scf\Core\Table\RouteTable',
+            'Scf\Core\Table\RouteCache',
+            'Scf\Core\Table\CrontabTable'
         ]);
         Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
         Dashboard::start();
-        //usleep(1000 * 500);
         //启动masterDB(redis协议)服务器
         MasterDB::start(MDB_PORT);
         //加载服务器配置
@@ -288,7 +238,7 @@ class Http extends \Scf\Core\Server {
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
-            //Runtime::instance()->serverStatus(false);
+            Runtime::instance()->serverStatus(false);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
             //断开所有客户端连接
@@ -303,10 +253,9 @@ class Http extends \Scf\Core\Server {
             }
         });
         $this->server->on("AfterReload", function () {
-            $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
             //重置执行中的请求数统计
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
-            Runtime::instance()->serverStatus(true);
+            $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
         });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
@@ -355,8 +304,8 @@ INFO;
             $renderData = [
                 ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green($this->bindPort)],
                 ['SOCKET', "--", Color::green(Runtime::instance()->socketPort())],
-                ['DASHBOARD', \Scf\Core\App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', \Scf\Core\App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
-                ['MasterDB', \Scf\Core\App::isMaster() ? Color::cyan(Runtime::instance()->get('MASTERDB_PID')) : '--', \Scf\Core\App::isMaster() ? Color::green(Runtime::instance()->masterDbPort()) : '--'],
+                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
+                ['MasterDB', App::isMaster() ? Color::cyan(Runtime::instance()->get('MASTERDB_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->masterDbPort()) : '--'],
             ];
             if ($rpcPort = Runtime::instance()->rpcPort()) {
                 $renderData[] = ['RPC', "--", Color::green($rpcPort)];
@@ -368,7 +317,7 @@ INFO;
                 ->setRows($renderData);
             $table->render();
             //自动更新
-            APP_AUTO_UPDATE == STATUS_ON and $this->checkVersion();
+            APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
 //        Timer::tick(3000, function () {
 //            \Scf\Core\App::countMemory();
@@ -388,6 +337,64 @@ INFO;
         }
     }
 
+    /**
+     * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
+     * @param $config
+     */
+    protected function addCrontabProcess($config): void {
+        $crontabProcess = new Process(function () use ($config) {
+            //等待服务器启动完成
+            while (true) {
+                if (Runtime::instance()->serverStatus()) {
+                    break;
+                }
+                sleep(1);
+            }
+            $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+            define('IS_CRONTAB_PROCESS', true);
+            while (true) {
+                //if (!Runtime::instance()->crontabProcessStatus()) {
+                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+                //Runtime::instance()->crontabProcessStatus(true);
+                Crontab::startProcess();
+                //}
+                //使用管理进程id判断是否迭代,迭代则重新启动进程
+                //Runtime::instance()->crontabProcessStatus(false);
+                Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,重启所有任务进程");
+                sleep(1);
+            }
+        });
+        $pid = $this->server->addProcess($crontabProcess);
+        $this->log("Crontab 管理进程ID编号:{$pid}");
+        //redis队列管理进程
+        $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
+        $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+        if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
+            $redisQueueProcess = new Process(function () use ($config) {
+                //等待服务器启动完成
+                while (true) {
+                    if (Runtime::instance()->serverStatus()) {
+                        break;
+                    }
+                    sleep(1);
+                }
+                $managerId = Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                define('IS_REDIS_QUEUE_PROCESS', true);
+                while (true) {
+                    if (!Runtime::instance()->redisQueueProcessStatus()) {
+                        $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                        Runtime::instance()->redisQueueProcessStatus(true);
+                        RQueue::startProcess();
+                    }
+                    Runtime::instance()->redisQueueProcessStatus(false);
+                    Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,重启队列进程");
+                    sleep(3);
+                }
+            });
+            $pid = $this->server->addProcess($redisQueueProcess);
+            $this->log("RedisQueue 管理进程ID编号:{$pid}");
+        }
+    }
 
     /**
      * 创建心跳进程
@@ -402,7 +409,7 @@ INFO;
         $node->fingerprint = APP_FINGERPRINT;
         $node->port = $this->bindPort;
         $node->socketPort = Runtime::instance()->socketPort();
-        $node->role = \Scf\Core\App::isMaster() ? 'master' : 'slave';
+        $node->role = App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
         $node->restart_times = 0;
         $node->master_pid = $this->server->master_pid;
@@ -412,7 +419,7 @@ INFO;
         $node->stack_useage = Coroutine::getStackUsage();
         $node->heart_beat = time();
         $node->scf_version = SCF_VERSION;
-        $node->tables = Table::list();
+        $node->tables = ATable::list();
         $node->threads = count(Coroutine::list());
         $node->thread_status = Coroutine::stats();
         $node->server_run_mode = APP_RUN_MODE;
@@ -422,66 +429,10 @@ INFO;
     }
 
     /**
-     * 检查版本
-     * @return void
-     */
-    protected function checkVersion(): void {
-        if (APP_RUN_MODE != 'phar') {
-            return;
-        }
-        $versionInfo = "";
-        $updater = Updater::instance();
-        $version = $updater->getVersion();
-        Console::line();
-        $versionInfo .= "APP版本:" . $version['local']['version'] . ",更新时间:" . $version['local']['updated'] . "\n";
-        $versionInfo .= "SCF版本:" . SCF_VERSION . ",更新时间:" . date('Y-m-d H:i:s') . "\n";
-        if (is_null($version['remote'])) {
-            $versionInfo .= "最新版本:获取失败\n";
-        } else {
-            $versionInfo .= "APP最新版本:" . (!$updater->hasNewAppVersion() ? Color::green("已是最新") : $version['remote']['app']['version'] . ",发布时间:" . $version['remote']['app']['release_date']) . "\n";
-            $versionInfo .= "SCF最新版本:" . (!$updater->hasNewScfVersion() ? Color::green("已是最新") : $version['remote']['scf']['version'] . ",发布时间:" . $version['remote']['scf']['release_date']) . "\n";
-        }
-        $versionInfo .= "自动更新:" . ($updater->isEnableAutoUpdate() ? Color::green("开启") : Color::yellow("关闭"));
-        Console::write($versionInfo);
-        Console::line();
-        if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
-            $this->log('开始执行更新');
-            if ($updater->updateApp()) {
-                $this->reload();
-            }
-        }
-        $pid = Coroutine::create(function () use ($version) {
-            $this->autoUpdate();
-        });
-        $this->log('自动更新服务启动成功!协程ID:' . $pid);
-    }
-
-    /**
-     * 自动更新
-     * @return mixed
-     */
-    protected function autoUpdate(): mixed {
-        Coroutine::sleep(10);
-        $updater = Updater::instance();
-        $version = $updater->getVersion();
-        if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
-            //强制更新
-            Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
-            if ($updater->updateApp()) {
-                $this->reload();
-            } else {
-                Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
-            }
-
-        }
-        return $this->autoUpdate();
-    }
-
-    /**
      * 重启服务器
      * @return void
      */
-    protected function reload(): void {
+    public function reload(): void {
         $countdown = 3;
         Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
         Timer::tick(1000, function ($id) use (&$countdown) {
@@ -505,51 +456,6 @@ INFO;
     }
 
     /**
-     * 自定义更新src/public到指定版本
-     * @param $type
-     * @param $version
-     * @return bool
-     */
-    public function appointUpdateTo($type, $version): bool {
-        if (Updater::instance()->appointUpdateTo($type, $version)) {
-            $type == 'app' and $this->reload();
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 强制更新
-     * @param string|null $version 版本号
-     * @return bool
-     */
-    public function forceUpdate(string $version = null): bool {
-        $updater = Updater::instance();
-        if (!$updater->hasNewAppVersion()) {
-            return false;
-        }
-        if (!is_null($version)) {
-            Log::instance()->info('开始执行更新:' . $version);
-            if ($updater->changeAppVersion($version)) {
-                $this->reload();
-                return true;
-            } else {
-                Log::instance()->info('更新失败:' . $version);
-            }
-        } else {
-            $version = $updater->getVersion();
-            Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
-            if ($updater->updateApp()) {
-                $this->reload();
-                return true;
-            } else {
-                Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
-            }
-        }
-        return false;
-    }
-
-    /**
      * 向socket客户端推送内容
      * @param $fd
      * @param $str
@@ -567,7 +473,6 @@ INFO;
         }
     }
 
-
     /**
      * @return string|null
      */
@@ -583,31 +488,8 @@ INFO;
         return $this->server->stats();
     }
 
-    public function inServerProcess(): bool {
-        return isset($this->server);
-    }
-
     protected function _master(): Server {
         return $this->server;
     }
 
-
-    public static function allowCrossOrigin(): bool {
-        return defined('ALLOW_CROSS_ORIGIN') && ALLOW_CROSS_ORIGIN;
-    }
-
-    public static function server(): ?Server {
-        try {
-            return self::instance()->_master();
-        } catch (Throwable) {
-            return null;
-        }
-    }
-
-    /**
-     * @return ?Server
-     */
-    public static function master(): ?Server {
-        return self::server();
-    }
 }

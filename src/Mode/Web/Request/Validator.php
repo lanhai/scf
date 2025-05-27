@@ -24,6 +24,7 @@ class Validator {
     protected int|null $min = null;
     protected int|null $max = null;
     protected array $enumCases = [];
+    protected bool $required = true;
 
     /**
      * @param string|null $msg
@@ -37,43 +38,44 @@ class Validator {
     /**
      * @param $rule
      * @param $msg
+     * @param bool $required
      * @return Validator
      */
-    public static function match($rule, $msg): Validator {
-        return static::factory()->setFilter($rule, $msg);
+    public static function match($rule, $msg, bool $required = true): Validator {
+        return static::factory()->setFilter($rule, $msg, required: $required);
     }
 
-    public static function number($msg, $min = null, $max = null): Validator {
-        return static::factory()->setFilter(self::_NUMBER, $msg, $min, $max);
+    public static function number($msg, $min = null, $max = null, $required = true): Validator {
+        return static::factory()->setFilter(self::_NUMBER, $msg, $min, $max, required: $required);
     }
 
-    public static function email($msg = null): Validator {
-        return static::factory()->setFilter(self::_EMAIL, $msg ?: '邮箱地址格式错误');
+    public static function email($msg = null, $required = true): Validator {
+        return static::factory()->setFilter(self::_EMAIL, $msg ?: '邮箱地址格式错误', required: $required);
     }
 
-    public static function mobile($msg = null): Validator {
-        return static::factory()->setFilter(self::_MOBILE, $msg ?: '手机号码格式错误');
+    public static function mobile($msg = null, $required = true): Validator {
+        return static::factory()->setFilter(self::_MOBILE, $msg ?: '手机号码格式错误', required: $required);
     }
 
-    public static function arr($msg): Validator {
-        return static::factory()->setFilter(self::_ARRAY, $msg);
+    public static function arr($msg, $required = true): Validator {
+        return static::factory()->setFilter(self::_ARRAY, $msg, required: $required);
     }
 
-    public static function json($msg): Validator {
-        return static::factory()->setFilter(self::_JSON, $msg);
+    public static function json($msg, $required = true): Validator {
+        return static::factory()->setFilter(self::_JSON, $msg, required: $required);
     }
 
-    public static function string($msg, $min = null, $max = null): Validator {
-        return static::factory()->setFilter(self::_STRING, $msg, $min, $max);
+    public static function string($msg, $min = null, $max = null, $required = true): Validator {
+        return static::factory()->setFilter(self::_STRING, $msg, $min, $max, required: $required);
     }
 
-    public static function enum($cases, $msg): Validator {
-        return static::factory()->setFilter(self::_ENUM, $msg, enumCases: $cases);
+    public static function enum($cases, $msg, $required = true): Validator {
+        return static::factory()->setFilter(self::_ENUM, $msg, enumCases: $cases, required: $required);
     }
 
-    public static function code($msg = '请输入正确的富文本内容'): Validator {
+    public static function code($msg = '请输入正确的富文本内容', $required = false): Validator {
         //TODO 验证不支持的代码标签
-        return static::factory()->setFilter(self::_CODE, $msg);
+        return static::factory()->setFilter(self::_CODE, $msg, required: $required);
     }
 
     /**
@@ -82,7 +84,7 @@ class Validator {
      */
     public function isValid($val): bool {
         return match ($this->filter) {
-            self::_REQUIRED => !is_null($val) && $val != '',
+            self::_REQUIRED => !is_null($val) && $val !== '',
             self::_NUMBER => $this->verifyNumber($val),
             self::_EMAIL => StringHelper::isEmailAddress($val),
             self::_MOBILE => StringHelper::is_mobile_number($val),
@@ -116,7 +118,10 @@ class Validator {
     }
 
     protected function verifyNumber($val): bool {
-        if (!is_numeric($val) || (!is_null($this->min) && $val < $this->min) || (!is_null($this->max) && $val > $this->max)) {
+        if ((is_null($val) || $val === '') && $this->required) {
+            return false;
+        }
+        if (($val !== "" && !is_null($val) && !is_numeric($val)) || ($val !== "" && !is_null($val) && !is_null($this->min) && $val < $this->min) || ($val !== "" && !is_null($val) && !is_null($this->max) && $val > $this->max)) {
             return false;
         }
         return true;
@@ -128,14 +133,16 @@ class Validator {
      * @param int|null $min
      * @param int|null $max
      * @param array $enumCases
+     * @param bool $required
      * @return $this
      */
-    protected function setFilter($filter, $msg, int $min = null, int $max = null, array $enumCases = []): static {
+    protected function setFilter($filter, $msg, int $min = null, int $max = null, array $enumCases = [], bool $required = true): static {
         $this->filter = $filter;
         $this->message = $msg;
         $this->min = $min;
         $this->max = $max;
         $this->enumCases = $enumCases;
+        $this->required = $required;
         return $this;
     }
 
