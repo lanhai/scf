@@ -4,7 +4,6 @@ namespace Scf\Database;
 
 use Co\Channel;
 use JetBrains\PhpStorm\ArrayShape;
-use JetBrains\PhpStorm\Pure;
 use PDOException;
 use Scf\Command\Color;
 use Scf\Component\Cache;
@@ -1036,8 +1035,6 @@ class Dao extends Struct {
     protected function getArCacheKey($val): string {
         $arKey = $this->getPrimaryKey();
         return 'AR_' . strtoupper($this->_dbName) . '_' . strtoupper($this->_table) . '_' . $arKey . '_' . $val;
-
-        //return 'AR_' . md5(strtoupper($this->_dbName) . '_' . strtoupper($this->_table) . '_' . $arKey . '_' . $val . JsonHelper::toJson($this->_fields));
     }
 
     /**
@@ -1120,7 +1117,6 @@ class Dao extends Struct {
     /**
      * @return int|string|null
      */
-    #[Pure]
     protected function getPrimaryVal(): int|string|null {
         if (!is_null($this->_primaryVal)) {
             return $this->_primaryVal;

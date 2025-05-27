@@ -4,15 +4,15 @@ namespace Scf\Server;
 
 use Exception;
 use Scf\Command\Color;
-use Scf\Server\Manager as ServerManager;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Log;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\Runtime;
 use Scf\Root;
+use Scf\Server\Manager as ServerManager;
 use Scf\Server\Struct\Node;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\Runtime;
-use Scf\Util\Date;
 use Scf\Util\Dir;
 use Swoole\Process;
 use Swoole\Timer;
@@ -32,7 +32,7 @@ class SubProcess {
             if (Process::kill($server->manager_pid, 0)) {
                 Console::info("【Server】心跳服务PID:" . $process->pid, false);
                 App::mount();
-                $node->appid = \Scf\Mode\Web\App::id();
+                $node->appid = App::id();
                 $node->app_version = App::version();
                 $node->public_version = App::publicVersion();
                 function report($process, $server, $node): void {
@@ -144,6 +144,10 @@ class SubProcess {
                         Console::warning('-------------------------------------------');
                         $server->reload();
                         // Console::info("重启状态:" . $this->server->reload());
+                        //定时任务迭代
+                        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+                        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+
                         if ($port && App::isMaster()) {
                             $dashboardHost = PROTOCOL_HTTP . 'localhost:' . Runtime::instance()->dashboardPort() . '/reload';
                             $client = \Scf\Client\Http::create($dashboardHost);

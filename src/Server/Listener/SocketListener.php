@@ -153,7 +153,7 @@ class SocketListener extends Listener {
                     break;
                 case 'update':
                     $server->push($frame->fd, "开始执行更新");
-                    if (Http::instance()->forceUpdate()) {
+                    if (App::forceUpdate()) {
                         $server->push($frame->fd, "更新成功");
                     } else {
                         $server->push($frame->fd, "更新失败");
@@ -165,7 +165,7 @@ class SocketListener extends Listener {
                     $arr = explode("|", $data);
                     $type = $arr[0];
                     $version = $arr[1];
-                    if (Http::instance()->appointUpdateTo($type, $version)) {
+                    if (App::appointUpdateTo($type, $version)) {
                         $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新成功:{$type}=>{$version}");
                     } else {
                         $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新失败:{$type}=>{$version}");

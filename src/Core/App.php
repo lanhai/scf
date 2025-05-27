@@ -3,20 +3,20 @@
 namespace Scf\Core;
 
 use FilesystemIterator;
-use JetBrains\PhpStorm\Pure;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Scf\App\Installer;
 use Scf\App\Updater;
 use Scf\Client\Http;
+use Scf\Command\Color;
+use Scf\Core\Table\LogTable;
 use Scf\Database\Dao;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Log;
-use Scf\Command\Color;
 use Scf\Server\Env;
-use Scf\Server\Table\LogTable;
 use Scf\Util\Dir;
 use Scf\Util\File;
+use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Coroutine\System;
 use Swoole\Event;
@@ -39,6 +39,115 @@ class App {
     protected static ?string $appid = null;
     protected static string $path;
     protected static bool $_ready = false;
+
+    /**
+     * 自定义更新src/public到指定版本
+     * @param $type
+     * @param $version
+     * @return bool
+     * @throws Exception
+     */
+    public static function appointUpdateTo($type, $version): bool {
+        $httpServer = \Scf\Server\Http::instance();
+        if (Updater::instance()->appointUpdateTo($type, $version)) {
+            $type == 'app' and $httpServer->reload();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 强制更新
+     * @param string|null $version 版本号
+     * @return bool
+     * @throws Exception
+     */
+    public static function forceUpdate(string $version = null): bool {
+        $httpServer = \Scf\Server\Http::instance();
+        $updater = Updater::instance();
+        if (!$updater->hasNewAppVersion()) {
+            return false;
+        }
+        if (!is_null($version)) {
+            Log::instance()->info('开始执行更新:' . $version);
+            if ($updater->changeAppVersion($version)) {
+                $httpServer->reload();
+                return true;
+            } else {
+                Log::instance()->info('更新失败:' . $version);
+            }
+        } else {
+            $version = $updater->getVersion();
+            Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
+            if ($updater->updateApp()) {
+                $httpServer->reload();
+                return true;
+            } else {
+                Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 自动更新
+     * @return mixed
+     * @throws Exception
+     */
+    public static function autoUpdate(): mixed {
+        Coroutine::sleep(10);
+        $httpServer = \Scf\Server\Http::instance();
+        $updater = Updater::instance();
+        $version = $updater->getVersion();
+        if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
+            //强制更新
+            Log::instance()->info('开始执行更新:' . $version['remote']['app']['version']);
+            if ($updater->updateApp()) {
+                $httpServer->reload();
+            } else {
+                Log::instance()->info('更新失败:' . $version['remote']['app']['version']);
+            }
+
+        }
+        return self::autoUpdate();
+    }
+
+    /**
+     * 检查版本
+     * @return void
+     * @throws Exception
+     */
+    public static function checkVersion(): void {
+        if (APP_RUN_MODE != 'phar') {
+            return;
+        }
+        $httpServer = \Scf\Server\Http::instance();
+        $versionInfo = "";
+        $updater = Updater::instance();
+        $version = $updater->getVersion();
+        Console::line();
+        $versionInfo .= "APP版本:" . $version['local']['version'] . ",更新时间:" . $version['local']['updated'] . "\n";
+        $versionInfo .= "SCF版本:" . SCF_VERSION . ",更新时间:" . date('Y-m-d H:i:s') . "\n";
+        if (is_null($version['remote'])) {
+            $versionInfo .= "最新版本:获取失败\n";
+        } else {
+            $versionInfo .= "APP最新版本:" . (!$updater->hasNewAppVersion() ? Color::green("已是最新") : $version['remote']['app']['version'] . ",发布时间:" . $version['remote']['app']['release_date']) . "\n";
+            $versionInfo .= "SCF最新版本:" . (!$updater->hasNewScfVersion() ? Color::green("已是最新") : $version['remote']['scf']['version'] . ",发布时间:" . $version['remote']['scf']['release_date']) . "\n";
+        }
+        $versionInfo .= "自动更新:" . ($updater->isEnableAutoUpdate() ? Color::green("开启") : Color::yellow("关闭"));
+        Console::write($versionInfo);
+        Console::line();
+        if ($updater->hasNewAppVersion() && ($updater->isEnableAutoUpdate() || $version['remote']['app']['forced'])) {
+            $httpServer->log('开始执行更新');
+            if ($updater->updateApp()) {
+                $httpServer->reload();
+            }
+        }
+        $pid = Coroutine::create(function () use ($version) {
+            self::autoUpdate();
+        });
+        $httpServer->log('自动更新服务启动成功!协程ID:' . $pid);
+    }
 
     /**
      * 指定APP文件夹
@@ -167,7 +276,7 @@ class App {
         !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . '/lib');
         Config::init();
         !defined('APP_MASTER_DB_HOST') and define('APP_MASTER_DB_HOST', self::isMaster() ? 'master' : (Config::get('app')['master_host'] ?? 'master'));
-        !defined('APP_MASTER_DB_PORT') and define('APP_MASTER_DB_PORT', (self::isMaster() ? \Scf\Server\Table\Runtime::instance()->masterDbPort() : (Config::get('app')['master_port'] ?? MDB_PORT)) ?: MDB_PORT);
+        !defined('APP_MASTER_DB_PORT') and define('APP_MASTER_DB_PORT', (self::isMaster() ? \Scf\Core\Table\Runtime::instance()->masterDbPort() : (Config::get('app')['master_port'] ?? MDB_PORT)) ?: MDB_PORT);
         //加载应用第三方库
         $vendorLoader = self::src() . '/vendor/autoload.php';
         if (file_exists($vendorLoader)) {
@@ -215,7 +324,7 @@ class App {
     public static function updateDatabase(): void {
         //同步数据库表
         if (self::isMaster()) {
-            $configDir = App::src() . '/config/db';
+            $configDir = self::src() . '/config/db';
             if (is_dir($configDir) && $files = Dir::scan($configDir)) {
                 foreach ($files as $file) {
                     $table = Yaml::parseFile($file);
@@ -231,7 +340,7 @@ class App {
                 }
             }
             //同步权限节点
-            $versionFile = App::src() . '/config/access/nodes.yml';
+            $versionFile = self::src() . '/config/access/nodes.yml';
             if (file_exists($versionFile)) {
                 $latest = Yaml::parseFile($versionFile);
                 $cls = $latest['dao'];
@@ -361,8 +470,8 @@ class App {
      * @return string|null
      */
     public static function version(): ?string {
-        if (file_exists(App::src() . '/version.php')) {
-            $vision = require App::src() . '/version.php';
+        if (file_exists(self::src() . '/version.php')) {
+            $vision = require self::src() . '/version.php';
             return $vision['version'] ?? 'development';
         }
         return self::installer()->version;
@@ -442,10 +551,11 @@ class App {
                     '_config.php',
                     '_module_.php',
                     'config.php',
-                    'service.php'
+                    'service.php',
+                    '_service_.php'
                 ];
                 $fileName = array_pop($arr);
-                if (!in_array($fileName, $allowFiles) || ($mode == MODE_CGI && $fileName == 'service.php')) {
+                if (!in_array($fileName, $allowFiles) || ($mode == MODE_CGI && in_array($fileName, ['service.php', '_service_.php']))) {
                     continue;
                 }
                 $config = require($file);
@@ -495,7 +605,7 @@ class App {
     /**
      * @return bool 是否开发环境
      */
-    #[Pure] public static function isDevEnv(): bool {
+    public static function isDevEnv(): bool {
         return Env::isDev();
     }
 

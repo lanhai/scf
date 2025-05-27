@@ -28,7 +28,7 @@ abstract class Server {
      * 向控制台输出消息
      * @param string $str
      */
-    protected function log(string $str): void {
+    public function log(string $str): void {
         Console::info("【Server】" . $str, false);
     }
 

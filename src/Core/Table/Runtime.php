@@ -1,20 +1,20 @@
 <?php
 
-namespace Scf\Server\Table;
+namespace Scf\Core\Table;
 
 use Scf\Core\Key;
-use Scf\Server\Runtime\Table;
+use Swoole\Table;
 
-class Runtime extends Table {
+class Runtime extends ATable {
 
     /**
      * 配置项
      * @var array
      */
     protected array $_config = [
-        'size' => 128,
+        'size' => 256,
         'colums' => [
-            '_value' => ['type' => \Swoole\Table::TYPE_STRING, 'size' => 102400]
+            '_value' => ['type' => Table::TYPE_STRING, 'size' => 102400]
         ]
     ];
 

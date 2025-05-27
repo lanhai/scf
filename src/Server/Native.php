@@ -3,20 +3,19 @@
 namespace Scf\Server;
 
 use App\Window\Main;
-use Scf\Command\Manager;
-use Scf\Core\Console;
 use Scf\Command\Color;
+use Scf\Core\Console;
 use Scf\Core\Result;
+use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ATable;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Native\App;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
-use Scf\Server\Runtime\Table;
-use Scf\Server\Table\Runtime;
 use Swoole\Coroutine;
-use Swoole\Timer;
 use Swoole\Server;
+use Swoole\Timer;
 use Throwable;
 
 
@@ -48,12 +47,12 @@ class Native {
     public function start(int $port = 9501): void {
         //一键协程化
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
-        Table::register([
-            'Scf\Server\Table\PdoPoolTable',
-            'Scf\Server\Table\LogTable',
-            'Scf\Server\Table\Counter',
-            'Scf\Server\Table\Runtime',
-            'Scf\Server\Table\RouteTable',
+        ATable::register([
+            'Scf\Core\Table\PdoPoolTable',
+            'Scf\Core\Table\LogTable',
+            'Scf\Core\Table\Counter',
+            'Scf\Core\Table\Runtime',
+            'Scf\Core\Table\RouteTable',
         ]);
         $this->server = new Server("localhost", $port, SWOOLE_PROCESS);
         $this->server->listen('localhost', $port, SWOOLE_SOCK_TCP);

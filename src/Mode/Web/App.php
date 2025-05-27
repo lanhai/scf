@@ -2,11 +2,8 @@
 
 namespace Scf\Mode\Web;
 
-use ReflectionClass;
-use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Helper\ArrayHelper;
-use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppException;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Server\Env;
@@ -29,8 +26,8 @@ class App extends Lifetime {
      */
     public function init(): void {
         $this->start();
-        $modules = self::$_modules[MODE_CGI];
-        $this->router = Router::instance();;
+        $modules = \Scf\Core\App::getModules();
+        $this->router = Router::instance();
         //配置初始化
         try {
             if (!$this->router->matchAnnotationRoute($this->request()->server())) {
@@ -66,7 +63,7 @@ class App extends Lifetime {
         set_error_handler([$this, 'errorHandler']);
         //自定义异常处理
         set_exception_handler([$this, 'exceptionHandler']);
-        $modules = self::$_modules[MODE_CGI];
+        $modules = \Scf\Core\App::getModules();
         $moduleConfig = ArrayHelper::findColumn($modules, 'name', $router->getModule()) ?: [];
         if ($router->isAnnotationRoute()) {
             $route = $router->getAnnotationRoute();
@@ -75,65 +72,73 @@ class App extends Lifetime {
             $class = new $route['route']['space']($moduleConfig);
             $method = $route['route']['action'];
             return call_user_func_array([$class, $method], $route['params']);
-            //return $class->$method(...$route['params']);
         }
-        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-        $method = $router->getMethod();
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            $ctrlClass = self::buildControllerPath('Controller', $router->getController());
-            $ctrlPath = $router->getController() . '/' . $router->getAction();
-            $isSubController = false;
-            //查找子目录控制器
-            if (!class_exists($ctrlClass)) {
-                $method = $router->getFragment(2) ?: 'index';
-                $router->fixPartition('module', StringHelper::lower2camel($router->getFragment(0) ?: 'Index'));
-                $router->fixPartition('controller', StringHelper::lower2camel($router->getAction()));
-                $router->fixPartition('action', StringHelper::lower2camel($method));
-                $ctrlClass = self::buildControllerPath('Controller', $router->getModule(), $router->getController());
-                $ctrlPath = $router->getModule() . '/' . $router->getController() . '/' . $router->getAction();
-                if (!class_exists($ctrlClass)) {
-                    $method = $router->getFragment(3) ?: 'index';
-                    $ctrlClass = self::buildControllerPath('Controller', $router->getModule(), $router->getController(), $router->getAction());
-                    $ctrlPath = $router->getController() . '/' . $router->getAction() . '/' . StringHelper::lower2camel($method);
-                    if (!class_exists($ctrlClass)) {
-                        Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
-                        throw new NotFoundException('控制器不存在:' . $ctrlClass);
-                    }
-                }
-                $isSubController = true;
-            }
-        } else {
-            $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController());
-            $ctrlPath = $router->getController() . '/' . $router->getAction();
-            $isSubController = false;
-            //查找子目录控制器
-            if (!class_exists($ctrlClass)) {
-                $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController(), $router->getAction());
-                if (!class_exists($ctrlClass)) {
-                    Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
-                    throw new NotFoundException('控制器不存在:' . $ctrlClass);
-                }
-                $method = $router->getFragment(3);
-                $ctrlPath = $router->getController() . '/' . $router->getAction() . '/' . $router->getFragment(3);
-                $isSubController = true;
-            }
+        $path = $router->getRoute();
+        $matched = $router->matchNormalRoute();
+        if (!$matched) {
+            Response::instance()->setHeader('Error-Info', 'controller not exist:' . $path);
+            throw new NotFoundException('控制器不存在: ' . $path);
         }
+        $ctrlPath = $router->getController() . '/' . $router->getAction();
         $router->setCtrlPath($ctrlPath);
-        $ref = new ReflectionClass($ctrlClass);
-        if ($ref->isAbstract() or $ref->isInterface()) {
-            Response::instance()->setHeader('Error-Info', 'controller can not be abstract:' . $ctrlClass);
-            throw new NotFoundException('控制器为抽象类:' . $ctrlClass);
-        }
-        //实例化控制器
-        Config::load($moduleConfig);
-        $class = new $ctrlClass($moduleConfig);
-        $method = $isSubController ? $router->getMethod(StringHelper::lower2camel($method)) : $router->getMethod();
-        if (!method_exists($class, $method)) {
-            Response::instance()->setHeader('Error-Info', 'method not exist:' . $ctrlClass);
-            throw new NotFoundException('控制器方法不存在:' . $method);
-        }
-        return call_user_func([$class, $method]);
-        //return $class->$method();
+        $class = new $matched['space']($moduleConfig);
+        return call_user_func([$class, $matched['action']]);
+//        $method = $router->getMethod();
+//        if (APP_MODULE_STYLE == APP_MODULE_STYLE_MICRO) {
+//            $ctrlClass = self::buildControllerPath('Controller', $router->getController());
+//            $ctrlPath = $router->getController() . '/' . $router->getAction();
+//            $isSubController = false;
+//            //查找子目录控制器
+//            if (!class_exists($ctrlClass)) {
+//                $method = $router->getFragment(2) ?: 'index';
+//                $router->fixPartition('module', StringHelper::lower2camel($router->getFragment(0) ?: 'Index'));
+//                $router->fixPartition('controller', StringHelper::lower2camel($router->getAction()));
+//                $router->fixPartition('action', StringHelper::lower2camel($method));
+//                $ctrlClass = self::buildControllerPath('Controller', $router->getModule(), $router->getController());
+//                $ctrlPath = $router->getModule() . '/' . $router->getController() . '/' . $router->getAction();
+//                if (!class_exists($ctrlClass)) {
+//                    $method = $router->getFragment(3) ?: 'index';
+//                    $ctrlClass = self::buildControllerPath('Controller', $router->getModule(), $router->getController(), $router->getAction());
+//                    $ctrlPath = $router->getController() . '/' . $router->getAction() . '/' . StringHelper::lower2camel($method);
+//                    if (!class_exists($ctrlClass)) {
+//                        Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
+//                        throw new NotFoundException('控制器不存在:' . $ctrlClass);
+//                    }
+//                }
+//                $isSubController = true;
+//            }
+//        } else {
+//            $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController());
+//            $ctrlPath = $router->getController() . '/' . $router->getAction();
+//            $isSubController = false;
+//            //查找子目录控制器
+//            if (!class_exists($ctrlClass)) {
+//                $ctrlClass = self::buildControllerPath($router->getModule(), 'Controller', $router->getController(), $router->getAction());
+//                if (!class_exists($ctrlClass)) {
+//                    Response::instance()->setHeader('Error-Info', 'controller not exist:' . $ctrlClass);
+//                    throw new NotFoundException('控制器不存在:' . $ctrlClass);
+//                }
+//                $method = $router->getFragment(3);
+//                $ctrlPath = $router->getController() . '/' . $router->getAction() . '/' . $router->getFragment(3);
+//                $isSubController = true;
+//            }
+//        }
+//        $router->setCtrlPath($ctrlPath);
+//        $ref = new ReflectionClass($ctrlClass);
+//        if ($ref->isAbstract() or $ref->isInterface()) {
+//            Response::instance()->setHeader('Error-Info', 'controller can not be abstract:' . $ctrlClass);
+//            throw new NotFoundException('控制器为抽象类:' . $ctrlClass);
+//        }
+//        //实例化控制器
+//        Config::load($moduleConfig);
+//        $class = new $ctrlClass($moduleConfig);
+//        $method = $isSubController ? $router->getMethod(StringHelper::lower2camel($method)) : $router->getMethod();
+//        if (!method_exists($class, $method)) {
+//            Response::instance()->setHeader('Error-Info', 'method not exist:' . $ctrlClass);
+//            throw new NotFoundException('控制器方法不存在:' . $method);
+//        }
+//        //return call_user_func([$class, $method]);
+//        return $class->$method();
     }
 
     /**

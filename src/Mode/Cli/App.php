@@ -8,18 +8,19 @@ use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Helper\StringHelper;
 
-class App extends \Scf\Core\App {
+class App {
     /**
      * @var array 应用列表
      */
     protected array $_apps = [];
 
     public function __construct() {
-        if (!self::$_modules[MODE_CLI]) {
-            Console::write('未查找到任何可运行的模块');
+        $modules = \Scf\Core\App::getModules(MODE_CLI);
+        if (!$modules) {
+            Console::error('未查找到任何可运行的模块');
             die();
         }
-        foreach (self::$_modules[MODE_CLI] as $module) {
+        foreach ($modules as $module) {
             if (!isset($module['apps'])) {
                 continue;
             }
@@ -57,15 +58,15 @@ class App extends \Scf\Core\App {
      * @return bool
      */
     protected function run($appNum): bool {
-        spl_autoload_register([__CLASS__, 'autoload'], true);
+        spl_autoload_register(['\Scf\Core\App', 'autoload'], true);
         $app = $this->_apps[$appNum];
         $module = $app['module'];
         $controller = $app['controller'];
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         if ($moduleStyle == APP_MODULE_STYLE_LARGE) {
-            $ctrlClass = self::buildControllerPath(StringHelper::lower2camel($module), 'Controller', $controller);
+            $ctrlClass = \Scf\Core\App::buildControllerPath(StringHelper::lower2camel($module), 'Controller', $controller);
         } else {
-            $ctrlClass = self::buildControllerPath('Cli', $controller);
+            $ctrlClass = \Scf\Core\App::buildControllerPath('Cli', $controller);
         }
         if (!class_exists($ctrlClass)) {
             Console::log('控制器不存在:' . $ctrlClass);

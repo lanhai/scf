@@ -19,8 +19,8 @@ return [
     'redis_queue_in_master' => true,//master节点运行redis队列开关
     'redis_queue_in_slave' => false,//slave节点运行redis队列开关
     'slow_log_time' => 10000,//慢日志时间
-    'redis_queue_mc' => 512,//redis队列每次取出上线
+    'redis_queue_mc' => 32,//redis队列每次取出数量
     'db_statistics_enable' => false,//开启数据库统计组件,需配置statistics和history数据库
-    'db_statistics_interval' => 3,
-    'allow_cross_origin' => false
+    'db_statistics_interval' => 3,//统计数据入库扫描间隔
+    'allow_cross_origin' => false,//允许跨域请求
 ];

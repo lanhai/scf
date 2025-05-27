@@ -608,7 +608,7 @@ abstract class AConnection implements IConnection {
      */
     public function inTransaction(): bool {
         $pdo = $this->driver->instance();
-        return (bool)($pdo->inTransaction());
+        return $pdo->inTransaction();
     }
 
     /**

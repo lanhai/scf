@@ -3,20 +3,20 @@
 namespace Scf\Server;
 
 use Scf\App\Updater;
+use Scf\Command\Color;
+use Scf\Command\Manager;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Result;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\StringHelper;
-use Scf\Mode\Web\App;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
-use Scf\Command\Color;
-use Scf\Command\Manager;
-use Scf\Mode\Web\Route\AnnotationRouteRegister;
+use Scf\Mode\Web\Router;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
-use Scf\Server\Table\Runtime;
 use Scf\Util\File;
 use Swoole\Event;
 use Swoole\ExitException;
@@ -143,7 +143,7 @@ class Dashboard {
                     if (App::isReady()) {
                         App::mount();
                         if ($workerId == 0) {
-                            AnnotationRouteRegister::instance()->load();
+                            Router::loadRoutes();
                         }
                     }
                     //Console::info("【Dashboard】worker#" . $workerId . " 启动完成");
@@ -196,7 +196,7 @@ class Dashboard {
                             $response->status((int)$client->statusCode());
                             $response->end($client->body());
                         } else {
-                            App::instance()->start();
+                            \Scf\Mode\Web\App::instance()->start();
                             $controller->init($request->server['path_info']);
                             $result = $controller->$method();
                             if ($result instanceof Result) {

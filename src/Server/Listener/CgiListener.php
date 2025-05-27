@@ -3,14 +3,16 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
-use Scf\Mode\Web\App;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Log;
@@ -19,8 +21,6 @@ use Scf\Mode\Web\Response;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Env;
 use Scf\Server\Http as Server;
-use Scf\Server\Table\Counter;
-use Scf\Server\Table\Runtime;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\Sn;
@@ -117,7 +117,7 @@ class CgiListener extends Listener {
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
             $logger = Log::instance();
-            $app = App::instance();
+            $app = \Scf\Mode\Web\App::instance();
             Env::isDev() and $logger->enableDebug();
             try {
                 $app->init();

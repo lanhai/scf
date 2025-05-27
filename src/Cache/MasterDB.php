@@ -2,7 +2,6 @@
 
 namespace Scf\Cache;
 
-use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Traits\ComponentTrait;
 use Scf\Core\Traits\Singleton;
@@ -10,8 +9,6 @@ use Scf\Database\Exception\NullMasterDb;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
-use Scf\Mode\Web\App;
-use Scf\Server\Table\Runtime;
 use Scf\Util\Arr;
 use Scf\Util\Time;
 
