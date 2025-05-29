@@ -327,19 +327,24 @@ class Router {
         $urlPartition = $module['url_partition'] ?? $this->_config['url_partition'];
         $this->_defaultController = $module['default_controller'] ?? $this->_config['default_controller'];
         $this->_defaultAction = $module['default_action'] ?? $this->_config['default_action'];
+        $defaultPartition = [
+            'controller' => $this->_defaultController,
+            'action' => $this->_defaultAction
+        ];
         foreach (explode('/', $urlPartition) as $i => $partition) {
             $partition = substr($partition, 1, -1);
             $map[$partition] = $i;
-            $this->_partitions[$partition] = isset($pathinfo[$i]) ? StringHelper::lower2camel($pathinfo[$i]) : null;
+            $this->_partitions[$partition] = isset($pathinfo[$i]) ? StringHelper::lower2camel($pathinfo[$i]) : ($defaultPartition[$partition] ?? 'Index');
         }
         // 通过pathinfo判断模块
         $this->_controller = !empty($pathinfo[$map['controller']]) ? strip_tags(StringHelper::lower2camel($pathinfo[$map['controller']])) : StringHelper::lower2camel($this->_defaultController);
         $this->_action = !empty($pathinfo[$map['action']]) ? strip_tags(StringHelper::lower2camel($pathinfo[$map['action']])) : StringHelper::lower2camel($this->_defaultAction);
-        $this->_partitions['module'] = $this->_module;
-        $this->_partitions['controller'] = $this->_controller;
-        $this->_partitions['action'] = $this->_action;
         if (count($pathinfo) <= 3) {
-            $this->_path = "/" . StringHelper::camel2lower($this->_module) . "/" . StringHelper::camel2lower($this->_controller) . "/" . StringHelper::camel2lower($this->_action) . "/";
+            $this->_path = "/" . join('/', array_map(
+                    '\Scf\Helper\StringHelper::camel2lower',
+                    $this->_partitions
+                )) . "/";
+            //$this->_path = "/" . StringHelper::camel2lower($this->_module) . "/" . StringHelper::camel2lower($this->_controller) . "/" . StringHelper::camel2lower($this->_action) . "/";
         } else {
             $this->_path = "/" . join('/', array_map(
                     '\Scf\Helper\StringHelper::camel2lower',
