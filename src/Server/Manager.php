@@ -50,7 +50,7 @@ class Manager extends Component {
      */
     public function update($id, $updateKey, $value): bool {
         $key = App::id() . '-node-' . $id;
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         if ($node = $masterDB->get($key)) {
             $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
             $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
@@ -89,7 +89,7 @@ class Manager extends Component {
         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
         $key = $profile->appid . '-node-' . SERVER_NODE_ID;
-        return Redis::pool($this->_config['server'] ?? 'main')->set($key, $node->toArray(), -1);
+        return Redis::pool($this->_config['service_center_server'] ?? 'main')->set($key, $node->toArray(), -1);
     }
 
     /**
@@ -102,7 +102,7 @@ class Manager extends Component {
         if (!$node->validate()) {
             throw new Exception("节点设置错误:" . $node->getError());
         }
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $profile = App::profile();
         if (!$masterDB->sIsMember($profile->appid . '-nodes', $node->id)) {
             $masterDB->sAdd($profile->appid . '-nodes', $node->id);
@@ -220,7 +220,7 @@ class Manager extends Component {
      * @return bool|int
      */
     public function addLog(string $type, mixed $message): bool|int {
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $queueKey = "_LOGS_" . $type;
         return $masterDB->lPush($queueKey, [
             'day' => Date::today(),
@@ -300,7 +300,7 @@ class Manager extends Component {
      * @return bool
      */
     public function removeNodeByFingerprint($fingerprint): bool {
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $node = $this->getNodeByFingerprint($fingerprint);
         if ($node) {
             if (time() - $node['heart_beat'] < 5) {
@@ -324,7 +324,7 @@ class Manager extends Component {
      * @return array
      */
     public function getServers(bool $online = true): array {
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $this->servers = $masterDB->sMembers(App::id() . '-nodes') ?: [];
         $list = [];
         if ($this->servers) {

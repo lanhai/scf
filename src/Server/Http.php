@@ -2,6 +2,7 @@
 
 namespace Scf\Server;
 
+use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Command\Manager;
 use Scf\Core\App;
@@ -11,6 +12,7 @@ use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ATable;
+use Scf\Database\Exception\NullPool;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Struct\Node;
@@ -18,6 +20,7 @@ use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
 use Scf\Util\File;
 use Swoole\Coroutine;
+use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -133,6 +136,23 @@ class Http extends \Scf\Core\Server {
         Dashboard::start();
         //启动masterDB(redis协议)服务器
         //MasterDB::start(MDB_PORT);
+        //检查Redis是否配置
+        $process = new Process(function () {
+            App::mount();
+            $pool = Redis::pool(\Scf\Server\Manager::instance()->getConfig('service_center_server') ?: 'main');
+            if ($pool instanceof NullPool) {
+                Runtime::instance()->set('REDIS_ENABLE', false);
+                Runtime::instance()->set('REDIS_UNAVAILABLE_REMARK', $pool->getError());
+            } else {
+                Runtime::instance()->set('REDIS_ENABLE', true);
+            }
+        });
+        $process->start();
+        Process::wait();
+        if (!Runtime::instance()->get('REDIS_ENABLE')) {
+            Console::error("【Server】服务注册不可用:" . Runtime::instance()->get('REDIS_UNAVAILABLE_REMARK'));
+            exit(0);
+        }
         //加载服务器配置
         $serverConfig = Config::server();
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));

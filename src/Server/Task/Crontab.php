@@ -203,7 +203,7 @@ class Crontab {
         }
         $process = new Process(function () use ($managerId) {
             App::mount();
-            $server = Manager::instance()->getConfig('server') ?: 'main';
+            $server = Manager::instance()->getConfig('service_center_server') ?: 'main';
             $masterDB = Redis::pool($server);
             $members = $masterDB->sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
             if ($members) {
