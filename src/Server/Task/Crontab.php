@@ -3,7 +3,7 @@
 namespace Scf\Server\Task;
 
 use JetBrains\PhpStorm\ArrayShape;
-use Scf\Cache\MasterDB;
+use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
@@ -16,6 +16,7 @@ use Scf\Core\Table\CrontabTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\JsonHelper;
+use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\Time;
@@ -202,11 +203,13 @@ class Crontab {
         }
         $process = new Process(function () use ($managerId) {
             App::mount();
-            $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
+            $server = Manager::instance()->getConfig('server') ?: 'main';
+            $masterDB = Redis::pool($server);
+            $members = $masterDB->sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
             if ($members) {
-                MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
+                $masterDB->delete(SERVER_NODE_ID . '_CRONTABS_');
                 foreach ($members as $id) {
-                    MasterDB::delete('-crontabs-' . $id);
+                    $masterDB->delete('-crontabs-' . $id);
                 }
             }
             self::load();
@@ -408,8 +411,9 @@ class Crontab {
      * @return void
      */
     protected function register($task): void {
-        if (!MasterDB::sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
-            MasterDB::sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        if (!$masterDB->sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
+            $masterDB->sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒
@@ -579,8 +583,8 @@ class Crontab {
     public function log($msg): void {
         Console::log('【Crontab#' . $this->attributes['manager_id'] . '】' . $this->attributes['name'] . ':' . $msg);
         //保存日志到Redis&日志文件
-        $key = strtolower('crontab' . str_replace("\\", "_", $this->attributes['namespace']));
-        MasterDB::addLog($key, ['message' => Log::filter($msg)]);
+        $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->attributes['namespace']));
+        Manager::instance()->addLog('crontab', ['task' => $taskName, 'message' => Log::filter($msg), 'date' => date('Y-m-d H:i:s')]);
     }
 
     public function setAttributes($attributes): void {
@@ -606,22 +610,22 @@ class Crontab {
      * @return array
      */
     public function getList(): array {
-        $ids = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_') ?: [];
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $ids = $masterDB->sMembers(SERVER_NODE_ID . '_CRONTABS_') ?: [];
         $list = [];
         if ($ids) {
             foreach ($ids as $id) {
                 $key = '-crontabs-' . $id;
-                if (!$task = MasterDB::get($key)) {
+                if (!$task = $masterDB->get($key)) {
                     continue;
                 }
-                $key = strtolower('crontab' . str_replace("\\", "_", $task['namespace']));
-                $task['logs'] = MasterDB::getLog($key, date('Y-m-d'), -20);
+                $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
+                $task['logs'] = Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 20, $taskName);
                 $task['real_status'] = $task['override']['status'] ?? $task['status'];
                 $mode = $task['override']['mode'] ?? $task['mode'];
                 if ($mode != Crontab::RUN_MODE_TIMEING && isset($task['interval'])) {
                     $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
                 }
-
                 $list[] = $task;
             }
         }
@@ -761,10 +765,10 @@ class Crontab {
 
     /**
      * 刷新数据库
-     * @return mixed
+     * @return bool
      */
-    protected function refreshDB(): mixed {
-        return MasterDB::set('-crontabs-' . $this->id(), $this->attributes);
+    protected function refreshDB(): bool {
+        return Redis::pool($this->_config['server'] ?? 'main')->set('-crontabs-' . $this->id(), $this->attributes);
     }
 
     /**
@@ -772,7 +776,7 @@ class Crontab {
      * @return array
      */
     protected function sync(): array {
-        $this->attributes = MasterDB::get('-crontabs-' . $this->id()) ?: $this->attributes;
+        $this->attributes = Redis::pool($this->_config['server'] ?? 'main')->get('-crontabs-' . $this->id()) ?: $this->attributes;
         return $this->attributes;
     }
 

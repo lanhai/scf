@@ -111,10 +111,6 @@ class Http extends \Scf\Core\Server {
         return self::server();
     }
 
-    public static function bgs(): void {
-        MasterDB::start();
-    }
-
     /**
      * 启动服务
      * @return void
@@ -136,7 +132,7 @@ class Http extends \Scf\Core\Server {
         //启动master节点管理面板服务器
         Dashboard::start();
         //启动masterDB(redis协议)服务器
-        MasterDB::start(MDB_PORT);
+        //MasterDB::start(MDB_PORT);
         //加载服务器配置
         $serverConfig = Config::server();
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));

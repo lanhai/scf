@@ -4,14 +4,18 @@ namespace Scf\Core;
 
 use JetBrains\PhpStorm\ArrayShape;
 use Monolog\Logger;
-use Scf\Cache\MasterDB;
+use Scf\Cache\Redis;
 use Scf\Component\SocketMessager;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\LogTable;
 use Scf\Core\Traits\Singleton;
+use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
+use Scf\Server\Manager;
+use Scf\Util\File;
 use Scf\Util\Time;
+use Swoole\Redis\Server;
 use Throwable;
 
 
@@ -111,7 +115,7 @@ class Log {
             $table = LogTable::instance();
             $table->set($logId, ['type' => 'error', 'log' => $log]);
         } else {
-            MasterDB::addLog('error', $log);
+            Manager::instance()->addLog('error', $log);
         }
         //推送到控制台
         Console::error($log['message'] . ' @ ' . $log['file']);
@@ -141,7 +145,7 @@ class Log {
             $table = LogTable::instance();
             $table->set($logId, ['type' => 'info', 'log' => $log]);
         } else {
-            MasterDB::addLog('info', $log);
+            Manager::instance()->addLog('info', $log);
         }
         //推送到控制台
         Console::info($msg);
@@ -178,7 +182,7 @@ class Log {
             $logId = Counter::instance()->incr($this->idCounterKey);
             $table->set($logId, ['type' => 'slow', 'log' => $log]);
         } else {
-            MasterDB::addLog('slow', $log);
+            Manager::instance()->addLog('slow', $log);
         }
     }
 
@@ -187,6 +191,34 @@ class Log {
      * @return int
      */
     public function backup(): int {
+        //主节点日志本地化
+        if (App::isMaster()) {
+            $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+            $types = ['info', 'error', 'slow', 'crontab'];
+            foreach ($types as $type) {
+                $logLength = min(10, $masterDB->lLength('_LOGS_' . $type));
+                if (!$logLength) {
+                    continue;
+                }
+                for ($i = 0; $i < $logLength; $i++) {
+                    $log = $masterDB->rPop('_LOGS_' . $type);
+                    if ($log) {
+                        //本地化
+                        if ($type == 'crontab') {
+                            $dir = APP_LOG_PATH . '/' . $type . '/' . $log['message']['task'] . '/';
+                        } else {
+                            $dir = APP_LOG_PATH . '/' . $type . '/';
+                        }
+                        $message = $log['message'];
+                        if (!is_dir($dir)) {
+                            mkdir($dir, 0775, true);
+                        }
+                        $fileName = $dir . date('Y-m-d', strtotime($log['day'])) . '.log';
+                        File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
+                    }
+                }
+            }
+        }
         if (!$this->tableCount()) {
             return 0;
         }
@@ -198,12 +230,10 @@ class Log {
         for ($id = $start + 1; $id <= $maxLogId; $id++) {
             $row = $table->get($id);
             if ($row) {
-                if (MasterDB::addLog($row['type'], $row['log']) !== false) {
+                if (Manager::instance()->addLog($row['type'], $row['log']) !== false) {
                     $table->delete($id);
                     $logId = $id;
                 } else {
-                    // 处理添加日志失败的情况
-                    //Console::warning("Failed to add log with ID $id to MasterDB.");
                     break;
                 }
             }
@@ -240,8 +270,8 @@ class Log {
     public function count($day = null): array {
         $day = $day ?: date('Y-m-d');
         return [
-            'error' => MasterDB::countLog('error', $day),
-            'info' => MasterDB::countLog('info', $day)
+            'error' => Manager::instance()->countLog('error', $day),
+            'info' => Manager::instance()->countLog('info', $day)
         ];
     }
 
@@ -254,7 +284,7 @@ class Log {
      */
     public function get(string $type = 'ERROR', $day = null, int $length = 1000): bool|array {
         $day = $day ?: date('Y-m-d');
-        return MasterDB::getLog(strtolower($type), $day, 0, $length);
+        return Manager::instance()->getLog(strtolower($type), $day, 0, $length);
     }
 
     /**
