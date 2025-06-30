@@ -3,7 +3,6 @@
 namespace Scf\Server\Controller;
 
 use Scf\App\Updater;
-use Scf\Cache\MasterDB;
 use Scf\Command\Color;
 use Scf\Command\Handler\NodeManager;
 use Scf\Component\Coroutine\Session;
@@ -142,11 +141,12 @@ class DashboardController extends Controller {
             'page' => 1,
             'size' => 20
         ])->assign($logType, $day, $page, $size);
-
-        if ($logType !== 'error' && $logType !== 'info' && $logType !== 'slow') {
-            $logType = strtolower('crontab' . str_replace("\\", "_", $logType));
+        $sysLogs = ['error', 'info', 'slow'];
+        $subDir = null;
+        if (!in_array($logType, $sysLogs)) {
+            $subDir = str_replace("AppCrontab", "", str_replace("\\", "", $logType));
         }
-        $total = MasterDB::countLog($logType, $day);
+        $total = Manager::instance()->countLog(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $subDir);
         $totalPage = $total ? ceil($total / $size) : 0;
         $page = min($page, $totalPage) ?: 1;
         if ($total) {
@@ -158,9 +158,10 @@ class DashboardController extends Controller {
         }
         $result = [
             'type' => $logType,
-            'list' => MasterDB::getLog($logType, $day, $start, $size),
+            'list' => Manager::instance()->getLog(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $start, $size, $subDir),
             'pages' => (int)$totalPage,
-            'pn' => (int)$page, 'total' => $total,
+            'pn' => (int)$page,
+            'total' => $total,
         ];
         return Result::success($result);
     }

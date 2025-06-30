@@ -4,8 +4,6 @@ namespace Scf\Command\DefaultCommand;
 
 use Scf\Core\App;
 use Scf\Core\Console;
-use Scf\Core\Exception;
-use Scf\Cache\MasterDB;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
@@ -13,11 +11,7 @@ use Scf\Command\Manager;
 use Scf\Command\Util;
 use Scf\Server\Core;
 use Scf\Server\Http;
-use Scf\Util\File;
-use Swoole\Coroutine\System;
-use Swoole\Event;
 use Swoole\Process;
-use function Swoole\Coroutine\run;
 
 class Server implements CommandInterface {
 
@@ -73,24 +67,6 @@ class Server implements CommandInterface {
             echo $msg;
         }
         Http::create(SERVER_ROLE, '0.0.0.0', SERVER_PORT)->start();
-    }
-
-    protected function cmd(): void {
-        Core::initialize(MODE_CGI);
-        App::mount();
-//        \Scf\Mode\Web\App::loadModules();
-        run(function () {
-            $cmd = "php " . SCF_ROOT . "/boot server bgs -env=" . APP_RUN_ENV . " -app=" . APP_DIR_NAME . " -role=master -d";
-            $result = System::exec($cmd);
-            $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
-            MasterDB::set('_MASTER_DB_PID_', $masterDbPid);
-            Console::log('MasterDB PID:' . Color::green($masterDbPid));
-        });
-        Event::wait();
-    }
-
-    protected function bgs(): void {
-        Http::bgs();
     }
 
     protected function stop(): string {

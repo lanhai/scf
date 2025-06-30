@@ -35,13 +35,13 @@ class SubProcess {
                 $node->appid = App::id();
                 $node->app_version = App::version();
                 $node->public_version = App::publicVersion();
-                function report($process, $server, $node): void {
+                function register($process, $server, $node): void {
                     $manager = ServerManager::instance();
                     try {
-                        if ($manager->report($node) === false) {
+                        if ($manager->register($node) === false) {
                             Console::log('【Server】节点报道失败:' . Color::red("MasterDB不可用"));
                             Timer::after(5000, function () use ($process, $server, $node) {
-                                report($process, $server, $node);
+                                register($process, $server, $node);
                             });
                         }
                         Timer::tick(1000, function () use ($manager, $node, $server, $process) {
@@ -53,7 +53,7 @@ class SubProcess {
                     }
                 }
 
-                report($process, $server, $node);
+                register($process, $server, $node);
             }
         });
     }

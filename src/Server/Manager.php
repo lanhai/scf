@@ -3,7 +3,7 @@
 namespace Scf\Server;
 
 use JetBrains\PhpStorm\ArrayShape;
-use Scf\Cache\MasterDB;
+use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Component;
@@ -13,11 +13,13 @@ use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\ATable;
 use Scf\Helper\ArrayHelper;
+use Scf\Helper\JsonHelper;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\Crontab;
 use Scf\Util\Date;
 use Swlib\SaberGM;
 use Swoole\Coroutine;
+use Swoole\Coroutine\System;
 use Swoole\WebSocket\Server;
 use Throwable;
 
@@ -48,13 +50,14 @@ class Manager extends Component {
      */
     public function update($id, $updateKey, $value): bool {
         $key = App::id() . '-node-' . $id;
-        if ($node = MasterDB::get($key)) {
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        if ($node = $masterDB->get($key)) {
             $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
             $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
             $node = Node::factory($node);
             $node->heart_beat = time();
             $node->$updateKey = $value;
-            return MasterDB::set($key, $node->toArray());
+            return $masterDB->set($key, $node->toArray());
         }
         return false;
     }
@@ -86,10 +89,7 @@ class Manager extends Component {
         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
         $key = $profile->appid . '-node-' . SERVER_NODE_ID;
-//        if (!MasterDB::sIsMember($profile->appid . '-nodes', $node->id)) {
-//            MasterDB::sAdd($profile->appid . '-nodes', $node->id);
-//        }
-        return MasterDB::set($key, $node->toArray());
+        return Redis::pool($this->_config['server'] ?? 'main')->set($key, $node->toArray(), -1);
     }
 
     /**
@@ -98,16 +98,17 @@ class Manager extends Component {
      * @return string|bool
      * @throws Exception
      */
-    public function report(Node $node): string|bool {
+    public function register(Node $node): string|bool {
         if (!$node->validate()) {
             throw new Exception("节点设置错误:" . $node->getError());
         }
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
         $profile = App::profile();
-        if (!MasterDB::sIsMember($profile->appid . '-nodes', $node->id)) {
-            MasterDB::sAdd($profile->appid . '-nodes', $node->id);
+        if (!$masterDB->sIsMember($profile->appid . '-nodes', $node->id)) {
+            $masterDB->sAdd($profile->appid . '-nodes', $node->id);
         }
         $key = $profile->appid . '-node-' . $node->id;
-        return MasterDB::set($key, $node->toArray());
+        return $masterDB->set($key, $node->toArray(), -1);
     }
 
     /**
@@ -135,19 +136,96 @@ class Manager extends Component {
             'servers' => $servers,
             'logs' => [
                 'error' => [
-                    'total' => MasterDB::countLog('error', date('Y-m-d')),
-                    'list' => [],// MasterDB::getLog('error', date('Y-m-d'), 0, 1)
+                    'total' => $this->countLog('error', date('Y-m-d')),
+                    'list' => []
                 ],
                 'info' => [
-                    'total' => MasterDB::countLog('info', date('Y-m-d')),
-                    'list' => [],// MasterDB::getLog('info', date('Y-m-d'), 0, 1)
+                    'total' => $this->countLog('info', date('Y-m-d')),
+                    'list' => []
                 ],
                 'slow' => [
-                    'total' => MasterDB::countLog('slow', date('Y-m-d')),
-                    'list' => [],// MasterDB::getLog('slow', date('Y-m-d'), 0, 1)
+                    'total' => $this->countLog('slow', date('Y-m-d')),
+                    'list' => []
                 ]
             ]
         ];
+    }
+
+    /**
+     * 读取本地日志
+     * @param $type
+     * @param $day
+     * @param $start
+     * @param $size
+     * @param ?string $subDir
+     * @return ?array
+     */
+    public function getLog($type, $day, $start, $size, string $subDir = null): ?array {
+        if ($subDir) {
+            $dir = APP_LOG_PATH . '/' . $type . '/' . $subDir . '/';
+        } else {
+            $dir = APP_LOG_PATH . '/' . $type . '/';
+        }
+        $fileName = $dir . $day . '.log';
+        if (!file_exists($fileName)) {
+            return [];
+        }
+        if ($start < 0) {
+            $size = abs($start);
+            $start = 0;
+        }
+        clearstatcache();
+        $logs = [];
+        // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
+        $command = sprintf(
+            'tac %s | sed -n %d,%dp',
+            escapeshellarg($fileName),
+            $start + 1,
+            $start + $size
+        );
+        $result = System::exec($command);
+        if ($result === false) {
+            return [];
+        }
+        $lines = explode("\n", $result['output']);
+        foreach ($lines as $line) {
+            if (trim($line) && ($log = JsonHelper::is($line) ? JsonHelper::recover($line) : $line)) {
+                $logs[] = $log;
+            }
+        }
+        return $logs;
+    }
+
+    /**
+     * 统计日志
+     * @param string $type
+     * @param string $day
+     * @param string|null $subDir
+     * @return int
+     */
+    public function countLog(string $type, string $day, string $subDir = null): int {
+        if ($subDir) {
+            $dir = APP_LOG_PATH . '/' . $type . '/' . $subDir . '/';
+        } else {
+            $dir = APP_LOG_PATH . '/' . $type . '/';
+        }
+        $fileName = $dir . $day . '.log';
+        return $this->countFileLines($fileName);
+    }
+
+    /**
+     * 记录日志
+     * @param string $type
+     * @param mixed $message
+     * @return bool|int
+     */
+    public function addLog(string $type, mixed $message): bool|int {
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $queueKey = "_LOGS_" . $type;
+        return $masterDB->lPush($queueKey, [
+            'day' => Date::today(),
+            'message' => $message
+        ]);
     }
 
     /**
@@ -222,6 +300,7 @@ class Manager extends Component {
      * @return bool
      */
     public function removeNodeByFingerprint($fingerprint): bool {
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
         $node = $this->getNodeByFingerprint($fingerprint);
         if ($node) {
             if (time() - $node['heart_beat'] < 5) {
@@ -229,8 +308,8 @@ class Manager extends Component {
             }
             $key = App::id() . '-node-' . $node['id'];
             try {
-                MasterDB::sRemove(App::id() . '-nodes', $node['id']);
-                MasterDB::delete($key);
+                $masterDB->sRemove(App::id() . '-nodes', $node['id']);
+                $masterDB->delete($key);
                 return true;
             } catch (Throwable $exception) {
                 Console::log(Color::red("【" . $key . "】" . "删除失败:" . $exception->getMessage()), false);
@@ -245,19 +324,18 @@ class Manager extends Component {
      * @return array
      */
     public function getServers(bool $online = true): array {
-        $this->servers = MasterDB::sMembers(App::id() . '-nodes') ?: [];
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $this->servers = $masterDB->sMembers(App::id() . '-nodes') ?: [];
         $list = [];
         if ($this->servers) {
             foreach ($this->servers as $id) {
                 $key = App::id() . '-node-' . $id;
-                if (!$node = MasterDB::get($key)) {
+                if (!$node = $masterDB->get($key)) {
                     continue;
                 }
                 $node['online'] = true;
                 if (time() - $node['heart_beat'] > 5 && $online) {
                     $node['online'] = false;
-                    //MasterDB::sRemove(App::id() . '-nodes', $node['id']);
-                    //MasterDB::delete($key);
                     continue;
                 }
                 $node['tasks'] = Crontab::instance()->getList();
@@ -270,5 +348,20 @@ class Manager extends Component {
             }
         }
         return $list;
+    }
+
+    /**
+     * 统计日志文件行数
+     * @param $file
+     * @return int
+     */
+    protected function countFileLines($file): int {
+        $line = 0; //初始化行数
+        if (file_exists($file)) {
+            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
+            $arr = explode(' ', $output);
+            $line = (int)$arr[0];
+        }
+        return $line;
     }
 }

@@ -283,11 +283,11 @@ class Http {
             $this->client->close();
             return Result::error('请求错误:' . $this->client->errMsg, 'REQUEST_FAIL', socket_strerror($this->client->errCode));
         }
+        $body = $this->client->body;
         if ($this->client->statusCode != 200) {
             $this->client->close();
-            return Result::error('请求失败:' . $this->client->statusCode, $this->client->statusCode);
+            return Result::error('请求失败:' . $this->client->statusCode, $this->client->statusCode, JsonHelper::is($body) ? JsonHelper::recover($body) : $body);
         }
-        $body = $this->client->body;
         $this->client->close();
         return Result::success(JsonHelper::is($body) ? JsonHelper::recover($body) : $body);
     }
