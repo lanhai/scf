@@ -73,11 +73,6 @@ class Redis extends Cache {
             );
             $logger = new RedisLogger();
             $connection = new Connection($driver, $logger);
-            //$connection = new \Redis;
-            //!$connection->connect($host, $port) and die('redis server connect failed:' . $host . ':' . $port);
-//            if (!empty($config['auth'])) {
-//                $connection->auth($config['auth']);
-//            }
         } catch (RedisException $exception) {
             die ('redis server connect failed:' . $exception->getMessage()) . PHP_EOL;
         }
@@ -128,9 +123,6 @@ class Redis extends Cache {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
         $httpServer = Http::master();
         $isTaskWorker = !is_null($httpServer) && $httpServer->taskworker;
-//        if ($isTaskWorker && (!isset($config['task_worker_enable']) || !$config['task_worker_enable'])) {
-//            return static::connect($server);
-//        }
         try {
             if (!$config['host']) {
                 throw new AppError('未配置redis服务器地址');
@@ -198,7 +190,7 @@ class Redis extends Cache {
     public function info(): bool|array {
         try {
             return $this->connection->info();
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -213,7 +205,7 @@ class Redis extends Cache {
     public function expire($key, $ttl): bool {
         try {
             return $this->connection->expire($this->setPrefix($key), $ttl);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -227,7 +219,7 @@ class Redis extends Cache {
     public function persist($key): bool {
         try {
             return $this->connection->persist($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -252,7 +244,7 @@ class Redis extends Cache {
                 return $this->connection->set($this->setPrefix($key), 0, $timeout);
             }
             return $newValue;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -277,7 +269,7 @@ class Redis extends Cache {
                 return $this->connection->set($this->setPrefix($key), $value, $timeout);
             }
             return $newValue;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -292,7 +284,7 @@ class Redis extends Cache {
         try {
 
             return $this->connection->incr($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -306,7 +298,7 @@ class Redis extends Cache {
     public function decrement($key): int|bool {
         try {
             return $this->connection->decr($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -325,7 +317,7 @@ class Redis extends Cache {
             }
             $this->connection->expire($key, $expire);
             return true;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -347,7 +339,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -393,7 +385,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -408,7 +400,7 @@ class Redis extends Cache {
     public function command($cmd, ...$args): mixed {
         try {
             return $this->connection->rawCommand($cmd, ...$args);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -423,7 +415,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->ttl($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -442,7 +434,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -461,7 +453,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -480,7 +472,7 @@ class Redis extends Cache {
                 $logger->hitRedis(false);
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -497,7 +489,7 @@ class Redis extends Cache {
     public function sIsMember($key, $member): bool|\Redis {
         try {
             return $this->connection->sIsMember($this->setPrefix($key), $member);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -516,7 +508,7 @@ class Redis extends Cache {
                 $logger->hitRedis(false);
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -542,7 +534,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -566,7 +558,7 @@ class Redis extends Cache {
             } else {
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -587,7 +579,7 @@ class Redis extends Cache {
                 $logger->hitRedis(false);
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -609,7 +601,7 @@ class Redis extends Cache {
                 $logger->hitRedis(false);
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -627,7 +619,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->hDel($this->setPrefix($key), $hashkey);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -646,7 +638,7 @@ class Redis extends Cache {
                 $logger->hitRedis(false);
                 return false;
             }
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -663,7 +655,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->lLen($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return 0;
         }
@@ -681,7 +673,7 @@ class Redis extends Cache {
                 return '';
             }
             return $this->connection->lRange($this->setPrefix($key), -1, -1)[0];
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -705,7 +697,7 @@ class Redis extends Cache {
                 }
             }
             return $list;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -737,7 +729,7 @@ class Redis extends Cache {
                 return false;
             }
             return $count;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -756,7 +748,7 @@ class Redis extends Cache {
                 $result = JsonHelper::recover($result);
             }
             return $result;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -778,7 +770,7 @@ class Redis extends Cache {
                 return false;
             }
             return $count;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -797,7 +789,7 @@ class Redis extends Cache {
                 $result = JsonHelper::recover($result);
             }
             return $result;
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -812,7 +804,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->blPop($this->setPrefix($key), 10);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -827,7 +819,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->brPop($this->setPrefix($key), 10);
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -842,7 +834,7 @@ class Redis extends Cache {
 
         try {
             return $this->connection->del($this->setPrefix($key));
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -856,7 +848,7 @@ class Redis extends Cache {
     public function flush(): bool {
         try {
             return $this->connection->flushAll();
-        } catch (RedisException $exception) {
+        } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
         }
@@ -868,10 +860,10 @@ class Redis extends Cache {
      * @return void
      */
     public function close(): void {
-        if ($this->connection instanceof \Redis) {
+        if ($this->connection instanceof Connection) {
             try {
                 $this->connection->close();
-            } catch (RedisException $exception) {
+            } catch (Throwable $exception) {
                 $this->onExecuteError($exception);
             }
         }
@@ -884,7 +876,7 @@ class Redis extends Cache {
         return $this->keyPrefix . '_' . $key;
     }
 
-    protected function onExecuteError(RedisException $exception): void {
+    protected function onExecuteError(Throwable $exception): void {
         self::$pools = [];
         Console::error("【Redis】Execute Error:" . $exception->getMessage() . ";code:" . $exception->getCode() . ";file:" . $exception->getLine() . "@" . $exception->getFile());
     }
