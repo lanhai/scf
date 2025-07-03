@@ -9,6 +9,7 @@ use Scf\Component\SocketMessager;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\LogTable;
 use Scf\Core\Traits\Singleton;
+use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
@@ -194,6 +195,9 @@ class Log {
         //主节点日志本地化
         if (App::isMaster()) {
             $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+            if ($masterDB instanceof NullPool) {
+                return 0;
+            }
             $types = ['info', 'error', 'slow', 'crontab'];
             foreach ($types as $type) {
                 $logLength = min(10, $masterDB->lLength('_LOGS_' . $type));

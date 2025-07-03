@@ -12,11 +12,13 @@ use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\ATable;
+use Scf\Database\Exception\NullPool;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\Crontab;
 use Scf\Util\Date;
+use Scf\Util\File;
 use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\Coroutine\System;
@@ -221,6 +223,24 @@ class Manager extends Component {
      */
     public function addLog(string $type, mixed $message): bool|int {
         $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+        if ($masterDB instanceof NullPool) {
+            if (!IS_HTTP_SERVER) {
+                //日志本地化
+                if ($type == 'crontab') {
+                    $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
+                    $content = $message['message'];
+                } else {
+                    $dir = APP_LOG_PATH . '/' . $type . '/';
+                    $content = $message;
+                }
+                $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
+                if (!is_dir($dir)) {
+                    mkdir($dir, 0775, true);
+                }
+                File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
+            }
+            return false;
+        }
         $queueKey = "_LOGS_" . $type;
         return $masterDB->lPush($queueKey, [
             'day' => Date::today(),

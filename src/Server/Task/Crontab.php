@@ -15,6 +15,7 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\CrontabTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
+use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
 use Scf\Util\Date;
@@ -768,7 +769,11 @@ class Crontab {
      * @return bool
      */
     protected function refreshDB(): bool {
-        return Redis::pool($this->_config['server'] ?? 'main')->set('-crontabs-' . $this->id(), $this->attributes);
+        $pool = Redis::pool($this->_config['server'] ?? 'main');
+        if ($pool instanceof NullPool) {
+            return false;
+        }
+        return $pool->set('-crontabs-' . $this->id(), $this->attributes);
     }
 
     /**
@@ -776,7 +781,11 @@ class Crontab {
      * @return array
      */
     protected function sync(): array {
-        $this->attributes = Redis::pool($this->_config['server'] ?? 'main')->get('-crontabs-' . $this->id()) ?: $this->attributes;
+        $pool = Redis::pool($this->_config['server'] ?? 'main');
+        if ($pool instanceof NullPool) {
+            return $this->attributes;
+        }
+        $this->attributes = $pool->get('-crontabs-' . $this->id()) ?: $this->attributes;
         return $this->attributes;
     }
 
