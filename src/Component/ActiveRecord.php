@@ -3,6 +3,7 @@
 namespace Scf\Component;
 
 use RuntimeException;
+use Scf\Core\Context;
 use Scf\Core\Coroutine\Component;
 use Scf\Helper\JsonHelper;
 use Swoole\Coroutine;
@@ -19,7 +20,10 @@ abstract class ActiveRecord extends Component {
             throw new RuntimeException(get_called_class() . ':必须定义[$_ar]属性');
         }
         $cid = Coroutine::getCid();
-        $instanceKey = md5(get_called_class() . JsonHelper::toJson($args)) . $cid;
+        $pcid = Coroutine::getPcid();
+        $defaultOutterCid = $pcid > 0 ? $pcid : $cid;
+        $outterCid = Context::get("outter_cid", $defaultOutterCid, $defaultOutterCid);
+        $instanceKey = md5(get_called_class() . JsonHelper::toJson($args)) . $outterCid;
         if (!isset(static::$_AR_INSTANCE[$instanceKey])) {
             $cls = static::factory();
             if (!method_exists($cls, 'find')) {

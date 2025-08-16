@@ -236,7 +236,6 @@ class Crontab {
         }
         foreach ($taskList as &$task) {
             $task['pid'] = static::instance()->createTaskProcess($task);
-            //$processList[$task['pid']]= $task;
         }
         $output = new ConsoleOutput();
         $table = new Table($output);
@@ -260,7 +259,6 @@ class Crontab {
             ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('进程ID')])
             ->setRows($renderData);
         $table->render();
-        $processTask = null;
         while (true) {
             $tasks = static::getTaskTable();
             if (!$tasks) {
@@ -272,7 +270,6 @@ class Crontab {
                 }
                 $status = static::getTaskTableByScript($processTask['namespace']);
                 if ($status['status'] == STATUS_OFF) {
-                    //Console::warning("【Crontab#{$status['manager_id']}】{$status['name']}[{$status['namespace']}]管理进程已结束!,PID:" . $status['pid'] . ",错误次数:" . $status['error_count']);
                     sleep($processTask['retry_timeout'] ?? 3);
                     if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
                         static::instance()->createTaskProcess($processTask);
@@ -281,21 +278,6 @@ class Crontab {
                     }
                 }
             }
-//            $status = Process::wait();
-//            if (!$status) {
-//                break;
-//            }
-//            $processTask = $processList[$status['pid']] ?? $processTask;
-//            unset($processList[$status['pid']]);
-//            $errorCount = Counter::instance()->get('CRONTAB_' . md5($processTask['namespace']) . '_ERROR') ?: 0;
-//            Console::warning("【Crontab#{$processTask['manager_id']}】{$processTask['name']}[{$processTask['namespace']}]管理进程已结束!code:{$status['code']},PID:" . $status['pid'] . ",错误次数:" . $errorCount);
-//            if ($errorCount) {
-//                static::instance()->errorReport($processTask);
-//                sleep($processTask['retry_timeout'] ?? 5);
-//                if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
-//                    $processTask = static::instance()->createTaskProcess($processTask, true);
-//                }
-//            }
             sleep(1);
         }
         return $managerId;

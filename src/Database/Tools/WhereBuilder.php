@@ -3,6 +3,8 @@
 namespace Scf\Database\Tools;
 
 use JetBrains\PhpStorm\ArrayShape;
+use PDOException;
+use Scf\Core\Console;
 
 class WhereBuilder {
 
@@ -27,6 +29,8 @@ class WhereBuilder {
         '<=' => '<=',
         '<=>' => '<=>',
         '~' => 'REGEXP',
+        'CONTAINS' => 'JSON_CONTAINS',
+        '!CONTAINS' => '!JSON_CONTAINS'
     ];
 
     /**
@@ -140,6 +144,10 @@ class WhereBuilder {
             } else {
                 if (in_array($format['operator'], ["BETWEEN", "NOT BETWEEN"])) {
                     $condition = "" . $format['field'] . " {$format['operator']} ? AND ?";
+                } elseif ($format['operator'] == 'JSON_CONTAINS') {
+                    $condition = "JSON_CONTAINS({$format['field']}, JSON_ARRAY(?))";
+                } elseif ($format['operator'] == '!JSON_CONTAINS') {
+                    $condition = "JSON_CONTAINS({$format['field']}, JSON_ARRAY(?)) = 0";
                 } else {
                     $condition = "" . $format['field'] . " {$format['operator']}";
                 }
@@ -155,7 +163,9 @@ class WhereBuilder {
                 }
             } else {
                 $arr['match'][] = $format['value'] == '' ? null : $format['value'];// is_numeric($format['value']) ? $format['value'] : "'{$format['value']}'";
-                $condition .= " ?";
+                if (!in_array($format['operator'], ['JSON_CONTAINS', '!JSON_CONTAINS'])) {
+                    $condition .= " ?";
+                }
             }
             //}
             $arr['condition'][] = $condition;
@@ -173,16 +183,16 @@ class WhereBuilder {
      */
     #[ArrayShape(['field' => "mixed", 'operator' => "mixed|string", 'value' => "array|mixed|string"])]
     protected function format($key, $value): array {
-        preg_match('/([a-zA-Z0-9_\.]+)(\[(?<operator>\>\=?|\<\=?|\!?|\<\>|\>\<|~|\^|\!\^|\>\=\<|\>\!\<|%|\!%|REGEXP)\])?/i', $key, $match);
+        preg_match('/([a-zA-Z0-9_\.]+)(\[(?<operator>\>\=?|\<\=?|\!?|\<\>|\>\<|~|\^|\!\^|\>\=\<|\>\!\<|%|\!%|CONTAINS|\!CONTAINS|REGEXP)\])?/i', $key, $match);
         $operator = $match['operator'] ?? "=";
         if (!isset($this->operator[$operator])) {
-            throw new \PDOException('不合法的比较运算符:' . $operator);
+            throw new PDOException('不合法的比较运算符:' . $operator);
         }
         if (($operator === '%' || $operator === '!%') && !is_array($value) && !str_contains($value, '%')) {
             $value = '%' . $value . '%';
         }
         if (in_array($operator, ['&', '*', '^', '!^']) && !is_array($value)) {
-            throw new \PDOException($operator . '运算符比较值必须为数组');
+            throw new PDOException($operator . '运算符比较值必须为数组');
         }
         $formattedOperator = $this->operator[$operator];
         $formattedValue = $value;
@@ -191,7 +201,7 @@ class WhereBuilder {
         if (str_starts_with(strtoupper($key), '#OR') || str_starts_with(strtoupper($key), '#AND')) {
             $keyIsOperator = true;
             if (!is_array($value) || count($value) < 2) {
-                throw new \PDOException($key . '运算符比较值必须为具有两个(含)以上元素的数组');
+                throw new PDOException($key . '运算符比较值必须为具有两个(含)以上元素的数组');
             }
             $orArr = [
                 'condition' => [],
@@ -252,7 +262,7 @@ class WhereBuilder {
                     break;
                 default:
                     if (is_array($value)) {
-                        throw new \PDOException($operator . '运算符比较值格式错误');
+                        throw new PDOException($operator . '运算符比较值格式错误');
                     }
                     break;
             }
