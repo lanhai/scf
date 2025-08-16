@@ -5,6 +5,65 @@ namespace Scf\Helper;
 class StringHelper {
 
     /**
+     * 将字符串分割为数组
+     * @param string $str 字符串
+     * @return array 分割得到的数组
+     */
+    public static function chinese_str_split(string $str, $size = 0): array {
+        $arr = preg_split('/(?<!^)(?!$)/u', $str);
+        if (!$size) {
+            return $arr;
+        }
+        $arrCount = intval(ceil(count($arr) / $size));
+        $result = [];
+        for ($i = 0; $i < $arrCount; $i++) {
+            $str = "";
+            $j = 0;
+            foreach ($arr as $k => $v) {
+                unset($arr[$k]);
+                $str .= $v;
+                $j++;
+                if ($j >= $size || !$arr) {
+                    $result[] = $str;
+                    break;
+                }
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * 脱敏手机号码
+     * @param string $mobile 手机号码
+     * @return string 脱敏后的手机号码
+     */
+    public static function desensitizeMobile(string $mobile): string {
+        if (preg_match('/^1[3-9]\d{9}$/', $mobile)) {
+            return substr($mobile, 0, 3) . '****' . substr($mobile, 7);
+        }
+        return $mobile; // 如果不是有效的手机号，不进行脱敏
+    }
+
+    /**
+     * 脱敏用户姓名
+     * @param string $name 用户姓名
+     * @return string 脱敏后的用户姓名
+     */
+    public static function desensitizeName(string $name): string {
+        $length = mb_strlen($name, 'UTF-8');
+        if ($length <= 1) {
+            return $name; // 如果姓名只有一个字，则不脱敏
+        } elseif ($length == 2) {
+            return '*' . mb_substr($name, -1, 1, 'UTF-8');
+        } else {
+            $firstChar = mb_substr($name, 0, 1, 'UTF-8');
+            $lastChar = mb_substr($name, -1, 1, 'UTF-8');
+            $middleLength = $length - 2;
+            return $firstChar . str_repeat('*', $middleLength) . $lastChar;
+        }
+    }
+
+    /**
      * 递增版本号
      * @param string $version 当前版本号（格式：X.Y.Z）
      * @return string 递增后的版本号

@@ -20,7 +20,7 @@ class Client {
     /** @var mixed */
     private mixed $clientArg;
 
-    protected int $maxPackageSize = 1024 * 1024 * 8;
+    protected int $maxPackageSize = 1024 * 1024 * 20;
 
 
     public function addRequest(string $requestPath, ?int $serviceVersion = null): RequestContext {

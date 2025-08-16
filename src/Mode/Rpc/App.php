@@ -10,21 +10,13 @@ use Scf\Util\Dir;
 
 class App {
     /**
-     * @var string 绑定ip
-     */
-    protected string $bindHost = '0.0.0.0';
-    /**
-     * @var int 绑定端口
-     */
-    protected int $bindPort = 9585;
-    /**
      * @var string 本机ip地址
      */
     protected string $ip;
 
     protected static self $instance;
 
-    public static function addService(int $port = 9585, int $workerId = 0): void {
+    public static function addService(int $workerId = 0): void {
         \Scf\Core\App::loadModules(MODE_RPC);
         $modules = \Scf\Core\App::getModules(MODE_RPC);
         if (!$modules) {
@@ -72,10 +64,10 @@ class App {
         $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-            $serviceDir =  \Scf\Core\App::buildPath( \Scf\Core\App::src(), 'lib', 'Rpc');
+            $serviceDir = \Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', 'Rpc');
             is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
         } else {
-            $entryScripts = Dir::scan( \Scf\Core\App::buildPath( \Scf\Core\App::src(), 'lib', $service, 'Service'), 1);
+            $entryScripts = Dir::scan(\Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', $service, 'Service'), 1);
         }
         $modules = [];
         if ($entryScripts) {
@@ -87,9 +79,9 @@ class App {
                 }
                 $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
                 if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
-                    $cls =  \Scf\Core\App::buildControllerPath('Rpc', $name);
+                    $cls = \Scf\Core\App::buildControllerPath('Rpc', $name);
                 } else {
-                    $cls =  \Scf\Core\App::buildControllerPath($service, 'Service', $name);
+                    $cls = \Scf\Core\App::buildControllerPath($service, 'Service', $name);
                 }
                 if (class_exists($cls)) {
                     $modules[] = $cls;

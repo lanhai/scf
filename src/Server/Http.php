@@ -24,6 +24,7 @@ use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
@@ -235,9 +236,14 @@ class Http extends \Scf\Core\Server {
                 /** @var Server $rpcServer */
                 $rpcServer = $this->server->listen('0.0.0.0', $rpcPort, SWOOLE_SOCK_TCP);
                 $rpcServer->set([
+                    'package_max_length' => $serverConfig['package_max_length'] ?? 20 * 1024 * 1024,
                     'open_http_protocol' => false,
                     'open_http2_protocol' => false,
-                    'open_websocket_protocol' => false
+                    'open_websocket_protocol' => false,
+                    'open_length_check' => true,
+                    'package_length_type' => 'N',             // 无符号长整型，网络字节序（4字节）
+                    'package_length_offset' => 0,               // 包头长度字段在第0字节开始
+                    'package_body_offset' => 4,               // 从第4字节开始是包体
                 ]);
                 Runtime::instance()->rpcPort($rpcPort);
             } catch (Throwable $exception) {
@@ -318,16 +324,15 @@ class Http extends \Scf\Core\Server {
 INFO;
             Console::write(Color::cyan($info));
             $renderData = [
+                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
                 ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green($this->bindPort)],
                 ['SOCKET', "--", Color::green(Runtime::instance()->socketPort())],
-                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
-                ['MasterDB', App::isMaster() ? Color::cyan(Runtime::instance()->get('MASTERDB_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->masterDbPort()) : '--'],
             ];
             if ($rpcPort = Runtime::instance()->rpcPort()) {
                 $renderData[] = ['RPC', "--", Color::green($rpcPort)];
             }
             $output = new ConsoleOutput();
-            $table = new \Symfony\Component\Console\Helper\Table($output);
+            $table = new Table($output);
             $table
                 ->setHeaders([Color::cyan('服务'), Color::cyan('进程ID'), Color::cyan('端口号')])
                 ->setRows($renderData);

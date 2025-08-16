@@ -187,7 +187,7 @@ class Oss extends Aliyun {
      * @return string
      */
     public function getUrl(string $object): string {
-        if (!str_contains($object, 'http://') && !str_contains($object, 'https://')) {
+        if (!str_contains($object, PROTOCOL_HTTP) && !str_contains($object, PROTOCOL_HTTPS)) {
             $object = $this->server['CDN_DOMAIN'] . (str_starts_with($object, "/") ? "" : "/") . $object;
         }
         return $object;
@@ -201,7 +201,7 @@ class Oss extends Aliyun {
      * @return Result
      */
     public function createTextWaterMark($source, $text, array $options = [], bool $upload = false): Result {
-        if (!str_contains($source, 'http://') && !str_contains($source, 'https://')) {
+        if (!str_contains($source, PROTOCOL_HTTP) && !str_contains($source, PROTOCOL_HTTPS)) {
             $source = $this->server['CDN_DOMAIN'] . (str_starts_with($source, "/") ? "" : "/") . $source . "?x-oss-process=image";
         }
         if (strlen($text) > 64) {
@@ -254,8 +254,14 @@ class Oss extends Aliyun {
         //自动裁剪
         if ($waterWidth != ($options['width'] ?? 100) || $waterHeight != ($options['height'] ?? 100)) {
             $cutImage = $waterObject . '?x-oss-process=image' . '/resize,m_fill,h_' . ($options['height'] ?? 100) . ',w_' . ($options['width'] ?? 100);
+            if (isset($options['process'])) {
+                $cutImage .= $options['process'];
+            }
             $waterObjectBase64 = StringHelper::urlsafe_b64encode($cutImage);
         } else {
+            if (isset($options['process'])) {
+                $waterObject .= '?x-oss-process=image' . $options['circle'];
+            }
             $waterObjectBase64 = StringHelper::urlsafe_b64encode($waterObject);
         }
         $styles = [

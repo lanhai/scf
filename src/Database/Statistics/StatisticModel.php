@@ -68,6 +68,7 @@ class StatisticModel {
      * @param float $incValue
      * @param int $mchID
      * @return bool
+     * @throws Throwable
      */
     public function excute(string $scene, int|string $dataId = 0, int $uid = 0, float $incValue = 0, int $mchID = 1): bool {
         try {
@@ -226,6 +227,7 @@ class StatisticModel {
     /**
      * 执行队列里的统计任务
      * @return int
+     * @throws Throwable
      */
     public function runQueue(): int {
         $count = $this->countQueue();

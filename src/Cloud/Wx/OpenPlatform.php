@@ -11,6 +11,7 @@ use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Core\Traits\ComponentTrait;
 use Scf\Core\Traits\Singleton;
+use Scf\Helper\ArrayHelper;
 use WxAccountAR;
 
 class OpenPlatform {
@@ -132,6 +133,7 @@ class OpenPlatform {
         if (!empty($resultData['errcode'])) {
             return Result::error($resultData['errmsg'], $resultData['errcode']);
         }
+        ArrayHelper::multisort($resultData['template_list'], 'create_time', SORT_DESC);
         return Result::success($resultData['template_list']);
     }
 

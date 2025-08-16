@@ -2,6 +2,7 @@
 
 namespace Scf\Server\Listener;
 
+use Exception;
 use Scf\Cloud\Ali\Oss;
 use Scf\Command\Color;
 use Scf\Core\App;
@@ -15,6 +16,7 @@ use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
 use Throwable;
+use Scf\Mode\Rpc\App as Rpc;
 
 class WorkerListener extends Listener {
 
@@ -29,10 +31,10 @@ class WorkerListener extends Listener {
         //要使用app命名空间必须先加载模块
         App::mount();
         Console::enablePush();
-        //添加RPC服务
+        //给每个worker添加RPC服务
         try {
-            \Scf\Mode\Rpc\App::addService(Http::instance()->getPort() + 5, $workerId);
-        } catch (\Exception $e) {
+            Rpc::addService( $workerId);
+        } catch (Exception $e) {
             Console::error($e->getMessage());
         }
         if ($workerId == 0) {
@@ -50,7 +52,7 @@ class WorkerListener extends Listener {
             }
             try {
                 Oss::instance()->createTable();
-            }catch (Throwable $throwable){
+            } catch (Throwable $throwable) {
                 Console::error($throwable->getMessage());
             }
             Runtime::instance()->serverStatus(true);
