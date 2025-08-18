@@ -25,6 +25,12 @@ class MemoryMonitor {
             $online = 0;
             $offline = 0;
             $realTotal = 0.0; // 累计实际内存占用（MB）
+
+            $usageTotal = 0.0; // 累计分配（MB）
+            $peakTotal  = 0.0; // 累计峰值（MB）
+            $rssTotal   = 0.0; // 累计RSS（MB）
+            $pssTotal   = 0.0; // 累计PSS（MB'])
+
             $keys = Redis::pool()->sMembers($globalSetKey) ?: [];
             //根据id排序
             usort($keys, function ($a, $b) {
@@ -64,34 +70,56 @@ class MemoryMonitor {
                         '-',
                         '-',
                         '-',
+                        '-', // rss
+                        '-', // pss
                         '-',
                         Color::red('离线')
                     ];
                     continue;
                 }
                 $usage = (float)($data['usage_mb'] ?? 0);
-                $real = (float)($data['real_mb'] ?? 0);
-                $realTotal += $real; // 统计累计实际内存
-                $peak = (float)($data['peak_mb'] ?? 0);
+                $real  = (float)($data['real_mb'] ?? 0);
+                $peak  = (float)($data['peak_mb'] ?? 0);
+                $usageTotal += $usage;
+                $realTotal  += $real; // 统计累计实际内存
+                $peakTotal  += $peak;
+
+                $rssMb = null; $pssMb = null;
+                if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
+                    $rssMb = (float)$data['rss_mb'];
+                }
+                if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
+                    $pssMb = (float)$data['pss_mb'];
+                }
+
+                if ($rssMb !== null) { $rssTotal += $rssMb; }
+                if ($pssMb !== null) { $pssTotal += $pssMb; }
+
                 $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
                 $status = Color::green('正常');
                 $online++;
                 $rows[] = [
-                    'name' => $process,
-                    'pid' => $pid,
-                    'useage' => number_format($usage, 2) . ' MB',
-                    'real' => number_format($real, 2) . ' MB',
-                    'peak' => number_format($peak, 2) . ' MB',
+                    'name'    => $process,
+                    'pid'     => $pid,
+                    'useage'  => number_format($usage, 2) . ' MB',
+                    'real'    => number_format($real, 2) . ' MB',
+                    'peak'    => number_format($peak, 2) . ' MB',
+                    'rss'     => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
+                    'pss'     => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
                     'updated' => $time,
-                    'status' => $status
+                    'status'  => $status
                 ];
             }
             return [
-                'rows' => $rows,
-                'online' => $online,
-                'offline' => $offline,
-                'total' => count($keys),
+                'rows'          => $rows,
+                'online'        => $online,
+                'offline'       => $offline,
+                'total'         => count($keys),
+                'usage_total_mb'=> round($usageTotal, 2),
                 'real_total_mb' => round($realTotal, 2), // 累计实际内存占用（MB）
+                'peak_total_mb' => round($peakTotal, 2),
+                'rss_total_mb'  => round($rssTotal, 2),
+                'pss_total_mb'  => round($pssTotal, 2),
             ];
         };
         $data = $buildRows();
@@ -111,17 +139,22 @@ class MemoryMonitor {
             Color::notice('分配'),
             Color::notice('占用'),
             Color::notice('峰值'),
+            Color::notice('RSS'),
+            Color::notice('PSS'),
             Color::notice('更新时间'),
             Color::notice('状态'),
         ])->setRows(array_values($data['rows']));
         $table->render();
         $cost = (time() - $start) ?: 1;
         Console::write(
-            "共" . Color::notice($data['total'])
-            . "个进程,在线" . Color::green($data['online'])
-            . "个,离线" . Color::red($data['offline'])
-            . "个,累计占用:" . Color::cyan($data['real_total_mb'] . "MB") . ",数据更新时间:" . Color::notice($updated)
-            . ",查询耗时:" . $cost . "秒"
+            "共" . Color::notice($data['total']) .
+            "个进程,在线" . Color::green($data['online']) .
+            "个,离线" . Color::red($data['offline']) .
+            "个, PHP占用累计:" . Color::cyan(($data['real_total_mb']) . "MB") .
+            ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
+            (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .
+            ", 数据更新时间:" . Color::notice($updated) .
+            ", 查询耗时:" . $cost . "秒"
         );
     }
 
@@ -149,13 +182,43 @@ class MemoryMonitor {
             $usageMb = round($usage / 1048576, 2);
             $realMb = round($real / 1048576, 2);
             $peakMb = round($peak / 1048576, 2);
+
+            $vmrssMb = null; $pssMb = null;
+            if (PHP_OS_FAMILY === 'Linux') {
+                $statusPath = '/proc/self/status';
+                if (is_readable($statusPath)) {
+                    $statusTxt = @file_get_contents($statusPath) ?: '';
+                    if ($statusTxt && preg_match('/^VmRSS:\s+(\d+)\s+kB/im', $statusTxt, $m1)) {
+                        $vmrssMb = round(((int)$m1[1]) / 1024, 2);
+                    }
+                }
+                $smapsPath = '/proc/self/smaps_rollup';
+                if (is_readable($smapsPath)) {
+                    $smapsTxt = @file_get_contents($smapsPath) ?: '';
+                    if ($smapsTxt && preg_match('/^Pss:\s+(\d+)\s+kB/im', $smapsTxt, $m3)) {
+                        $pssMb = round(((int)$m3[1]) / 1024, 2);
+                    }
+                }
+            } else {
+                // macOS / other UNIX-like systems without /proc
+                $pid = posix_getpid();
+                // rss and vsz are in KB on macOS
+                $rssOut = @shell_exec('ps -o rss= -p ' . (int)$pid . ' 2>/dev/null');
+                if (is_string($rssOut) && ($rssKb = (int)trim($rssOut)) > 0) {
+                    $vmrssMb = round($rssKb / 1024, 2);
+                }
+                // PSS 无法在 macOS 可靠获取，保持 null，稍后存储为 '-'
+            }
+
             $key = "MEMORY_MONITOR:" . $processName . ":" . SERVER_NODE_ID;// . ":" . posix_getpid();
             $data = [
                 'usage_mb' => $usageMb,
                 'real_mb' => $realMb,
                 'peak_mb' => $peakMb,
                 'pid' => posix_getpid(),
-                'time' => date('Y-m-d H:i:s')
+                'time' => date('Y-m-d H:i:s'),
+                'rss_mb'    => $vmrssMb ?? '-',
+                'pss_mb'    => $pssMb ?? '-',
             ];
             // 存储进程数据
             Redis::pool()->set($key, $data, intval($interval / 1000) + 5);
