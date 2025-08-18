@@ -15,6 +15,7 @@ use Scf\Service\Enum\QueueStatus;
 use Scf\Service\Struct\QueueStruct;
 use Scf\Util\Date;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Process;
@@ -38,6 +39,7 @@ class RQueue {
                 Console::warning("【RedisQueue#{$managerId}】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
+                MemoryMonitor::start('redis-queue');
                 self::instance()->watch($config['redis_queue_mc'] ?? 32);
                 Event::wait();
             }

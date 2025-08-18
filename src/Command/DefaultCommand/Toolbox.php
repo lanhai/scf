@@ -17,6 +17,7 @@ use Scf\Command\Manager;
 use Scf\Server\Core;
 use Scf\Util\Auth;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Timer;
@@ -50,21 +51,7 @@ class Toolbox implements CommandInterface {
     }
 
     public function memory(): void {
-        //设置内存使用大小限制为256M
-        //ini_set('memory_limit', 4194304 * 2);
-        go(function () {
-            \Scf\Core\App::countMemory(true);
-        });
-        Timer::tick(2000, function () use (&$times) {
-//            for ($i = 0; $i < 1000; $i++) {
-//                $backTrace = debug_backtrace();
-//                $file = $backTrace[count($backTrace) - 2]['file'] ?? null;
-//                $line = $backTrace[count($backTrace) - 2]['line'] ?? null;
-//                Log::instance()->info($file . ':' . $line . ' function:' . $backTrace[count($backTrace) - 1]['function']);
-//            }
-            \Scf\Core\App::countMemory(true);
-        });
-        Event::wait();
+        MemoryMonitor::useage(print: true);
     }
 
     public function rpc(): void {
@@ -77,25 +64,25 @@ class Toolbox implements CommandInterface {
     }
 
     public function config(): void {
-        if (!App::isDevEnv()) {
+        if (!\Scf\Core\App::isDevEnv()) {
             Console::error('此功能只能在测试环境使用');
             return;
         }
-        $serverFile = App::src() . '/config/server';
+        $serverFile = \Scf\Core\App::src() . '/config/server';
         if (file_exists($serverFile . '.php')) {
             $content = require $serverFile . '.php';
             File::write($serverFile . '.yml', Yaml::dump($content, 10));
             unlink($serverFile . '.php');
             Console::success("server.php 已转换");
         }
-        $configFile = App::src() . '/config/app';
+        $configFile = \Scf\Core\App::src() . '/config/app';
         if (file_exists($configFile . '.php')) {
             $content = require $configFile . '.php';
             File::write($configFile . '.yml', Yaml::dump($content, 10));
             unlink($configFile . '.php');
             Console::success("app.php 已转换");
         }
-        $envConfig = App::src() . '/config/app_' . strtolower(APP_RUN_ENV);
+        $envConfig = \Scf\Core\App::src() . '/config/app_' . strtolower(APP_RUN_ENV);
         if (file_exists($envConfig . '.php')) {
             $content = require $envConfig . '.php';
             File::write($envConfig . '.yml', Yaml::dump($content, 10));
