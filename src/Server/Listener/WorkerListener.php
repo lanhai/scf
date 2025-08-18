@@ -12,6 +12,7 @@ use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Router;
 use Scf\Server\Http;
+use Scf\Util\MemoryMonitor;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -33,10 +34,11 @@ class WorkerListener extends Listener {
         Console::enablePush();
         //给每个worker添加RPC服务
         try {
-            Rpc::addService( $workerId);
+            Rpc::addService($workerId);
         } catch (Exception $e) {
             Console::error($e->getMessage());
         }
+        MemoryMonitor::start('worker-' . $workerId);
         if ($workerId == 0) {
             $srcPath = App::src();
             $version = App::version();

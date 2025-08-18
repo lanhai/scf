@@ -20,6 +20,7 @@ use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Scf\Util\Time;
 use Swoole\Coroutine;
 use Swoole\Event;
@@ -398,6 +399,7 @@ class Crontab {
         if (!$masterDB->sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
             $masterDB->sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
+        MemoryMonitor::start('crontab-' . $task['name']);
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒
         //if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {//一次性任务也运行一个迭代监控计时器
