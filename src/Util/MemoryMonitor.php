@@ -2,10 +2,16 @@
 
 namespace Scf\Util;
 
+use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Console;
+use Scf\Core\Key;
+use Scf\Core\Table\Counter;
+use Scf\Core\Table\MemoryMonitorTable;
+use Scf\Core\Table\Runtime;
+use Swoole\Coroutine;
+use Swoole\Event;
 use Swoole\Timer;
-use Scf\Cache\Redis;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 
@@ -14,157 +20,49 @@ class MemoryMonitor {
 
     /**
      * @param $filter
-     * @param bool $print
-     * @return array|void
      */
-    public static function useage($filter = null, bool $print = false) {
-        // 一次性拉取数据 -> 组装行
-        $buildRows = function () use ($filter) {
-            $globalSetKey = 'MEMORY_MONITOR_KEYS_' . SERVER_NODE_ID;
-            $rows = [];
-            $online = 0;
-            $offline = 0;
-            $realTotal = 0.0; // 累计实际内存占用（MB）
-
-            $usageTotal = 0.0; // 累计分配（MB）
-            $peakTotal  = 0.0; // 累计峰值（MB）
-            $rssTotal   = 0.0; // 累计RSS（MB）
-            $pssTotal   = 0.0; // 累计PSS（MB'])
-
-            $keys = Redis::pool()->sMembers($globalSetKey) ?: [];
-            //根据id排序
-            usort($keys, function ($a, $b) {
-                // 取中间部分
-                $aParts = explode(':', $a);
-                $bParts = explode(':', $b);
-
-                $aMid = $aParts[1] ?? $a;
-                $bMid = $bParts[1] ?? $b;
-
-                // 提取数字
-                preg_match('/\d+$/', $aMid, $ma);
-                preg_match('/\d+$/', $bMid, $mb);
-
-                if ($ma && $mb) {
-                    return intval($ma[0]) <=> intval($mb[0]);
-                }
-
-                // 没数字时走自然排序
-                return strnatcmp($aMid, $bMid);
-            });
-            foreach ($keys as $key) {
-                if ($filter && !str_contains($key, $filter)) {
-                    continue;
-                }
-                // 解析进程标识：MEMORY_MONITOR:{process}:{pid}
-                $parts = explode(':', (string)$key);
-                $process = $parts[1] ?? 'unknown';
-                $data = Redis::pool()->get($key);
-                $pid = $data['pid'] ?? '--';
-                if (!$data) {
-                    // 认为离线
-                    $offline++;
-                    $rows[] = [
-                        $process,
-                        $pid,
-                        '-',
-                        '-',
-                        '-',
-                        '-', // rss
-                        '-', // pss
-                        '-',
-                        Color::red('离线')
-                    ];
-                    continue;
-                }
-                $usage = (float)($data['usage_mb'] ?? 0);
-                $real  = (float)($data['real_mb'] ?? 0);
-                $peak  = (float)($data['peak_mb'] ?? 0);
-                $usageTotal += $usage;
-                $realTotal  += $real; // 统计累计实际内存
-                $peakTotal  += $peak;
-
-                $rssMb = null; $pssMb = null;
-                if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
-                    $rssMb = (float)$data['rss_mb'];
-                }
-                if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
-                    $pssMb = (float)$data['pss_mb'];
-                }
-
-                if ($rssMb !== null) { $rssTotal += $rssMb; }
-                if ($pssMb !== null) { $pssTotal += $pssMb; }
-
-                $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
-                $status = Color::green('正常');
-                $online++;
-                $rows[] = [
-                    'name'    => $process,
-                    'pid'     => $pid,
-                    'useage'  => number_format($usage, 2) . ' MB',
-                    'real'    => number_format($real, 2) . ' MB',
-                    'peak'    => number_format($peak, 2) . ' MB',
-                    'rss'     => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
-                    'pss'     => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
-                    'updated' => $time,
-                    'status'  => $status
-                ];
+    public static function useage($filter = null): void {
+        Coroutine::create(function () use ($filter) {
+            $client = Http::create('http://localhost:' . File::read(SERVER_PORT_FILE) . '/memory');
+            $result = $client->get();
+            if ($result->hasError()) {
+                Console::error($result->getMessage());
+                return;
             }
-            return [
-                'rows'          => $rows,
-                'online'        => $online,
-                'offline'       => $offline,
-                'total'         => count($keys),
-                'usage_total_mb'=> round($usageTotal, 2),
-                'real_total_mb' => round($realTotal, 2), // 累计实际内存占用（MB）
-                'peak_total_mb' => round($peakTotal, 2),
-                'rss_total_mb'  => round($rssTotal, 2),
-                'pss_total_mb'  => round($pssTotal, 2),
-            ];
-        };
-        $data = $buildRows();
-        if (!$print) {
-            return $data['rows'];
-        }
-        $output = new ConsoleOutput();
-        $table = new Table($output);
-        // 初次构建
-        $start = time();
-
-        $updated = date('H:i:s');
-        // 富表格输出
-        $table->setHeaders([
-            Color::notice('进程名'),
-            Color::notice('PID'),
-            Color::notice('分配'),
-            Color::notice('占用'),
-            Color::notice('峰值'),
-            Color::notice('RSS'),
-            Color::notice('PSS'),
-            Color::notice('更新时间'),
-            Color::notice('状态'),
-        ])->setRows(array_values($data['rows']));
-        $table->render();
-        $cost = (time() - $start) ?: 1;
-        Console::write(
-            "共" . Color::notice($data['total']) .
-            "个进程,在线" . Color::green($data['online']) .
-            "个,离线" . Color::red($data['offline']) .
-            "个, PHP占用累计:" . Color::cyan(($data['real_total_mb']) . "MB") .
-            ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
-            (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .
-            ", 数据更新时间:" . Color::notice($updated) .
-            ", 查询耗时:" . $cost . "秒"
-        );
+            $data = $result->getData('data');
+            $output = new ConsoleOutput();
+            $table = new Table($output);
+            // 初次构建
+            $start = time();
+            $updated = date('H:i:s');
+            // 富表格输出
+            $table->setHeaders([
+                Color::notice('进程名'),
+                Color::notice('PID'),
+                Color::notice('分配'),
+                Color::notice('占用'),
+                Color::notice('峰值'),
+                Color::notice('RSS'),
+                Color::notice('PSS'),
+                Color::notice('更新时间'),
+                Color::notice('状态'),
+            ])->setRows(array_values($data['rows']));
+            $table->render();
+            $cost = (time() - $start) ?: 1;
+            Console::write(
+                "共" . Color::notice($data['total']) .
+                "个进程,在线" . Color::green($data['online']) .
+                "个,离线" . Color::red($data['offline']) .
+                "个, PHP占用累计:" . Color::cyan(($data['real_total_mb']) . "MB") .
+                ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
+                (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .
+                ", 数据更新时间:" . Color::notice($updated) .
+                ", 查询耗时:" . $cost . "秒"
+            );
+        });
+        Event::wait();
     }
 
-    /**
-     * 启动内存监控
-     * @param string $processName 当前进程名称 (worker-x / crontab / task-x)
-     * @param int $interval 监控间隔 (毫秒)
-     * @param int $limitMb 内存限制 (MB)
-     * @param bool $forceExit 超限是否强制退出
-     */
     public static function start(
         string $processName = 'worker',
         int    $interval = 10000,
@@ -174,16 +72,21 @@ class MemoryMonitor {
         if (self::$timerId) {
             return; // 避免重复启动
         }
-        self::$timerId = Timer::tick($interval, function () use ($processName, $interval, $limitMb, $forceExit,) {
-            $globalSetKey = 'MEMORY_MONITOR_KEYS_' . SERVER_NODE_ID;
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        $run = function () use (&$run, &$managerId, $processName, $interval, $limitMb, $forceExit) {
+            if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+                Timer::clear(self::$timerId);
+                return;
+            }
             $usage = memory_get_usage(true);
             $real = memory_get_usage(false);
             $peak = memory_get_peak_usage(true);
             $usageMb = round($usage / 1048576, 2);
             $realMb = round($real / 1048576, 2);
             $peakMb = round($peak / 1048576, 2);
-
-            $vmrssMb = null; $pssMb = null;
+            $vmrssMb = null;
+            $pssMb = null;
             if (PHP_OS_FAMILY === 'Linux') {
                 $statusPath = '/proc/self/status';
                 if (is_readable($statusPath)) {
@@ -202,31 +105,35 @@ class MemoryMonitor {
             } else {
                 // macOS / other UNIX-like systems without /proc
                 $pid = posix_getpid();
-                // rss and vsz are in KB on macOS
                 $rssOut = @shell_exec('ps -o rss= -p ' . (int)$pid . ' 2>/dev/null');
                 if (is_string($rssOut) && ($rssKb = (int)trim($rssOut)) > 0) {
                     $vmrssMb = round($rssKb / 1024, 2);
                 }
-                // PSS 无法在 macOS 可靠获取，保持 null，稍后存储为 '-'
             }
 
-            $key = "MEMORY_MONITOR:" . $processName . ":" . SERVER_NODE_ID;// . ":" . posix_getpid();
+            $key = $processName;// "MEMORY_MONITOR:" . $processName . ":" . SERVER_NODE_ID;
             $data = [
+                'process' => $processName,
                 'usage_mb' => $usageMb,
                 'real_mb' => $realMb,
                 'peak_mb' => $peakMb,
                 'pid' => posix_getpid(),
                 'time' => date('Y-m-d H:i:s'),
-                'rss_mb'    => $vmrssMb ?? '-',
-                'pss_mb'    => $pssMb ?? '-',
+                'rss_mb' => $vmrssMb ?? '-',
+                'pss_mb' => $pssMb ?? '-',
             ];
-            // 存储进程数据
-            Redis::pool()->set($key, $data, intval($interval / 1000) + 5);
-            // 把进程 key 加入全局集合，方便统一获取
-            if (!Redis::pool()->sIsMember($globalSetKey, $key)) {
-                Redis::pool()->sAdd($globalSetKey, $key);
+            MemoryMonitorTable::instance()->set($key, $data);
+            $processList = Runtime::instance()->get('MEMORY_MONITOR_KEYS') ?: [];
+            if (!in_array($key, $processList)) {
+                $processList[] = $key;
             }
-            //Console::log("[MemoryMonitor][$processName] PID=" . posix_getpid() . " Usage={$usageMb}MB Real={$realMb}MB Peak={$peakMb}MB");
+            Runtime::instance()->set('MEMORY_MONITOR_KEYS', $processList);
+            //Redis::pool()->set($key, $data, intval($interval / 1000) + 5);
+            //$globalSetKey = 'MEMORY_MONITOR_KEYS_' . SERVER_NODE_ID;
+//            if (!Redis::pool()->sIsMember($globalSetKey, $key)) {
+//                Redis::pool()->sAdd($globalSetKey, $key);
+//            }
+
             if ($limitMb > 0 && $usageMb > $limitMb) {
                 Console::warning("[MemoryMonitor][WARN] {$processName} memory exceed {$limitMb}MB, current={$usageMb}MB");
                 if ($forceExit) {
@@ -234,8 +141,13 @@ class MemoryMonitor {
                     exit(1);
                 }
             }
-        });
+            // 递归调度下一次
+            self::$timerId = Timer::after($interval, $run);
+        };
+        // 启动第一次
+        self::$timerId = Timer::after($interval, $run);
     }
+
 
     public static function stop(): void {
         if (self::$timerId) {

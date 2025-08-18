@@ -399,6 +399,7 @@ class Crontab {
         if (!$masterDB->sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
             $masterDB->sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
         }
+        //内存占用统计
         MemoryMonitor::start('crontab-' . $task['name']);
         $this->attributes = $task;//定义任务属性
         $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒

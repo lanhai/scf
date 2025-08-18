@@ -51,7 +51,7 @@ class Toolbox implements CommandInterface {
     }
 
     public function memory(): void {
-        MemoryMonitor::useage(print: true);
+        MemoryMonitor::useage();
     }
 
     public function rpc(): void {

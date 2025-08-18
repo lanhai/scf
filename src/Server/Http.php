@@ -20,7 +20,6 @@ use Scf\Server\Task\Crontab;
 use Scf\Server\Task\RQueue;
 use Scf\Util\File;
 use Swoole\Coroutine;
-use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -130,7 +129,8 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\Runtime',
             'Scf\Core\Table\RouteTable',
             'Scf\Core\Table\RouteCache',
-            'Scf\Core\Table\CrontabTable'
+            'Scf\Core\Table\CrontabTable',
+            'Scf\Core\Table\MemoryMonitorTable'
         ]);
         Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
@@ -290,6 +290,7 @@ class Http extends \Scf\Core\Server {
             define("SERVER_MASTER_PID", $masterPid);
             define("SERVER_MANAGER_PID", $managerPid);
             File::write(SERVER_MANAGER_PID_FILE, $managerPid);
+            File::write(SERVER_PORT_FILE, Runtime::instance()->dashboardPort());
             $scfVersion = SCF_VERSION;
             $role = SERVER_ROLE;
             $env = APP_RUN_ENV;
@@ -371,7 +372,7 @@ INFO;
                 }
                 sleep(1);
             }
-            $managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+            //$managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 //if (!Runtime::instance()->crontabProcessStatus()) {
