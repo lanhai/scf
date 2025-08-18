@@ -38,7 +38,7 @@ class WorkerListener extends Listener {
         } catch (Exception $e) {
             Console::error($e->getMessage());
         }
-        MemoryMonitor::start('worker-' . $workerId);
+        MemoryMonitor::start('worker-' . ($workerId + 1));
         if ($workerId == 0) {
             $srcPath = App::src();
             $version = App::version();
@@ -58,7 +58,6 @@ class WorkerListener extends Listener {
                 Console::error($throwable->getMessage());
             }
             Runtime::instance()->serverStatus(true);
-
             $info = <<<INFO
 ---------Workers启动完成---------
 内核版本：{$version}
@@ -71,9 +70,6 @@ INFO;
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
-//        if ($signal !== 2) {
-//            Console::log(Color::red('#' . $worker_pid . ' worker #' . $worker_id . ' 发生致命错误!signal:' . $signal . ',exit_code:' . $exit_code));
-//        }
         Timer::after(3000, function () use ($server, $worker_id) {
             if (!Process::kill($server->master_pid, 0)) {
                 $server->stop($worker_id);
@@ -82,6 +78,6 @@ INFO;
     }
 
     protected function onWorkerStop(Server $server, $workerId): void {
-
+        MemoryMonitor::stop($workerId);
     }
 }
