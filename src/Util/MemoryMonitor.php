@@ -28,15 +28,23 @@ class MemoryMonitor {
             $keys = Redis::pool()->sMembers($globalSetKey) ?: [];
             //根据id排序
             usort($keys, function ($a, $b) {
-                // 尝试提取字符串里的数字
-                preg_match('/\d+$/', $a, $ma);
-                preg_match('/\d+$/', $b, $mb);
+                // 取中间部分
+                $aParts = explode(':', $a);
+                $bParts = explode(':', $b);
+
+                $aMid = $aParts[1] ?? $a;
+                $bMid = $bParts[1] ?? $b;
+
+                // 提取数字
+                preg_match('/\d+$/', $aMid, $ma);
+                preg_match('/\d+$/', $bMid, $mb);
+
                 if ($ma && $mb) {
-                    // 都有数字 -> 数字比较
                     return intval($ma[0]) <=> intval($mb[0]);
                 }
-                // 其他情况 -> 字符串比较
-                return strcmp($a, $b);
+
+                // 没数字时走自然排序
+                return strnatcmp($aMid, $bMid);
             });
             foreach ($keys as $key) {
                 if ($filter && !str_contains($key, $filter)) {
