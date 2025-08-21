@@ -2,8 +2,10 @@
 
 namespace Scf\Core;
 
+use Error;
 use Filterus\Filter;
 use JetBrains\PhpStorm\Pure;
+use ReflectionClass;
 use ReflectionProperty;
 use Scf\Database\Tools\Calculator;
 use Scf\Helper\JsonHelper;
@@ -210,15 +212,14 @@ class Struct {
             if (!is_null($format) && $format[0]['type'] == 'json') {
                 $_data[$f] = isset($data[$f]) ? (!is_array($data[$f]) ? JsonHelper::recover($data[$f]) : $data[$f]) : null;
             } else {
-                $_data[$f] = $data[$f] ?? null;//is_null($data[$f]) ? null :
+                $_data[$f] = $data[$f] ?? ($this->$f ?? null);
             }
         }
-
         // 先赋值
         foreach ($_data as $f => $d) {
             try {
                 $this->$f = $d;
-            } catch (\Error) {
+            } catch (Error) {
                 $this->$f = null;
             }
         }
@@ -234,7 +235,7 @@ class Struct {
      * @param string $field
      * @param string $error
      */
-    public function addError(string $field, string $error) {
+    public function addError(string $field, string $error): void {
         $this->_errors[$field] = $error;
     }
 
@@ -389,14 +390,14 @@ class Struct {
      * @return ReflectionProperty[]
      */
     protected function _getFields(): array {
-        $cls = new \ReflectionClass($this);
+        $cls = new ReflectionClass($this);
         return $cls->getProperties(ReflectionProperty::IS_PUBLIC);
     }
 
     /**
      * 设置字段默认值
      */
-    protected function _setDefault() {
+    protected function _setDefault(): void {
         if ($this->_validate) {
             foreach ($this->_validate as $f => $v) {
                 if (isset($v['default'])) {

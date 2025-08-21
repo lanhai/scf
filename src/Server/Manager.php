@@ -17,6 +17,7 @@ use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\Crontab;
+use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Swlib\SaberGM;
@@ -83,7 +84,7 @@ class Manager extends Component {
         $node->threads = count(Coroutine::list());
         $node->thread_status = Coroutine::stats();
         $node->server_stats = $server->stats();
-        //$node->tasks = Crontab::instance()->stats();
+        //$node->tasks = CrontabManager::allStatus();
         $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
         $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
         $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
@@ -358,7 +359,7 @@ class Manager extends Component {
                     $node['online'] = false;
                     continue;
                 }
-                $node['tasks'] = Crontab::instance()->getList();
+                $node['tasks'] = CrontabManager::allStatus();
                 $list[] = $node;
             }
             try {

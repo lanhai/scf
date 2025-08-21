@@ -3,6 +3,7 @@
 namespace Scf\Server\Controller;
 
 use Scf\App\Updater;
+use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Command\Handler\NodeManager;
 use Scf\Component\Coroutine\Session;
@@ -22,10 +23,12 @@ use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Server\Env;
 use Scf\Server\Manager;
-use Scf\Server\Task\Crontab;
+use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
 use Scf\Util\Date;
+use Swoole\Exception;
+use Throwable;
 
 class DashboardController extends Controller {
 
@@ -43,6 +46,7 @@ class DashboardController extends Controller {
     /**
      * 内存占用
      * @return Result
+     * @throws \Exception
      */
     public function actionMemory(): Result {
         Request::get([
@@ -66,18 +70,14 @@ class DashboardController extends Controller {
                 // 取中间部分
                 $aParts = explode(':', $a);
                 $bParts = explode(':', $b);
-
                 $aMid = $aParts[1] ?? $a;
                 $bMid = $bParts[1] ?? $b;
-
                 // 提取数字
                 preg_match('/\d+$/', $aMid, $ma);
                 preg_match('/\d+$/', $bMid, $mb);
-
                 if ($ma && $mb) {
                     return intval($ma[0]) <=> intval($mb[0]);
                 }
-
                 // 没数字时走自然排序
                 return strnatcmp($aMid, $bMid);
             });
@@ -142,9 +142,11 @@ class DashboardController extends Controller {
                     'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
                     'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
                     'updated' => $time,
-                    'status' => $status
+                    'status' => $status,
+                    'rss_num' => $rssMb
                 ];
             }
+            ArrayHelper::multisort($rows, 'rss_num', SORT_DESC);
             return [
                 'rows' => $rows,
                 'online' => $online,
@@ -217,7 +219,7 @@ class DashboardController extends Controller {
      */
     public function actionCrontabRun(): Result {
         Request::post(['name'])->assign($name);
-        return Result::success(Crontab::factory($name)->runRightNow());
+        return Result::success(CrontabManager::runRightNow($name));
     }
 
     /**
@@ -226,7 +228,7 @@ class DashboardController extends Controller {
      */
     public function actionCrontabStatus(): Result {
         Request::post(['name'])->assign($name);
-        return Result::success(Crontab::factory($name)->status());
+        return Result::success(CrontabManager::status($name));
     }
 
     /**
@@ -236,8 +238,7 @@ class DashboardController extends Controller {
     public function actionCrontabOverride(): Result {
         Request::post()->pack($data);
         try {
-            $crontab = Crontab::factory($data['namespace']);
-            $result = $crontab->saveOverrides($data);
+            $result = CrontabManager::saveOverrides($data);
             if ($result->hasError()) {
                 return Result::error($result->getMessage());
             }
@@ -245,8 +246,8 @@ class DashboardController extends Controller {
                 return Result::error('配置文件保存失败');
             }
             //重启排程任务
-            return Result::success($crontab->reload());
-        } catch (\Throwable $exception) {
+            return Result::success();
+        } catch (Throwable $exception) {
             Console::error($exception->getMessage());
         }
         return Result::error('message');
@@ -293,13 +294,13 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabs(): Result {
-        return Result::success(Crontab::instance()->getList());
+        return Result::success(CrontabManager::allStatus());
     }
 
     /**
      * 更新
      * @return Result
-     * @throws \Swoole\Exception
+     * @throws Exception
      */
     public function actionUpdate(): Result {
         Request::post([
@@ -383,7 +384,7 @@ class DashboardController extends Controller {
         $server = $config['server'];
         $app->update_server = $server;
         $app->role = $role;
-        $client = \Scf\Client\Http::create($server . '?time=' . time());
+        $client = Http::create($server . '?time=' . time());
         $result = $client->get();
         if ($result->hasError()) {
             return Result::error('获取云端版本号失败:' . Color::red($result->getMessage()));
@@ -420,7 +421,7 @@ class DashboardController extends Controller {
             'host' => Request\Validator::required("主机不能为空"),
             'port' => Request\Validator::required("端口不能为空"),
         ])->assign($host, $port);
-        $client = \Scf\Client\Http::create($host . '/install_check', $port);
+        $client = Http::create($host . '/install_check', $port);
         $requestResult = $client->get();
         if ($requestResult->hasError()) {
             return Result::error($requestResult->getMessage());
@@ -441,7 +442,7 @@ class DashboardController extends Controller {
             'host' => Request\Validator::required("主机名称不能为空"),
             'port' => Request\Validator::required("端口号不能为空"),
         ])->assign($host, $port);
-        $client = \Scf\Client\Http::create($host . '/install', $port);
+        $client = Http::create($host . '/install', $port);
 
         $app = App::info();
         $installData = [
@@ -488,7 +489,7 @@ class DashboardController extends Controller {
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');
         $status['latest_version'] = App::latestVersion();
 
-        $client = \Scf\Client\Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
+        $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
         $remoteVersionResponse = $client->get();
         $remoteVersion = [
             'version' => FRAMEWORK_BUILD_VERSION,

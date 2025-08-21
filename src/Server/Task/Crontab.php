@@ -2,42 +2,107 @@
 
 namespace Scf\Server\Task;
 
+use Generator;
 use JetBrains\PhpStorm\ArrayShape;
 use Scf\Cache\Redis;
-use Scf\Command\Color;
-use Scf\Core\App;
-use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Log;
-use Scf\Core\Result;
+use Scf\Core\Struct;
 use Scf\Core\Table\Counter;
-use Scf\Core\Table\CrontabTable;
-use Scf\Core\Table\Runtime;
-use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
-use Scf\Util\Time;
 use Swoole\Coroutine;
-use Swoole\Event;
-use Swoole\Process;
 use Swoole\Timer;
-use Symfony\Component\Console\Helper\Table;
-use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
-class Crontab {
-    use Singleton;
+class Crontab extends Struct {
+    /**
+     * @required true|任务id配置错误
+     */
+    public string $id;
+    /**
+     * @required true|任务名称配置错误
+     */
+    public string $name;
+    /**
+     * @required true|脚本命名空间错误
+     */
+    public string $namespace;
+    /**
+     * @required true|状态配置错误
+     * @default int:1
+     */
+    public int $status;
+    /**
+     * @required true|运行模式配置错误
+     */
+    public int $mode;
+    /**
+     * @default int:60
+     */
+    public ?int $interval;
+    /**
+     * @var ?array
+     */
+    public ?array $times;
+    /**
+     * @default int:3600
+     */
+    public ?int $timeout;
+    /**
+     * @default int:-1
+     */
+    public ?int $manager_id;
+    /**
+     * @default int:1
+     */
+    public ?int $running_version;
+    /**
+     * @default int:-1
+     */
+    public ?int $pid;
+    /**
+     * @default int:-1
+     */
+    public ?int $cid;
+    /**
+     * @default int:0
+     */
+    public ?int $created;
+    /**
+     * @default int:0
+     */
+    public ?int $expired;
+    /**
+     * @default string:''
+     */
+    public ?string $last_run;
+    /**
+     * @default int:0
+     */
+    public ?int $run_count;
+    /**
+     * @default int:0
+     */
+    public ?int $next_run;
+    /**
+     * @default int:0
+     */
+    public ?int $is_busy;
+    /**
+     * @default int:-1
+     */
+    public ?int $timer;
+    /**
+     * @default int:0
+     */
+    public ?int $latest_alive;
 
-    protected static array $tasks = [];
-    protected static array $tickers = [];
-    protected int $id = 1;
-    protected int $timer = 0;
-    protected array $attributes = [];
     /**
      * 执行一次
      */
@@ -49,363 +114,48 @@ class Crontab {
     /**
      * 定时执行
      */
-    const RUN_MODE_TIMEING = 2;
+    const RUN_MODE_TIMING = 2;
+    /**
+     * 兼容旧拼写
+     */
+    const RUN_MODE_TIMEING = 2; // 兼容旧代码，建议使用 RUN_MODE_TIMING
     /**
      * 严格间隔执行
      */
     const RUN_MODE_INTERVAL = 3;
-    protected int $executeTimeout = -1;
 
     /**
-     * 加载定时任务
-     * @return bool
+     * 当前状态
+     * @return array
      */
-    public static function load(): bool {
-        self::$tasks = [];
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $serverConfig = Config::server();
-        $list = [];
-        $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
-        if (App::isMaster() && $enableStatistics) {
-            $list[] = [
-                'name' => '统计数据入库',
-                'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
-                'mode' => Crontab::RUN_MODE_LOOP,
-                'interval' => $serverConfig['db_statistics_interval'] ?? 3,
-                'status' => STATUS_ON
-            ];
+    public function status(): array {
+        $this->sync();
+        $task = $this->asArray();
+        if ($this->mode != Crontab::RUN_MODE_TIMING && isset($task['interval'])) {
+            $task['interval_humanize'] = Date::secondsHumanize($task['interval']);
         }
-        if (!$modules = App::getModules()) {
-            if ($list) {
-                goto init;
-            }
-            return false;
-        }
-        foreach ($modules as $module) {
-            $crontabs = $module['crontabs'] ?? $module['background_tasks'] ?? [];
-            if ($crontabs) {
-                $list = $list ? [...$list, ...$crontabs] : $crontabs;
-            }
-            if (App::isMaster() && $masterCrontabls = $module['master_crontabs'] ?? null) {
-                $list = $list ? [...$list, ...$masterCrontabls] : $masterCrontabls;
-            }
-            if (!App::isMaster() && $slaveCrontabls = $module['slave_crontabs'] ?? null) {
-                $list = $list ? [...$list, ...$slaveCrontabls] : $slaveCrontabls;
-            }
-        }
-        init:
-        if ($list) {
-            foreach ($list as &$task) {
-                $task['id'] = $managerId;
-                $task['created'] = time();
-                $task['expired'] = 0;
-                $task['manager_id'] = $managerId;
-                $task['last_run'] = 0;
-                $task['run_count'] = 0;
-                $task['status'] = $task['status'] ?? 0;
-                $task['next_run'] = 0;
-                $task['is_busy'] = 0;
-                //读取覆盖的配置
-                $task['override'] = null;
-                clearstatcache();
-                $overrideConfig = self::factory($task['namespace'])->getOverridesConfigFileName();
-                if (file_exists($overrideConfig)) {
-                    $config = File::readJson($overrideConfig);
-                    if (!empty($config['namespace'])) {
-                        $task['override'] = $config;
-                    }
-                }
-                self::$tasks[substr($task['namespace'], 1)] = $task;
-            }
-        }
-        return self::hasTask();
+        $task['real_status'] = $this->status;
+        return $task;
     }
-//    /**
-//     * 开始任务(单进程模式)
-//     * @return int
-//     */
-//    public function start(): int {
-//        $members = MasterDB::sMembers(SERVER_NODE_ID . '_CRONTABS_' . $this->id());
-//        if ($members) {
-//            MasterDB::sClear(SERVER_NODE_ID . '_CRONTABS_');
-//            foreach ($members as $id) {
-//                MasterDB::delete('-crontabs-' . $id);
-//            }
-//        }
-//        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-//        self::aliveCheck();
-//        foreach (self::$tasks as &$task) {
-//            Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
-//            $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
-//                $worker = $this->createWorker($task['namespace']);
-//                if (!method_exists($worker, 'run')) {
-//                    Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
-//                } else {
-//                    Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]" . Color::green('已加入定时任务列表'));
-//
-//                    Timer::after(1000, function () use ($worker, $task) {
-//                        $worker->register($task);
-//                    });
-//                }
-//            });
-//        }
-//        return $managerId;
-//    }
+
     /**
      * 开始任务(多进程模式)
-     * @param $task
-     * @return int
-     */
-    public function start($task): int {
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        Runtime::instance()->set('SERVER_CRONTAB_ENABLE_CREATED_' . md5($task['namespace']), $task['created']);
-        $task['cid'] = Coroutine::create(function () use (&$task, $managerId) {
-            $worker = $this->createWorker($task['namespace']);
-            if (!method_exists($worker, 'run')) {
-                Log::instance()->error('定时任务:' . $task['name'] . '[' . $task['namespace'] . ']未定义run方法');
-            } else {
-                $worker->register($task);
-            }
-        });
-        return $managerId;
-    }
-
-    /**
-     * 错误上报
-     * @param $processTask
      * @return void
      */
-    protected function errorReport($processTask): void {
-        $errorInfo = Runtime::instance()->get('CRONTAB_' . md5($processTask['namespace']) . '_ERROR_INFO') ?: "未知错误";
-        static::updateTaskTable($processTask['namespace'], [
-            'status' => STATUS_OFF,
-            'remark' => $errorInfo,
-            'error_count' => 1
-        ]);
-        $sendError = new Process(function () use ($processTask, $errorInfo) {
-            App::mount();
-            go(function () use ($processTask, $errorInfo) {
-                Log::instance()->error("【Crontab#{$processTask['manager_id']}】{$processTask['name']}[{$processTask['namespace']}]致命错误: " . $errorInfo);
-            });
-            Event::wait();
-        });
-        $sendError->start();
-        Process::wait();
-        Counter::instance()->decr('CRONTAB_' . md5($processTask['namespace']) . '_ERROR');
-    }
-
-    /**
-     * 开启进程
-     * @return int
-     */
-    public static function startProcess(): int {
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        if (!App::isReady() || SERVER_CRONTAB_ENABLE != SWITCH_ON) {
-            return $managerId;
-        }
-        $process = new Process(function () use ($managerId) {
-            App::mount();
-            $server = Manager::instance()->getConfig('service_center_server') ?: 'main';
-            $masterDB = Redis::pool($server);
-            $members = $masterDB->sMembers(SERVER_NODE_ID . '_CRONTABS_' . static::instance()->id());
-            if ($members) {
-                $masterDB->delete(SERVER_NODE_ID . '_CRONTABS_');
-                foreach ($members as $id) {
-                    $masterDB->delete('-crontabs-' . $id);
-                }
-            }
-            self::load();
-            if (self::$tasks) {
-                foreach (self::$tasks as $task) {
-                    static::updateTaskTable($task['namespace'], $task);
-                }
-            }
-        });
-        $process->start();
-        Process::wait();
-        sleep(1);
-        $taskList = static::getTaskTable();
-        if (!$taskList) {
-            //没有定时任务也启动一个计时器
-            while (true) {
-                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                    break;
-                }
-                sleep(3);
-            }
-            return $managerId;
-        }
-        foreach ($taskList as &$task) {
-            $task['pid'] = static::instance()->createTaskProcess($task);
-        }
-        $output = new ConsoleOutput();
-        $table = new Table($output);
-        $renderData = [];
-        $modes = [
-            0 => '一次执行',
-            1 => '循环执行',
-            2 => '定时执行',
-            3 => '间隔执行'
-        ];
-        foreach ($taskList as $item) {
-            $renderData[] = [
-                $item['name'],
-                $item['namespace'],
-                $modes[$item['mode']],
-                isset($item['times']) ? $item['times'][0] . "..." . $item['times'][count($item['times']) - 1] : $item['interval'] ?? '一次',
-                Color::cyan($item['pid'])
-            ];
-        }
-        $table
-            ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('进程ID')])
-            ->setRows($renderData);
-        $table->render();
-        while (true) {
-            $tasks = static::getTaskTable();
-            if (!$tasks) {
-                break;
-            }
-            foreach ($tasks as $processTask) {
-                if (Counter::instance()->get('CRONTAB_' . md5($processTask['namespace']) . '_ERROR')) {
-                    static::instance()->errorReport($processTask);
-                }
-                $status = static::getTaskTableByScript($processTask['namespace']);
-                if ($status['status'] == STATUS_OFF) {
-                    sleep($processTask['retry_timeout'] ?? 3);
-                    if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
-                        static::instance()->createTaskProcess($processTask);
-                    } else {
-                        static::removeTaskTable($processTask['namespace']);
-                    }
-                }
-            }
-            sleep(1);
-        }
-        return $managerId;
-    }
-
-    protected static function getTaskTable(): array {
-        return CrontabTable::instance()->rows();
-    }
-
-    protected static function getTaskTableByScript($script) {
-        return CrontabTable::instance()->get($script) ?: [];
-    }
-
-    protected static function updateTaskTable($script, $data): array {
-        $task = CrontabTable::instance()->get($script);
-        if ($task) {
-            foreach ($data as $key => $value) {
-                if ($key == 'error_count') {
-                    $task[$key] = ($task['error_count'] ?? 0) + $value;
-                } else {
-                    $task[$key] = $value;
-                }
-            }
-        } else {
-            $task = $data;
-        }
-        CrontabTable::instance()->set($script, $task);
-        return CrontabTable::instance()->rows();
-    }
-
-    protected static function removeTaskTable($script): array {
-        if (CrontabTable::instance()->exist($script)) {
-            CrontabTable::instance()->delete($script);
-        }
-        return CrontabTable::instance()->rows();
-    }
-
-    /**
-     * 创建任务进程
-     * @param $task
-     * @param bool $wait
-     * @return bool|int|array
-     */
-    protected function createTaskProcess($task, bool $wait = false): bool|int|array {
-        $process = new Process(function () use ($task) {
-            App::mount();
-            register_shutdown_function(function () use ($task) {
-                $error = error_get_last();
-                if ($error && $error['type'] === E_ERROR) {
-                    Counter::instance()->incr('CRONTAB_' . md5($task['namespace']) . '_ERROR');
-                    Runtime::instance()->set('CRONTAB_' . md5($task['namespace']) . '_ERROR_INFO', $error['message']);
-                }
-            });
-            static::instance()->start($task);
-            Event::wait();
-            static::removeTaskTable($task['namespace']);
-        });
-        $pid = $process->start();
-        static::updateTaskTable($task['namespace'], [
-            'pid' => $pid,
-            'status' => STATUS_ON,
-        ]);
-        return $pid;
-//        if (!$wait) {
-//            return $pid;
-//        }
-//
-//        Console::info("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]已重启,PID:" . Color::green($pid));
-//        $status = Process::wait();
-//        $errorCount = Counter::instance()->get('CRONTAB_' . md5($task['namespace']) . '_ERROR') ?: 0;
-//        Console::warning("【Crontab#{$task['manager_id']}】{$task['name']}[{$task['namespace']}]管理进程已结束!code:{$status['code']},PID:" . $status['pid'] . ",错误次数:" . $errorCount);
-//        if ($errorCount) {
-//            static::instance()->errorReport($task);
-//            sleep($task['retry_timeout'] ?? 5);
-//            if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $task['manager_id']) {
-//                return $this->createTaskProcess($task, true);
-//            }
-//        }
-//        return $task;
-    }
-
-    /**
-     * 启动一个进程过期检测定时器
-     * @return void
-     */
-    public static function aliveCheck(): void {
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        Timer::tick(1000, function () use ($managerId) {
-            //服务已重启,终止现有计时器
-            if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                Timer::clearAll();
-            }
-        });
-    }
-
-    /**
-     * 是否活着
-     * @param int $id
-     * @return bool
-     */
-    public function isAlive(int $id = 1): bool {
-        if ($this->isOrphan() || $id !== $this->id) {
-            Console::warning("【Crontab#" . $this->attributes['manager_id'] . "】{$this->attributes['name']}[{$this->attributes['namespace']}]是孤儿进程,已取消执行");
-            return false;
-        }
-        $this->updateTask('latest_alive', time());
-        return true;
-    }
-
-
-    /**
-     * 注册任务
-     * @param $task
-     * @return void
-     */
-    protected function register($task): void {
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
-        if (!$masterDB->sIsMember(SERVER_NODE_ID . '_CRONTABS_', $this->id())) {
-            $masterDB->sAdd(SERVER_NODE_ID . '_CRONTABS_', $this->id());
-        }
+    public function start(): void {
         //内存占用统计
-        MemoryMonitor::start('crontab-' . $task['name']);
-        $this->attributes = $task;//定义任务属性
-        $this->executeTimeout = $task['timeout'] ?? 3600;//默认超时3600秒
-        //if ($this->attributes['mode'] !== self::RUN_MODE_ONECE) {//一次性任务也运行一个迭代监控计时器
+        MemoryMonitor::start('crontab-' . $this->name);
+        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
+        $setKey = CrontabManager::redisSetKey();
+        if (!$masterDB->sIsMember($setKey, $this->redisTaskKey())) {
+            $masterDB->sAdd($setKey, $this->redisTaskKey());
+        }
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        Timer::tick(3000, function () use ($managerId, $task) {
+        //迭代检查计时器
+        Timer::tick(3000, function () use ($managerId) {
+            if (!$this->pid) {
+                $this->pid = CrontabManager::getTaskTableById($this->id)['pid'] ?? 0;
+            }
             if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                 Timer::clearAll();
             }
@@ -415,8 +165,9 @@ class Crontab {
                 $this->upgrade();
             }
         });
-        //}
-        $this->startTask();
+        $this->cid = Coroutine::create(function () {
+            $this->startTask();
+        });
     }
 
 
@@ -425,89 +176,115 @@ class Crontab {
      * @return void
      */
     protected function startTask(): void {
-        $this->updateTask('latest_alive', time());
-        $mode = $this->attributes['override']['mode'] ?? $this->attributes['mode'];
-        $interval = $this->attributes['override']['interval'] ?? $this->attributes['interval'] ?? 0;
-        $status = $this->attributes['override']['status'] ?? $this->attributes['status'];
-        if ($status == STATUS_OFF) {
-            $this->refreshDB();
-            return;
-        }
-        $id = $this->id;
-        switch ($mode) {
-            case self::RUN_MODE_INTERVAL:
-                $this->processingFinish(time() + $interval);
-                $this->attributes['ticker'] = Timer::tick($interval * 1000, function () use ($interval, $id) {
-                    if ($this->isAlive($id)) {
-                        $this->processingStart(time() + $interval);
-                        try {
-                            $this->run();
-                        } catch (Throwable $throwable) {
-                            Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
-                            $this->log("任务执行失败:" . $throwable->getMessage());
-                        }
-                        $this->processingFinish();
-                    }
-                });
-                self::$tickers[] = $this->attributes['ticker'];
-                $this->setTimer($this->attributes['ticker']);
-                break;
-            case self::RUN_MODE_LOOP:
-                $this->loop($interval, $id);
-                break;
-            case self::RUN_MODE_TIMEING:
-                $this->timing($id);
-                break;
-            default:
-                $this->updateRunTime();
-                try {
-                    //单次执行的任务如果是无限循环任务需要在循环逻辑里判断当前任务是否处于激活状态,且在结束循环时清理相关计时器
-                    $this->run();
-                    Timer::after(1000 * 2, function () {
-                        static::updateTaskTable($this->attributes['namespace'], ['status' => 2]);
-                    });
-                } catch (Throwable $throwable) {
-                    $this->log("任务执行失败:" . $throwable->getMessage());
-                    Timer::after(1000 * 2, function () use ($throwable) {
-                        static::updateTaskTable($this->attributes['namespace'], ['status' => 0, 'remark' => $throwable->getMessage(), 'error_count' => 1]);
-                    });
+        $this->latest_alive = time();
+        $this->override();
+        $this->update($this->asArray());
+        if ($this->status == STATUS_OFF) {
+            //任务关闭挂起等待状态更新
+            $this->log('任务关闭,已挂起等待状态更新');
+            Timer::tick(10 * 1000, function ($timerId) {
+                if ($this->status == STATUS_ON) {
+                    $this->startTask();
+                    Timer::clear($timerId);
                 }
-                break;
+            });
+        } else {
+            $version = $this->running_version;
+            switch ($this->mode) {
+                case self::RUN_MODE_INTERVAL:
+                    $this->runIntervalNonReentrant($this->interval, $version);
+                    break;
+                case self::RUN_MODE_LOOP:
+                    $this->loop($this->interval, $version);
+                    break;
+                case self::RUN_MODE_TIMING:
+                    $this->timing($version);
+                    break;
+                case self::RUN_MODE_TIMEING: // 兼容旧常量
+                    $this->timing($version);
+                    break;
+                default:
+                    $this->updateRunTime();
+                    try {
+                        //单次执行的任务如果是无限循环任务需要在循环逻辑里判断当前任务是否处于激活状态,且在结束循环时清理相关计时器
+                        $this->execute();
+                        Timer::after(1000 * 2, function () {
+                            CrontabManager::updateTaskTable($this->id, ['status' => 2]);
+                        });
+                    } catch (Throwable $throwable) {
+                        $this->log("任务执行失败:" . $throwable->getMessage());
+                        Timer::after(1000 * 2, function () use ($throwable) {
+                            CrontabManager::updateTaskTable($this->id, ['status' => 0, 'remark' => $throwable->getMessage(), 'error_count' => 1]);
+                        });
+                    }
+                    break;
+            }
         }
-        $this->refreshDB();
     }
 
+    /**
+     * 间隔执行（非重入实现）
+     * @param int $interval
+     * @param int $version
+     */
+    protected function runIntervalNonReentrant(int $interval, int $version): void {
+        $this->timer = Timer::tick($interval * 1000, function () use ($interval, $version) {
+            if ($this->isAlive($version)) {
+                if (!$this->is_busy) {
+                    $this->processingStart(time() + $interval);
+                    try {
+                        $this->execute();
+                    } catch (Throwable $throwable) {
+                        Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
+                        $this->log("任务执行失败:" . $throwable->getMessage());
+                    }
+                    $this->processingFinish(time() + $interval);
+                } else {
+                    $this->log("上次执行未完成，跳过本次间隔执行");
+                }
+            }
+        });
+    }
+
+    /**
+     * 判断是否孤儿
+     * @return bool
+     */
+    public function isOrphan(): bool {
+        $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        return $this->manager_id !== $latestManagerId;
+    }
+
+    /**
+     * 是否活着
+     * @param int $version
+     * @return bool
+     */
+    public function isAlive(int $version = 1): bool {
+        if ($this->isOrphan() || $version !== $this->running_version) {
+            Console::warning("【Crontab#" . $this->running_version . "】{$this->name}[{$this->namespace}]是孤儿进程,已取消执行");
+            return false;
+        }
+        $this->latest_alive = time();
+        $this->update([
+            'latest_alive' => $this->latest_alive,
+        ]);
+        return true;
+    }
 
     /**
      * 升级迭代
      * @return void
      */
     protected function upgrade(): void {
-        $this->attributes['expired'] = 0;
-        $this->override();
-        $this->id++;
+        $this->expired = 0;
+        $this->running_version++;
         //清除定时器
         $this->timer and Timer::clear($this->timer);
-        $this->setTimer(0);
-        $this->updateTask('expired', 0);
-        Console::info($this->attributes['namespace'] . "运行参数已变更,已升级迭代至#" . $this->id);
+        $this->timer = 0;
+        $this->log("运行参数已变更,已升级迭代至#{$this->running_version}:" . JsonHelper::toJson($this->asArray()));
         //重新执行
         $this->startTask();
-    }
-
-    /**
-     * 加载覆盖配置
-     * @return void
-     */
-    protected function override(): void {
-        clearstatcache();
-        $overrideConfig = $this->getOverridesConfigFileName();
-        if (file_exists($overrideConfig)) {
-            $config = File::readJson($overrideConfig);
-            if (!empty($config['namespace'])) {
-                $this->attributes['override'] = $config;
-            }
-        }
     }
 
     /**
@@ -518,9 +295,9 @@ class Crontab {
         return go(function () {
             $this->processingStart();
             try {
-                $this->run();
+                $this->execute();
             } catch (Throwable $throwable) {
-                Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
+                Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
             }
             $this->processingFinish();
@@ -528,37 +305,11 @@ class Crontab {
     }
 
     /**
-     * 重启
-     * @return array|mixed
-     */
-    public function reload(): mixed {
-        $this->sync();
-        return $this->updateTask('expired', time());
-    }
-
-    /**
      * 判断当前worker是否过期
      * @return bool
      */
     protected function isExpired(): bool {
-        return ($this->attributes['expired'] ?? 0) > 0;
-    }
-
-    /**
-     * 设置计时器
-     * @param $timer
-     * @return void
-     */
-    protected function setTimer($timer): void {
-        $this->attributes['ticker'] = $timer;
-        $this->timer = $timer;
-    }
-
-    /**
-     * @return array
-     */
-    public static function list(): array {
-        return self::$tasks;
+        return $this->expired > 0;
     }
 
     /**
@@ -567,80 +318,34 @@ class Crontab {
      * @return void
      */
     public function log($msg): void {
-        Console::log('【Crontab#' . $this->attributes['manager_id'] . '】' . $this->attributes['name'] . ':' . $msg);
+        Console::log('【Crontab】' . $this->namespace . '#' . $this->running_version . ':' . $msg);
         //保存日志到Redis&日志文件
-        $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->attributes['namespace']));
+        $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->namespace));
         Manager::instance()->addLog('crontab', ['task' => $taskName, 'message' => Log::filter($msg), 'date' => date('Y-m-d H:i:s')]);
-    }
-
-    public function setAttributes($attributes): void {
-        $this->attributes = $attributes;
-    }
-
-    /**
-     * 当前状态
-     * @return array
-     */
-    public function status(): array {
-        $task = $this->sync();
-        $mode = $task['override']['mode'] ?? $task['mode'];
-        if ($mode != Crontab::RUN_MODE_TIMEING && isset($task['interval'])) {
-            $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
-        }
-        $task['real_status'] = $task['override']['status'] ?? $task['status'];
-        return $task;
-    }
-
-    /**
-     * 任务状态
-     * @return array
-     */
-    public function getList(): array {
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
-        $ids = $masterDB->sMembers(SERVER_NODE_ID . '_CRONTABS_') ?: [];
-        $list = [];
-        if ($ids) {
-            foreach ($ids as $id) {
-                $key = '-crontabs-' . $id;
-                if (!$task = $masterDB->get($key)) {
-                    continue;
-                }
-                $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
-                $task['logs'] = Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 20, $taskName);
-                $task['real_status'] = $task['override']['status'] ?? $task['status'];
-                $mode = $task['override']['mode'] ?? $task['mode'];
-                if ($mode != Crontab::RUN_MODE_TIMEING && isset($task['interval'])) {
-                    $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
-                }
-                $list[] = $task;
-            }
-        }
-        return $list;
     }
 
     /**
      * 定时执行
-     * @param int $id
+     * @param int $version
      * @return void
      */
-    protected function timing(int $id): void {
-        $times = $this->attributes['override']['times'] ?? $this->attributes['times'];
+    protected function timing(int $version): void {
+        $times = $this->times;
         $nextRun = $this->getNextRunTime($times);
         $this->log('下次运行时间(' . Date::secondsHumanize($nextRun['after']) . '后):' . $nextRun['date']);
         $this->processingFinish(time() + $nextRun['after']);
-        $timerId = Timer::after($nextRun['after'] * 1000, function () use ($id) {
-            if ($this->isAlive($id)) {
+        $this->timer = Timer::after($nextRun['after'] * 1000, function () use ($version) {
+            if ($this->isAlive($version)) {
                 $this->processingStart();
                 try {
-                    $this->run();
+                    $this->execute();
                 } catch (Throwable $throwable) {
-                    Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
+                    Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
                 }
-                $this->timing($id);
+                $this->timing($version);
             }
         });
-        $this->setTimer($timerId);
     }
 
     /**
@@ -651,12 +356,20 @@ class Crontab {
     #[ArrayShape(['after' => "mixed", 'date' => "string"])]
     protected function getNextRunTime($times): array {
         $now = time();
-        $matched = null;
+        $today = date('Y-m-d');
         $timestamps = [];
         foreach ($times as $time) {
-            $timestamps[] = strtotime($time);
+            // 支持 HH:MM(:SS) 或完整时间
+            if (preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $time)) {
+                $full = $today . ' ' . $time;
+                $ts = strtotime($full);
+            } else {
+                $ts = strtotime($time);
+            }
+            $timestamps[] = $ts;
         }
         asort($timestamps);
+        $matched = null;
         foreach ($timestamps as $timestamp) {
             if ($timestamp > $now) {
                 $matched = $timestamp;
@@ -664,7 +377,13 @@ class Crontab {
             }
         }
         if (is_null($matched)) {
-            $matched = strtotime(date('Y-m-d H:i:s', $timestamps[0]) . '+1 day');
+            // 明天的第一个
+            $first = reset($times);
+            if (preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $first)) {
+                $matched = strtotime($today . ' ' . $first . ' +1 day');
+            } else {
+                $matched = strtotime($first . ' +1 day');
+            }
         }
         return [
             'after' => $matched - time(),
@@ -672,46 +391,111 @@ class Crontab {
         ];
     }
 
-    protected int $timerCid = 0;
-
     /**
      * 执行循环任务
      * @param $timeout
      * @param $id
      * @return void
      */
-    protected function loop($timeout, $id): void {
+
+    private function loop($timeout, $id): void {
         if (!$this->isAlive($id)) {
             return;
         }
+        $this->cancelFlag = false;
         $this->processingStart();
         $channel = new Coroutine\Channel(1);
-        $this->timerCid = Coroutine::create(function () use ($channel) {
+        Coroutine::create(function () use ($channel, $timeout) {
             try {
-                $this->run();
+                //$this->runWithCooperativeTimeout($this->timeout);
+                $this->execute();
                 $channel->push('success');
             } catch (Throwable $throwable) {
-                Log::instance()->error("【Crontab#{$this->attributes['manager_id']}】任务执行失败:" . $throwable->getMessage());
+                Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
                 $channel->push('fail');
             }
         });
-        while (true) {
-            $result = $channel->pop($this->executeTimeout);
-            if (!$result) {
-                Console::warning("【Crontab#{$this->attributes['manager_id']}】{$this->attributes['name']} 执行超时:" . get_called_class());
-            }
-            if ($channel->isEmpty()) {
-                break;
-            }
+        $result = $channel->pop($this->timeout);
+        if (!$result) {
+            $this->requestCancel();
+            Console::warning("【Crontab#{$this->running_version}】{$this->name} 协作超时取消:" . get_called_class());
         }
         $this->processingFinish(time() + $timeout);
-        $timerId = Timer::after($timeout * 1000, function () use ($timeout, $id) {
+        $this->timer = Timer::after($timeout * 1000, function () use ($timeout, $id) {
             $this->loop($timeout, $id);
         });
-        $this->setTimer($timerId);
     }
 
+    /**
+     * 协作式超时取消的 run 包装
+     * @param int $timeout
+     */
+    private function runWithCooperativeTimeout(int $timeout): void {
+        $begin = time();
+        $this->cancelFlag = false;
+        // 使用生成器方式执行，并用 foreach 正确驱动生成器（避免 valid()/next() 手动驱动的边界问题）
+        $intervalMs = max(1, (int)($this->interval * 1000)); // 将 interval 秒转毫秒
+        $gen = $this->runGenerator($intervalMs);
+        if ($gen instanceof Generator) {
+            foreach ($gen as $_) {
+                if ($this->cancelFlag || (time() - $begin) >= $timeout) {
+                    break;
+                }
+            }
+        } else {
+            // fallback: 非生成器直接执行
+            $this->execute();
+        }
+    }
+
+    /**
+     * 用生成器方式调度 run() 方法
+     * 可替代 runWithCooperativeTimeout
+     */
+    protected function runGenerator(int $intervalMs = 1000): ?Generator {
+        $intervalUs = max(0, $intervalMs) * 1000;
+        while (true) {
+            // 支持外部协作式取消
+            if ($this->cancelFlag) {
+                break;
+            }
+            try {
+                // 调用子类 run()/execute()
+                $result = $this->execute();
+                // 把结果交出去，外部 foreach($gen as $val) 可取
+                yield $result;
+                // 模拟定时器的等待（在 next() 之后继续执行）
+                if ($intervalUs > 0) {
+                    usleep($intervalUs);
+                }
+            } catch (\Throwable $e) {
+                $this->handleError($e);
+                // 不中断生成器，继续下一次循环
+                yield null;
+            }
+        }
+    }
+
+    /**
+     * 可选：异常处理（父类提供默认实现）
+     */
+    protected function handleError(\Throwable $e): void {
+        // 这里可以写日志或者上报
+        echo "Task error: " . $e->getMessage() . PHP_EOL;
+    }
+
+    /**
+     * 协作式超时取消的循环执行
+     * @param $timeout
+     * @param $id
+     * @return void
+     */
+    protected bool $cancelFlag = false;
+
+    public function requestCancel(): void {
+        $this->cancelFlag = true;
+    }
 
     /**
      * 开始本次执行
@@ -719,12 +503,17 @@ class Crontab {
      * @return void
      */
     protected function processingStart(int $nextTime = 0): void {
-        $lastRun = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3);
-        $this->attributes['last_run'] = $lastRun;
-        $this->attributes['run_count'] += 1;
-        $this->attributes['is_busy'] = 1;
-        $nextTime and $this->attributes['next_run'] = $nextTime;
-        $this->refreshDB();
+        $lastRun = date('m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
+        $this->last_run = $lastRun;
+        $this->run_count += 1;
+        $this->is_busy = 1;
+        $nextTime and $this->next_run = $nextTime;
+        $this->update([
+            'last_run' => $lastRun,
+            'run_count' => $this->run_count,
+            'is_busy' => 1,
+            'next_run' => $nextTime ?: $this->next_run
+        ]);
     }
 
     /**
@@ -733,45 +522,39 @@ class Crontab {
      * @return void
      */
     protected function processingFinish(int $nextTime = 0): void {
-        $this->attributes['is_busy'] = 0;
-        $nextTime and $this->attributes['next_run'] = $nextTime;
-        $this->refreshDB();
+        $this->is_busy = 0;
+        $nextTime and $this->next_run = $nextTime;
+        $this->update([
+            'is_busy' => 0,
+            'next_run' => $nextTime ?: $this->next_run
+        ]);
     }
 
     /**
-     * 判断是否孤儿
-     * @param int $managerId
-     * @return bool
+     * 更新参数
+     * @param array $datas
+     * @return bool|array
      */
-    public function isOrphan(int $managerId = 0): bool {
-        $managerId = $managerId ?: $this->attributes['manager_id'];
-        $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        return $managerId !== $latestManagerId;
-    }
-
-    /**
-     * 刷新数据库
-     * @return bool
-     */
-    protected function refreshDB(): bool {
+    public function update(array $datas): bool|array {
         $pool = Redis::pool($this->_config['server'] ?? 'main');
         if ($pool instanceof NullPool) {
             return false;
         }
-        return $pool->set('-crontabs-' . $this->id(), $this->attributes);
+        foreach ($datas as $key => $value) {
+            if (property_exists($this, $key)) {
+                $pool->hset($this->redisTaskKey(), $key, $value);
+            }
+        }
+        return $pool->hgetAll($this->redisTaskKey());
     }
 
     /**
-     * 同步任务
-     * @return array
+     * Redis任务Key
+     * @param int|string|null $id
+     * @return string
      */
-    protected function sync(): array {
-        $pool = Redis::pool($this->_config['server'] ?? 'main');
-        if ($pool instanceof NullPool) {
-            return $this->attributes;
-        }
-        $this->attributes = $pool->get('-crontabs-' . $this->id()) ?: $this->attributes;
-        return $this->attributes;
+    protected function redisTaskKey(int|string $id = null): string {
+        return $id ?? $this->id;
     }
 
     /**
@@ -779,93 +562,12 @@ class Crontab {
      * @return void
      */
     protected function updateRunTime(): void {
-        $this->attributes['last_run'] = date('m-d H:i:s') . "." . substr(Time::millisecond(), -3);
-        $this->attributes['run_count'] += 1;
-        $this->refreshDB();
-    }
-
-    /**
-     * 更新任务
-     * @param $key
-     * @param $value
-     * @return mixed
-     */
-    protected function updateTask($key, $value): mixed {
-        if (!$this->attributes) {
-            $this->sync();
-        }
-        $this->attributes[$key] = $value;
-        return $this->refreshDB();
-    }
-
-    /**
-     * 是否存在任务
-     * @return bool
-     */
-    public static function hasTask(): bool {
-        return count(self::$tasks) > 0;
-    }
-
-    /**
-     * 保存配置文件
-     * @param $data
-     * @return Result
-     */
-    public function saveOverrides($data): Result {
-        $file = $this->getOverridesConfigFileName();
-        if (!$file) {
-            return Result::error('创建配置文件夹失败');
-        }
-        foreach ($data as $key => $val) {
-            if (is_numeric($val)) {
-                $data[$key] = (int)$val;
-            }
-        }
-        Console::info($data['name'] . "参数已变更:" . JsonHelper::toJson($data));
-        $this->attributes['override'] = $data;
-        return Result::success(File::write($file, JsonHelper::toJson($data)));
-    }
-
-    /**
-     * 获取配置文件路径
-     * @return false|string
-     */
-    protected function getOverridesConfigFileName(): bool|string {
-        $dir = APP_PATH . '/src/config/crontab';
-        if (!file_exists($dir)) {
-            try {
-                mkdir($dir, 0777, true);
-            } catch (Throwable) {
-                return false;
-            }
-        }
-        return $dir . '/' . 'CRONTAB_' . md5(str_replace("\\", "_", static::class) . SERVER_NODE_ID) . '.override.json';
-        //return $dir . '/' . strtolower(str_replace("\\", "_", static::class)) . '.override.json';
-    }
-
-    /**
-     * 创建一个任务对象
-     * @param $name
-     * @return static
-     */
-    public static function factory($name): static {
-        return new $name;
-    }
-
-    /**
-     * @param $name
-     * @return static
-     */
-    protected function createWorker($name): static {
-        return new $name;
-    }
-
-    public function getId(): int {
-        return $this->id;
-    }
-
-    public function getManagerId() {
-        return $this->attributes['manager_id'];
+        $this->last_run = date('m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
+        $this->run_count += 1;
+        $this->update([
+            'last_run' => $this->last_run,
+            'run_count' => $this->run_count,
+        ]);
     }
 
     /**
@@ -873,19 +575,69 @@ class Crontab {
      * @return string
      */
     public function id(): string {
-        return 'CRONTAB_' . md5(str_replace("\\", "_", static::class) . SERVER_NODE_ID);
-        //return strtolower(str_replace("\\", "_", static::class) . SERVER_NODE_ID);
+        return $this->id;
+    }
+
+
+    public function execute(): int {
+        /** @var static $app */
+        $app = new $this->namespace;
+        // 将当前对象的所有属性同步到子类实例
+        $props = $this->asArray();//get_object_vars($this);
+        foreach ($props as $prop => $val) {
+            if (property_exists($app, $prop)) {
+                $app->$prop = $val;
+            }
+        }
+        $app->run();
+        unset($app);
+        return time();
+    }
+
+    /**
+     * 同步任务状态
+     * @return array
+     */
+    protected function sync(): array {
+        $pool = Redis::pool($this->_config['server'] ?? 'main');
+        if ($pool instanceof NullPool) {
+            return $this->asArray();
+        }
+        $key = $this->redisTaskKey();
+        $attributes = $pool->hgetAll($key);
+        if ($attributes) {
+            $this->mode = $attributes['mode'] ?? $this->mode;
+            $this->interval = $attributes['interval'] ?? $this->interval;
+            $this->status = $attributes['status'] ?? $this->status;
+            $this->times = $attributes['times'] ?? $this->times;
+            $this->expired = $attributes['expired'] ?? $this->expired;
+        }
+        return $attributes;
+    }
+
+    /**
+     * 加载覆盖配置
+     * @return void
+     */
+    protected function override(): void {
+        $overrideConfig = CrontabManager::overridesConfigFile($this->namespace);
+        if ($overrideConfig && file_exists($overrideConfig)) {
+            $config = File::readJson($overrideConfig);
+            $this->mode = $config['mode'] ?? $this->mode;
+            $this->interval = $config['interval'] ?? $this->interval;
+            $this->status = $config['status'] ?? $this->status;
+            $this->times = $config['times'] ?? $this->times;
+        }
+    }
+
+    public function getId(): int {
+        return $this->id;
+    }
+
+    public function getManagerId(): int {
+        return $this->manager_id;
     }
 
     public function run() {
-
-    }
-
-    public function execute(): void {
-        /** @var static $app */
-        $app = new $this->attributes['namespace'];
-        $app->setAttributes($this->attributes);
-        $app->run();
-        unset($app);
     }
 }
