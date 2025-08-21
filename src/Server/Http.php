@@ -16,7 +16,7 @@ use Scf\Database\Exception\NullPool;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Struct\Node;
-use Scf\Server\Task\Crontab;
+use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\File;
 use Swoole\Coroutine;
@@ -177,6 +177,7 @@ class Http extends \Scf\Core\Server {
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         //添加一个后台任务管理进程
+        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
         $this->addCrontabProcess($serverConfig);
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
@@ -341,9 +342,6 @@ INFO;
             //自动更新
             APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
-//        Timer::tick(3000, function () {
-//            \Scf\Core\App::countMemory();
-//        });
         try {
             //日志备份进程
             $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
@@ -372,13 +370,12 @@ INFO;
                 }
                 sleep(1);
             }
-            //$managerId = Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 //if (!Runtime::instance()->crontabProcessStatus()) {
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                 //Runtime::instance()->crontabProcessStatus(true);
-                Crontab::startProcess();
+                CrontabManager::start();
                 //}
                 //使用管理进程id判断是否迭代,迭代则重新启动进程
                 //Runtime::instance()->crontabProcessStatus(false);
@@ -410,7 +407,7 @@ INFO;
                     }
                     Runtime::instance()->redisQueueProcessStatus(false);
                     Console::warning("【Server】RedisQueue#{$managerId}管理进程已迭代,重启队列进程");
-                    sleep(3);
+                    sleep(1);
                 }
             });
             $pid = $this->server->addProcess($redisQueueProcess);

@@ -144,6 +144,7 @@ class MemoryMonitor {
             // 递归调度下一次
             self::$timerId = Timer::after($interval, $run);
         };
+        $run();
         // 启动第一次
         self::$timerId = Timer::after($interval, $run);
     }

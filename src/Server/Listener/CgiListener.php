@@ -259,13 +259,14 @@ class CgiListener extends Listener {
             $response->status(200);
             if ($result->hasError()) {
                 $response->end(JsonHelper::toJson([
-                    'errCode' => 'SERVICE_UNAVAILABLE',
+                    'errCode' => $result->getErrCode(),
                     'message' => "转发请求至控制面板失败:" . $result->getMessage(),
                     'data' => [
                         'master' => $masterHost,
                         'host' => $dashboardHost,
                         'url' => $url,
-                        'method' => $request->server['request_method']
+                        'method' => $request->server['request_method'],
+                        'body' => $result->getData()
                     ]
                 ]));
             } else {
