@@ -571,7 +571,6 @@ class Redis extends Cache {
      * @return false|mixed|string
      */
     public function hget(string $key, $hashKey): mixed {
-
         $logger = ProcessLife::instance();
         try {
             $data = $this->connection->hGet($this->setPrefix($key), $hashKey);
@@ -593,7 +592,6 @@ class Redis extends Cache {
      * @return array|false|mixed
      */
     public function hgetAll(string $key): mixed {
-
         $logger = ProcessLife::instance();
         try {
             $data = $this->connection->hGetAll($this->setPrefix($key));
@@ -606,7 +604,13 @@ class Redis extends Cache {
             return false;
         }
         $logger->hitRedis();
-        return StringHelper::isJson($data) ? JsonHelper::recover($data) : $data;
+        $resultData = StringHelper::isJson($data) ? JsonHelper::recover($data) : $data;
+        foreach ($resultData as $field => $value) {
+            if (StringHelper::isJson($value)) {
+                $resultData[$field] = JsonHelper::recover($value);
+            }
+        }
+        return $resultData;
     }
 
     /**
