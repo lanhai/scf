@@ -62,9 +62,9 @@ class Driver {
 
     /**
      * Get instance
-     * @return PDO
+     * @return ?PDO
      */
-    public function instance(): PDO {
+    public function instance(): ?PDO {
         return $this->pdo;
     }
 
