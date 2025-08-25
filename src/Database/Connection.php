@@ -181,7 +181,7 @@ class Connection extends AConnection {
     public function __destruct() {
         $this->executed = true;
         // 回收
-        if (!$this->driver || $this->driver instanceof EmptyDriver) {
+        if (!$this->driver || $this->driver instanceof EmptyDriver || $this->driver->instance() === null) {
             return;
         }
         if ($this->exceptional || $this->inTransaction()) {

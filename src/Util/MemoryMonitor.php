@@ -74,9 +74,11 @@ class MemoryMonitor {
         }
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         $run = function () use (&$run, &$managerId, $processName, $interval, $limitMb, $forceExit) {
-            if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                Timer::clear(self::$timerId);
+            $currentManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+            if ($managerId !== $currentManagerId) {
+                $managerId = $currentManagerId;
+                //Timer::clear(self::$timerId);
+                Timer::clearAll();
                 return;
             }
             $usage = memory_get_usage(true);

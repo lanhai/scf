@@ -212,6 +212,7 @@ class Crontab extends Struct {
                             CrontabManager::updateTaskTable($this->id, ['status' => 2]);
                         });
                     } catch (Throwable $throwable) {
+                        Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                         $this->log("任务执行失败:" . $throwable->getMessage());
                         Timer::after(1000 * 2, function () use ($throwable) {
                             CrontabManager::updateTaskTable($this->id, ['status' => 0, 'remark' => $throwable->getMessage(), 'error_count' => 1]);
@@ -297,7 +298,7 @@ class Crontab extends Struct {
             try {
                 $this->execute();
             } catch (Throwable $throwable) {
-                Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
+                Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
             }
             $this->processingFinish();
@@ -318,7 +319,8 @@ class Crontab extends Struct {
      * @return void
      */
     public function log($msg): void {
-        Console::log('【Crontab】' . $this->namespace . '#' . $this->running_version . ':' . $msg);
+        $arr = explode("\\", $this->namespace);
+        Console::log('【Crontab】[' . $this->name . '|' . array_pop($arr) . '|#' . $this->running_version . ']' . $msg);
         //保存日志到Redis&日志文件
         $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->namespace));
         Manager::instance()->addLog('crontab', ['task' => $taskName, 'message' => Log::filter($msg), 'date' => date('Y-m-d H:i:s')]);
@@ -340,7 +342,7 @@ class Crontab extends Struct {
                 try {
                     $this->execute();
                 } catch (Throwable $throwable) {
-                    Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
+                    Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                     $this->log("任务执行失败:" . $throwable->getMessage());
                 }
                 $this->timing($version);
@@ -411,7 +413,7 @@ class Crontab extends Struct {
                 $this->execute();
                 $channel->push('success');
             } catch (Throwable $throwable) {
-                Log::instance()->error("【Crontab#{$this->running_version}】任务执行失败:" . $throwable->getMessage());
+                Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                 $this->log("任务执行失败:" . $throwable->getMessage());
                 $channel->push('fail');
             }
@@ -419,7 +421,8 @@ class Crontab extends Struct {
         $result = $channel->pop($this->timeout);
         if (!$result) {
             $this->requestCancel();
-            Console::warning("【Crontab#{$this->running_version}】{$this->name} 协作超时取消:" . get_called_class());
+            $this->log("任务执行超时取消");
+            //Console::warning("【Crontab#{$this->running_version}】{$this->name} 协作超时取消:" . get_called_class());
         }
         $this->processingFinish(time() + $timeout);
         $this->timer = Timer::after($timeout * 1000, function () use ($timeout, $id) {

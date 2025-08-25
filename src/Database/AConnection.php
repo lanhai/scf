@@ -7,7 +7,6 @@ use JetBrains\PhpStorm\ArrayShape;
 use JetBrains\PhpStorm\Pure;
 use PDOException;
 use PDOStatement;
-use Scf\Core\Console;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Tools\Expr;
 use Scf\Database\Tools\QueryBuilder;
@@ -231,19 +230,14 @@ abstract class AConnection implements IConnection {
             $success = $this->statement->execute();
             if (!$success) {
                 list($flag, $code, $message) = $this->statement->errorInfo();
-                Console::warning("PDO execute Failed:" . $message);
                 $isBeginTransactions and $transactionsManager->addError($pointId, $message);
                 throw new PDOException(sprintf('%s %d %s', $flag, $code, $message), $code);
             }
         } catch (\Error $error) {
             $isBeginTransactions and $transactionsManager->addError($pointId, $error->getMessage());
-            Console::warning("PDO execute Error:" . $error->getMessage());
             throw new PDOException("PDO execute Error:" . $error->getMessage());
         } catch (Throwable $ex) {
             $isBeginTransactions and $transactionsManager->addError($pointId, $ex->getMessage());
-            if (!str_contains($this->sql, 'DESCRIBE')) {
-                Console::warning("PDO execute Throw:" . $ex->getMessage());
-            }
             throw $ex;
         } finally {
             // 只可执行一次
