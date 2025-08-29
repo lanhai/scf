@@ -614,8 +614,9 @@ class Crontab extends Struct {
             $this->status = $attributes['status'] ?? $this->status;
             $this->times = $attributes['times'] ?? $this->times;
             $this->expired = $attributes['expired'] ?? $this->expired;
+            return $attributes;
         }
-        return $attributes;
+        return [];
     }
 
     /**
