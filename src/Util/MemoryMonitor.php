@@ -51,8 +51,7 @@ class MemoryMonitor {
             $cost = (time() - $start) ?: 1;
             Console::write(
                 "共" . Color::notice($data['total']) .
-                "个进程,在线" . Color::green($data['online']) .
-                "个,离线" . Color::red($data['offline']) .
+                "个进程,离线" . Color::red($data['offline']) .
                 "个, PHP占用累计:" . Color::cyan(($data['real_total_mb']) . "MB") .
                 ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
                 (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .

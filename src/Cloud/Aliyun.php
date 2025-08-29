@@ -24,7 +24,7 @@ abstract class Aliyun {
      * 构造器
      * @param array $config 配置项
      */
-    public function __construct(array $config = [], $accounts = []) {
+    public function __construct(array $config = [], $accounts = [], ?string $serverName = null) {
         if (!$this->_config) {
             //合并配置
             $this->_config = Arr::merge($this->_config, $config);
@@ -37,6 +37,9 @@ abstract class Aliyun {
             }
         }
         $this->accounts = $accounts;
+        if ($serverName) {
+            $this->_config['default_server'] = $serverName;
+        }
         $this->_init();
     }
 
@@ -48,17 +51,18 @@ abstract class Aliyun {
     }
 
     /**
-     * 获取单利
+     * 获取单例
      * @param array|null $conf
+     * @param string|null $serverName
      * @return static
      */
-    final public static function instance(array $conf = null): static {
+    final public static function instance(array $conf = null, ?string $serverName = null): static {
         $class = static::class;
         $_configs = !is_null($conf) ? $conf : Config::get('aliyun');
         $instanceName = $class . ($_configs[$class]['default_server'] ?? '');
         if (!isset(self::$_instances[$instanceName])) {
             //$config = is_array($conf) ? Arr::merge($instanceConfig, $conf) : $instanceConfig;
-            self::$_instances[$instanceName] = new $class($_configs[$class] ?? [], $_configs['accounts'] ?? []);
+            self::$_instances[$instanceName] = new $class($_configs[$class] ?? [], $_configs['accounts'] ?? [], $serverName);
         }
         return self::$_instances[$instanceName];
     }

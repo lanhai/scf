@@ -180,6 +180,34 @@ class ArCreater {
         $columns = ObjectHelper::toArray($columns);
         $primaryKeys = [];
         $columnMaps = [];
+        //表创建
+        //获取索引字段
+        $indexMaps = [];
+        try {
+            $sql = "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = '{$completeTable}' AND TABLE_SCHEMA = '{$dbName}'";
+            $indexes = $this->db()->getDatabase()->exec($sql)->get();
+            if ($indexes) {
+                foreach ($indexes as $i => $index) {
+                    if ($index['INDEX_NAME'] == 'PRIMARY') {
+                        continue;
+                    }
+                    if (isset($indexMaps[$index['INDEX_NAME']])) {
+                        $indexMaps[$index['INDEX_NAME']]['content'] = str_replace('ASC)', "ASC,`{$index['COLUMN_NAME']}` ASC)", $indexMaps[$index['INDEX_NAME']]['content']);
+                    } else {
+                        $indexMaps[$index['INDEX_NAME']] = [
+                            'content' => ($index['NON_UNIQUE'] != 0 ? "INDEX" : "UNIQUE INDEX") . " `{$index['INDEX_NAME']}`(`{$index['COLUMN_NAME']}` ASC) USING {$index['INDEX_TYPE']}" . ($index['INDEX_COMMENT'] ? " COMMENT '{$index['INDEX_COMMENT']}'" : ""),
+                        ];
+                    }
+                    $indexMaps[$index['INDEX_NAME']]['hash'] = md5($indexMaps[$index['INDEX_NAME']]['content']);
+                }
+            }
+        } catch (\PDOException $e) {
+            Console::write('数据表索引获取失败:' . $e->getMessage() . ',请确认输入无误后重试');
+            Console::line();
+            return $this->setTABLE();
+        } catch (Throwable $e) {
+            return $this->setTABLE();
+        }
         $createSql = "CREATE TABLE `{$completeTable}` (";
         $afterField = null;
         foreach ($columns as $v) {
@@ -270,33 +298,6 @@ class ArCreater {
             // 拼接主键信息到 SQL 语句
             $createSql .= "PRIMARY KEY (" . implode(',', $primaryKeys) . "), ";
         }
-        //获取索引字段
-        $indexMaps = [];
-        try {
-            $sql = "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = '{$completeTable}' AND TABLE_SCHEMA = '{$dbName}'";
-            $indexes = $this->db()->getDatabase()->exec($sql)->get();
-            if ($indexes) {
-                foreach ($indexes as $i => $index) {
-                    if ($index['INDEX_NAME'] == 'PRIMARY') {
-                        continue;
-                    }
-                    if (isset($indexMaps[$index['INDEX_NAME']])) {
-                        $indexMaps[$index['INDEX_NAME']]['content'] = str_replace('ASC)', "ASC,`{$index['COLUMN_NAME']}` ASC)", $indexMaps[$index['INDEX_NAME']]['content']);
-                    } else {
-                        $indexMaps[$index['INDEX_NAME']] = [
-                            'content' => ($index['NON_UNIQUE'] != 0 ? "INDEX" : "UNIQUE INDEX") . " `{$index['INDEX_NAME']}`(`{$index['COLUMN_NAME']}` ASC) USING {$index['INDEX_TYPE']}" . ($index['INDEX_COMMENT'] ? " COMMENT '{$index['INDEX_COMMENT']}'" : ""),
-                        ];
-                    }
-                    $indexMaps[$index['INDEX_NAME']]['hash'] = md5($indexMaps[$index['INDEX_NAME']]['content']);
-                }
-            }
-        } catch (\PDOException $e) {
-            Console::write('数据表索引获取失败:' . $e->getMessage() . ',请确认输入无误后重试');
-            Console::line();
-            return $this->setTABLE();
-        } catch (Throwable $e) {
-            return $this->setTABLE();
-        }
         if ($indexMaps) {
             foreach ($indexMaps as $indexInfo) {
                 $createSql .= $indexInfo['content'] . ", ";
@@ -305,6 +306,22 @@ class ArCreater {
         //去除末尾多余的逗号和空格
         $createSql = rtrim($createSql, ', ');
         $createSql .= ")";
+        try {
+            $createSql = $this->db()->getDatabase()->exec("SHOW CREATE TABLE {$completeTable}")->first()['Create Table'] ?? null;
+        } catch (\PDOException $e) {
+            Console::write('读取数据表失败:' . $e->getMessage() . ',请确认输入无误后重试');
+            Console::line();
+            return $this->setTABLE();
+        } catch (Throwable $e) {
+            return $this->setTABLE();
+        }
+        // 1. 把所有换行、制表符都变成单空格
+        $createSql = preg_replace('/\s+/', ' ', $createSql);
+        // 2. 去掉括号后的空格
+        $createSql = preg_replace('/\(\s+/', '(', $createSql);
+        // 3. 确保逗号后只有一个空格（去掉 video_id 这种前多余空格）
+        $createSql = preg_replace('/,\s+`/', ',`', $createSql);
+
         $space = 'App\\' . $nameSpace;
         //    protected string \$_createSql = "{$createSql}";
         $file = <<<EOF

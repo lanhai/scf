@@ -441,13 +441,9 @@ class Oss extends Aliyun {
                 return Result::error($ossAr->getError());
             }
             return Result::success($return == 'url' ? ($this->server['CDN_DOMAIN'] . $object) : $object);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             return Result::error($e->getMessage());
         }
-
-    }
-
-    public function processObject() {
 
     }
 
@@ -458,63 +454,105 @@ class Oss extends Aliyun {
      * @param int $mode
      * @param ?string $app
      * @param int $appid
+     * @param int $timeout
      * @return Result
      */
-    public function downloadFile($url, string $object = null, int $mode = 1, ?string $app = null, int $appid = 0): Result {
+    public function downloadFile($url, string $object = null, int $mode = 1, ?string $app = null, int $appid = 0, int $timeout = 600): Result {
         if (is_null($object)) {
             $arr = explode('.', $url);
             $extension = array_pop($arr);
             $object = '/download/' . Date::today() . '/' . Sn::create_guid() . '.' . $extension;
         }
+        $extension = explode('.', $object);
+        $extension = array_pop($extension);
         $client = Http::create($url);
-        if ($mode == 1) {
-            $result = $client->get(60);
-        } else {
-            try {
-                $data = file_get_contents($url);
-                $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $data);
-                return Result::success($this->server['CDN_DOMAIN'] . $object);
-            } catch (Throwable $e) {
-                return Result::error($e->getMessage());
+        $tmpFile = APP_TMP_PATH . '/' . md5($object) . '.' . $extension;
+        $downloadResult = $client->download($tmpFile, $timeout);
+        if ($downloadResult->hasError() || !file_exists($tmpFile)) {
+            file_exists($tmpFile) and unlink($tmpFile);
+            return Result::error('源文件下载失败:' . $downloadResult->getMessage());
+        }
+        $uploadResult = $this->uploadFile($tmpFile, $object);
+        if ($uploadResult->hasError()) {
+            file_exists($tmpFile) and unlink($tmpFile);
+            return Result::error('上传文件失败:' . $uploadResult->getMessage());
+        }
+        if (!is_null($app)) {
+            //定义文件信息
+            $extension = explode('.', $object);
+            $extension = array_pop($extension);
+            $content_type = MimeTypes::get_mimetype(strtolower($extension));
+            $fileTypeArr = explode('/', $content_type);
+            $fileType = $fileTypeArr[0];
+            $pathArr = explode("/", $object);
+            $ossAr = AttachmentTable::factory();
+            $ossAr->file_original_name = array_pop($pathArr);
+            $ossAr->file_size = 0;
+            $ossAr->oss_server = $this->server['account'];
+            $ossAr->oss_bucket = $this->server['BUCKET'];
+            $ossAr->file_ext = strtolower($extension);
+            $ossAr->file_type = $fileType;
+            $ossAr->oss_object = $object;
+            $ossAr->created_scene = 1;
+            $ossAr->created_uid = 1;
+            $ossAr->created_at = time();
+            $ossAr->app = $app;
+            $ossAr->app_id = $appid;
+            if (!$ossAr->save()) {
+                file_exists($tmpFile) and unlink($tmpFile);
+                return Result::error($ossAr->getError());
             }
-//            $tmpFile = APP_TMP_PATH.'/' . $object;
-//            $result = $client->download($tmpFile);
         }
-        if ($result->hasError()) {
-            return Result::error($result->getMessage());
-        }
-        $client->close();
-        try {
-            $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $result->getData());
-            if (!is_null($app)) {
-                //定义文件信息
-                $extension = explode('.', $object);
-                $extension = array_pop($extension);
-                $content_type = MimeTypes::get_mimetype(strtolower($extension));
-                $fileTypeArr = explode('/', $content_type);
-                $fileType = $fileTypeArr[0];
-                $pathArr = explode("/", $object);
-                $ossAr = AttachmentTable::factory();
-                $ossAr->file_original_name = array_pop($pathArr);
-                $ossAr->file_size = 0;
-                $ossAr->oss_server = $this->server['account'];
-                $ossAr->oss_bucket = $this->server['BUCKET'];
-                $ossAr->file_ext = strtolower($extension);
-                $ossAr->file_type = $fileType;
-                $ossAr->oss_object = $object;
-                $ossAr->created_scene = 1;
-                $ossAr->created_uid = 1;
-                $ossAr->created_at = time();
-                $ossAr->app = $app;
-                $ossAr->app_id = $appid;
-                if (!$ossAr->save()) {
-                    return Result::error($ossAr->getError());
-                }
-            }
-            return Result::success($this->server['CDN_DOMAIN'] . $object);
-        } catch (Throwable $e) {
-            return Result::error($e->getMessage());
-        }
+        file_exists($tmpFile) and unlink($tmpFile);
+        return Result::success($this->server['CDN_DOMAIN'] . (str_starts_with($object, "/") ? "" : "/") . $object);
+
+//        if ($mode == 1) {
+//            $result = $client->get(60);
+//        } else {
+//            try {
+//                $data = file_get_contents($url);
+//                $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $data);
+//                return Result::success($this->server['CDN_DOMAIN'] . $object);
+//            } catch (Throwable $e) {
+//                return Result::error($e->getMessage());
+//            }
+//
+//        }
+//        if ($result->hasError()) {
+//            return Result::error($result->getMessage());
+//        }
+//        $client->close();
+//        try {
+//            $this->client()->putObject($this->server['BUCKET'], str_starts_with($object, "/") ? substr($object, 1) : $object, $result->getData());
+//            if (!is_null($app)) {
+//                //定义文件信息
+//                $extension = explode('.', $object);
+//                $extension = array_pop($extension);
+//                $content_type = MimeTypes::get_mimetype(strtolower($extension));
+//                $fileTypeArr = explode('/', $content_type);
+//                $fileType = $fileTypeArr[0];
+//                $pathArr = explode("/", $object);
+//                $ossAr = AttachmentTable::factory();
+//                $ossAr->file_original_name = array_pop($pathArr);
+//                $ossAr->file_size = 0;
+//                $ossAr->oss_server = $this->server['account'];
+//                $ossAr->oss_bucket = $this->server['BUCKET'];
+//                $ossAr->file_ext = strtolower($extension);
+//                $ossAr->file_type = $fileType;
+//                $ossAr->oss_object = $object;
+//                $ossAr->created_scene = 1;
+//                $ossAr->created_uid = 1;
+//                $ossAr->created_at = time();
+//                $ossAr->app = $app;
+//                $ossAr->app_id = $appid;
+//                if (!$ossAr->save()) {
+//                    return Result::error($ossAr->getError());
+//                }
+//            }
+//            return Result::success($this->server['CDN_DOMAIN'] . $object);
+//        } catch (Throwable $e) {
+//            return Result::error($e->getMessage());
+//        }
     }
 
     /**
