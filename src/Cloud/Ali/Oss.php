@@ -466,10 +466,15 @@ class Oss extends Aliyun {
         $extension = explode('.', $object);
         $extension = array_pop($extension);
         $client = Http::create($url);
+        $client->setHeader('Referer', $url);
         $tmpFile = APP_TMP_PATH . '/' . md5($object) . '.' . $extension;
         $downloadResult = $client->download($tmpFile, $timeout);
         if ($downloadResult->hasError() || !file_exists($tmpFile)) {
             file_exists($tmpFile) and unlink($tmpFile);
+            if ((int)$client->statusCode() == 302) {
+                $playUrlHeaders = $client->getHeaders();
+                return $this->downloadFile($playUrlHeaders['location'], $object, $timeout);
+            }
             return Result::error('源文件下载失败:' . $downloadResult->getMessage());
         }
         $uploadResult = $this->uploadFile($tmpFile, $object);

@@ -147,6 +147,13 @@ class DashboardController extends Controller {
                 ];
             }
             ArrayHelper::multisort($rows, 'rss_num', SORT_DESC);
+            // 排序完成后移除临时字段 rss_num，避免对外输出
+            foreach ($rows as &$__row) {
+                if (array_key_exists('rss_num', $__row)) {
+                    unset($__row['rss_num']);
+                }
+            }
+            unset($__row);
             return [
                 'rows' => $rows,
                 'online' => $online,
