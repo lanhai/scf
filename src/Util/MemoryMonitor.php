@@ -34,14 +34,13 @@ class MemoryMonitor {
             $table = new Table($output);
             // 初次构建
             $start = time();
-            $updated = date('H:i:s');
             // 富表格输出
             $table->setHeaders([
                 Color::notice('进程名'),
                 Color::notice('PID'),
-                Color::notice('分配'),
-                Color::notice('占用'),
-                Color::notice('峰值'),
+                Color::notice('分配内存'),
+                Color::notice('实际占用'),
+                Color::notice('峰值占用'),
                 Color::notice('RSS'),
                 Color::notice('PSS'),
                 Color::notice('更新时间'),
@@ -52,10 +51,9 @@ class MemoryMonitor {
             Console::write(
                 "共" . Color::notice($data['total']) .
                 "个进程,离线" . Color::red($data['offline']) .
-                "个, PHP占用累计:" . Color::cyan(($data['real_total_mb']) . "MB") .
+                "个, 实际占用:" . Color::cyan(($data['real_total_mb']) . "MB") .
                 ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
                 (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .
-                ", 数据更新时间:" . Color::notice($updated) .
                 ", 查询耗时:" . $cost . "秒"
             );
         });
@@ -65,7 +63,7 @@ class MemoryMonitor {
     public static function start(
         string $processName = 'worker',
         int    $interval = 10000,
-        int    $limitMb = 512,
+        int    $limitMb = 1024,
         bool   $forceExit = false
     ): void {
         if (self::$timerId) {

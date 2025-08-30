@@ -33,14 +33,14 @@ class Updater {
         //Console::startLoading("正在查询远程服务版本", function ($tid) use ($services, $servers, &$renderData, &$list, &$i) {
         foreach ($services as $name => &$service) {
             $server = $servers[$service['server']];
-            $remoteVersion = null;
+            $remoteVersion = '--';
+            $updated = '--';
             //查询远程版本
-            go(function () use (&$remoteVersion, $server, $service) {
+            go(function () use (&$remoteVersion, &$updated, $server, $service) {
                 $rpc = new \Scf\Mode\Rpc\Client($service, $server);
                 $docment = $rpc->__document__();
-                if ($docment->hasError()) {
-                    $remoteVersion = $docment->getMessage();
-                } else {
+                if (!$docment->hasError()) {
+                    $updated = $docment->getData('updated') ?: "";
                     $remoteVersion = $docment->getData('version') ?: "unknow";
                 }
             });
@@ -62,10 +62,13 @@ class Updater {
                 $service['server'],
                 $service['service'],
                 $service['appid'],
-                $remoteVersion,
-                $remoteVersion == $versionLocal ? Color::green($versionLocal) : Color::red($versionLocal)
+                $remoteVersion == '--' ? Color::red("获取失败") : $remoteVersion,
+                $updated,
+                Color::green($versionLocal) . (($remoteVersion !== '--' && $remoteVersion > $versionLocal) ? Color::yellow(" 可升级") : '')
             ];
             $service['namespace'] = $name;
+            $service['remote_version'] = $remoteVersion;
+            $service['local_version'] = $versionLocal;
             $i++;
             $list[] = [
                 'service' => $service,
@@ -75,26 +78,26 @@ class Updater {
         //});
 
         $table
-            ->setHeaders([Color::notice('序号'), Color::notice('命名空间'), Color::notice('服务器'), Color::notice('远程服务'), Color::notice('appid'), Color::notice('远程版本'), Color::notice('本地版本')])
+            ->setHeaders([Color::notice('序号'), Color::notice('命名空间'), Color::notice('服务器'), Color::notice('远程服务'), Color::notice('appid'), Color::notice('远程版本'), Color::notice('更新时间'), Color::notice('本地版本')])
             ->setRows($renderData);
         $table->render();
 
         Console::write('----------------------------------------------------------------------------------------------------');
-        $choice = Console::input("请输入要更新的服务序号:", false);
-        if (!$choice || !is_numeric($choice)) {
+        $choice = Console::select(array_map(function ($item) {
+            return $item['service']['namespace'] . (($item['service']['remote_version'] !== '--' && $item['service']['remote_version'] > $item['service']['local_version']) ? Color::green(" 可升级") : '');
+        }, $list), default: 1, label: "请选择要更新的服务:");
+
+        $selectedService = $list[$choice - 1];
+        if ($selectedService['service']['remote_version'] == '--') {
+            Console::warning("服务端版本获取失败");
             $this->run();
         }
-        $selectedService = $list[$choice - 1];
         if (!$this->write($selectedService)) {
-            $input = Console::input("【" . $selectedService['service']['namespace'] . "】 服务更新失败,请选择下一步操作\n1:更新其它服务\n2:退出");
-            if ($input == 1) {
-                $this->run();
-            }
-            exit();
+            Console::warning("【" . $selectedService['service']['namespace'] . "】服务更新失败");
+            $this->run();
         }
         Console::write('----------------------------------------------------------------------------------------------------');
-        Console::success("【" . $selectedService['service']['namespace'] . "】 服务更新成功");
-        $this->run();
+        Console::success("【" . $selectedService['service']['namespace'] . "】服务更新成功");
     }
 
     protected function write($service) {
@@ -188,6 +191,12 @@ class Updater {
         unset($namespaceArr[count($namespaceArr) - 1]);
         $namespace = implode("\\", $namespaceArr);
         $className = array_pop($paths);
+        $header = "/**
+ * {$document['desc']}
+ * @version {$document['version']}
+ * @updated {$document['updated']}
+ * @sync {$now}
+ */";
         $fileContent = <<<EOF
 <?php
 namespace {$namespace};
@@ -195,20 +204,13 @@ namespace {$namespace};
 use Scf\Mode\Rpc\Client;
 use Scf\Core\Result;
 
-/**
- * {$document['desc']}
- * @version {$document['version']}
- * @updated {$document['updated']}
- * @created {$now}
- * @package Client\Client
- */
+{$header}
 class {$className} extends Client {
 
     
 {$bodyContent}
 }
 EOF;
-        var_dump($clientFile);
         if (!$this->writeFile($clientFile, $fileContent)) {
             return false;
         }
