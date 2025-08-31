@@ -59,7 +59,7 @@ abstract class Aliyun {
     final public static function instance(array $conf = null, ?string $serverName = null): static {
         $class = static::class;
         $_configs = !is_null($conf) ? $conf : Config::get('aliyun');
-        $instanceName = $class . ($_configs[$class]['default_server'] ?? '');
+        $instanceName = $class . ($_configs[$class]['default_server'] ?? '') . ($serverName ?: '');
         if (!isset(self::$_instances[$instanceName])) {
             //$config = is_array($conf) ? Arr::merge($instanceConfig, $conf) : $instanceConfig;
             self::$_instances[$instanceName] = new $class($_configs[$class] ?? [], $_configs['accounts'] ?? [], $serverName);

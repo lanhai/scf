@@ -308,6 +308,9 @@ class ArCreater {
         $createSql .= ")";
         try {
             $createSql = $this->db()->getDatabase()->exec("SHOW CREATE TABLE {$completeTable}")->first()['Create Table'] ?? null;
+            // 去掉导出语句中的 AUTO_INCREMENT=数字，避免在生产环境按开发环境的自增值起步
+            // 例如: ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 → 移除 AUTO_INCREMENT=3
+            $createSql = preg_replace('/\sAUTO_INCREMENT=\d+\b/i', '', $createSql);
         } catch (\PDOException $e) {
             Console::write('读取数据表失败:' . $e->getMessage() . ',请确认输入无误后重试');
             Console::line();
