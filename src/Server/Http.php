@@ -13,6 +13,8 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ATable;
 use Scf\Database\Exception\NullPool;
+use Scf\Helper\JsonHelper;
+use Scf\Helper\StringHelper;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Struct\Node;
@@ -26,6 +28,7 @@ use Swoole\WebSocket\Server;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
+use function Co\run;
 
 
 class Http extends \Scf\Core\Server {
@@ -161,23 +164,9 @@ class Http extends \Scf\Core\Server {
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? 1000);
-        //检查是否存在异常进程
-//        $serverPid = 0;
-//        Coroutine::create(function () use (&$serverPid) {
-//            $serverPid = File::read(SERVER_MASTER_PID_FILE);
-//        });
-//        \Swoole\Event::wait();
-//        if ($serverPid) {
-//            if (Process::kill($serverPid, 0)) {
-//                Console::log(Color::yellow("Server Manager PID:{$serverPid} killed"));
-//                Process::kill($serverPid, SIGKILL);
-//                unlink(SERVER_MASTER_PID_FILE);
-//            }
-//        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
-        //添加一个后台任务管理进程
-        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+        //添加后台任务管理子进程
         $this->addCrontabProcess($serverConfig);
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
@@ -280,6 +269,9 @@ class Http extends \Scf\Core\Server {
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
             $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
         });
+        $this->server->on('pipeMessage', function ($server, $src_worker_id, $data) {
+            echo "#{$server->worker_id} message from #$src_worker_id: $data\n";
+        });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
             $this->log(Color::red('服务器即将关闭'));
@@ -341,6 +333,9 @@ INFO;
             $table->render();
             //自动更新
             APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
+            Timer::tick(1000, function () {
+
+            });
         });
         try {
             //日志备份进程
@@ -357,12 +352,51 @@ INFO;
         }
     }
 
+    public function clearWorkerTimer(): void {
+        $server = $this->server;
+        // 向所有 worker 广播清理定时器（通过 SIGUSR1）
+        $workerNum = (int)($server->setting['worker_num'] ?? 0);
+        $taskNum = (int)($server->setting['task_worker_num'] ?? 0);
+        // 普通 worker
+        for ($i = 0; $i < $workerNum; $i++) {
+            //$server->sendMessage('cleanTimer', $i);
+            $pid = $server->getWorkerPid($i);
+            if ($pid > 0) Process::kill($pid, SIGUSR2);
+        }
+        // task worker
+        for ($i = 0; $i < $taskNum; $i++) {
+            //$server->sendMessage('cleanTimer', $workerNum + $i);
+            $pid = $server->getWorkerPid($workerNum + $i);
+            if ($pid > 0) Process::kill($pid, SIGUSR2);
+        }
+
+        Console::info('【Server】已向所有 worker 发送清理定时器指令');
+    }
+
+    /**
+     * 给CrontabManager 发送消息
+     * @param $cmd
+     * @param array $params
+     * @return bool|int
+     */
+    public function sendCommandToCrontabManager($cmd, array $params = []): bool|int {
+        $socket = $this->crontabManagerProcess->exportSocket();
+        return $socket->send(JsonHelper::toJson([
+            'command' => $cmd,
+            'params' => $params,
+        ]));
+    }
+
+    protected Process $crontabManagerProcess;
+
     /**
      * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
      * @param $config
      */
     protected function addCrontabProcess($config): void {
-        $crontabProcess = new Process(function () use ($config) {
+        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+        $crontabProcess = new Process(function (Process $process) use ($config) {
             //等待服务器启动完成
             while (true) {
                 if (Runtime::instance()->serverStatus()) {
@@ -372,17 +406,68 @@ INFO;
             }
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
-                //if (!Runtime::instance()->crontabProcessStatus()) {
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                //Runtime::instance()->crontabProcessStatus(true);
-                CrontabManager::start();
-                //}
-                //使用管理进程id判断是否迭代,迭代则重新启动进程
-                //Runtime::instance()->crontabProcessStatus(false);
-                Console::warning("【Server】Crontab#{$managerId}管理进程已迭代,重启所有任务进程");
-                sleep(1);
+                if (!Runtime::instance()->crontabProcessStatus()) {
+                    Runtime::instance()->crontabProcessStatus(true);
+                    $taskList = CrontabManager::start();
+                    if ($taskList) {
+                        Console::info("【Server】Crontab#{$managerId} 排程任务已创建");
+                        while ($ret = Process::wait(false)) {
+                            //Console::warning("process exit:" . $ret['pid']);
+                            if ($t = CrontabManager::getTaskTableByPid($ret['pid'])) {
+                                CrontabManager::removeTaskTable($t['id']);
+                            }
+                        }
+                    }
+                }
+                $tasks = CrontabManager::getTaskTable();
+                if (!$tasks) {
+                    Runtime::instance()->crontabProcessStatus(false);
+                } else {
+                    foreach ($tasks as $processTask) {
+                        if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
+                            CrontabManager::errorReport($processTask);
+                        }
+                        $taskInstance = CrontabManager::getTaskTableById($processTask['id']);
+                        if ($taskInstance['is_running'] == STATUS_OFF) {
+                            sleep($processTask['retry_timeout'] ?? 60);
+                            if ($managerId == $processTask['manager_id']) {
+                                CrontabManager::createTaskProcess($processTask);
+                            } else {
+                                CrontabManager::removeTaskTable($processTask['id']);
+                            }
+                        } elseif ($taskInstance['manager_id'] !== $managerId) {
+//                        if (Process::kill((int)$taskInstance['pid'], 0)) {
+//                            Process::kill((int)$taskInstance['pid'], SIGKILL);
+//                        }
+                            CrontabManager::removeTaskTable($processTask['id']);
+                        }
+                    }
+                }
+
+                run(function () use ($process) {
+                    $socket = $process->exportSocket();
+                    $msg = $socket->recv(timeout: 5);
+                    if ($msg && StringHelper::isJson($msg)) {
+                        $payload = JsonHelper::recover($msg);
+                        $command = $payload['command'] ?? 'unknow';
+                        $params = $payload['params'] ?? [];
+                        switch ($command) {
+                            case 'upgrade':
+                                Console::warning("【Server】Crontab 收到升级指令，管理器已迭代");
+                                //Runtime::instance()->crontabProcessStatus(false);
+                                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+                                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                                break;
+                            default:
+                                Console::info($command);
+                        }
+                    }
+                    unset($socket);
+                });
             }
         });
+        $this->crontabManagerProcess = $crontabProcess;
         $pid = $this->server->addProcess($crontabProcess);
         $this->log("Crontab 管理进程ID编号:{$pid}");
         //redis队列管理进程
@@ -397,7 +482,7 @@ INFO;
                     }
                     sleep(1);
                 }
-                $managerId = Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                 define('IS_REDIS_QUEUE_PROCESS', true);
                 while (true) {
                     if (!Runtime::instance()->redisQueueProcessStatus()) {
@@ -459,8 +544,12 @@ INFO;
             if ($countdown == 0) {
                 Timer::clear($id);
                 //定时任务迭代
-                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+//                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+//                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                $this->sendCommandToCrontabManager('upgrade', [
+                    'scene' => 'reload'
+                ]);
+                $this->clearWorkerTimer();
                 $this->server->reload();
                 //重启控制台
                 if (App::isMaster()) {

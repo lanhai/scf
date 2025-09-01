@@ -11,7 +11,6 @@ use Scf\Core\Console;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Router;
-use Scf\Server\Http;
 use Scf\Util\MemoryMonitor;
 use Swoole\Process;
 use Swoole\Timer;
@@ -38,7 +37,6 @@ class WorkerListener extends Listener {
         } catch (Exception $e) {
             Console::error($e->getMessage());
         }
-        MemoryMonitor::start('worker-' . ($workerId + 1));
         if ($workerId == 0) {
             $srcPath = App::src();
             $version = App::version();
@@ -67,6 +65,18 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
+        //监控内存使用
+        MemoryMonitor::start('worker-' . ($workerId + 1));
+        Process::signal(SIGUSR2, function () use ($workerId) {
+            try {
+                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器");
+                // 清理所有定时器
+                MemoryMonitor::stop();
+                Timer::clearAll();
+            } catch (Throwable $e) {
+                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage());
+            }
+        });
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
@@ -78,6 +88,5 @@ INFO;
     }
 
     protected function onWorkerStop(Server $server, $workerId): void {
-        MemoryMonitor::stop($workerId);
     }
 }

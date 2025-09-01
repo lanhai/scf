@@ -145,7 +145,7 @@ class SocketListener extends Listener {
                     break;
                 case 'reload':
                     $server->push($frame->fd, "start reload");
-                    Http::server()->reload();
+                    Http::instance()->reload();
                     break;
                 case 'version':
                     $version = Updater::instance()->getVersion();
