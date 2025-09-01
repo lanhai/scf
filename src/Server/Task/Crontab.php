@@ -5,6 +5,7 @@ namespace Scf\Server\Task;
 use Generator;
 use JetBrains\PhpStorm\ArrayShape;
 use Scf\Cache\Redis;
+use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Log;
@@ -150,14 +151,19 @@ class Crontab extends Struct {
         if (!$masterDB->sIsMember($setKey, $this->redisTaskKey())) {
             $masterDB->sAdd($setKey, $this->redisTaskKey());
         }
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         //迭代检查计时器
-        Timer::tick(3000, function () use ($managerId) {
-            if (!$this->pid) {
-                $this->pid = CrontabManager::getTaskTableById($this->id)['pid'] ?? 0;
-            }
-            if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+        Timer::tick(2000, function () {
+            if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+                //Console::warning("【Crontab#" . $this->manager_id . "】[{$this->name}-{$this->namespace}]管理进程已迭代,清除所有定时器");
+                MemoryMonitor::stop();
                 Timer::clearAll();
+                return;
+            }
+            if ($this->pid <= 0) {
+                $this->pid = CrontabManager::getTaskTableById($this->id)['pid'] ?? 0;
+                $this->update([
+                    'pid' => $this->pid,
+                ]);
             }
             $this->sync();
             if ($this->isExpired()) {
@@ -169,7 +175,6 @@ class Crontab extends Struct {
             $this->startTask();
         });
     }
-
 
     /**
      * 执行任务
@@ -263,7 +268,7 @@ class Crontab extends Struct {
      */
     public function isAlive(int $version = 1): bool {
         if ($this->isOrphan() || $version !== $this->running_version) {
-            Console::warning("【Crontab#" . $this->running_version . "】{$this->name}[{$this->namespace}]是孤儿进程,已取消执行");
+            $this->log("孤儿进程,已取消执行");
             return false;
         }
         $this->latest_alive = time();
@@ -320,7 +325,7 @@ class Crontab extends Struct {
      */
     public function log($msg): void {
         $arr = explode("\\", $this->namespace);
-        Console::log('【Crontab】[' . $this->name . '|' . array_pop($arr) . '|#' . $this->running_version . ']' . $msg);
+        App::isDevEnv() and Console::log('【Crontab】[' . $this->name . '|' . array_pop($arr) . '|' . $this->manager_id . '-' . $this->running_version . ']' . $msg);
         //保存日志到Redis&日志文件
         $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->namespace));
         Manager::instance()->addLog('crontab', ['task' => $taskName, 'message' => Log::filter($msg), 'date' => date('Y-m-d H:i:s')]);

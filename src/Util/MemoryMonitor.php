@@ -74,8 +74,7 @@ class MemoryMonitor {
             $currentManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
             if ($managerId !== $currentManagerId) {
                 $managerId = $currentManagerId;
-                //Timer::clear(self::$timerId);
-                Timer::clearAll();
+                Timer::clear(self::$timerId);
                 return;
             }
             $usage = memory_get_usage(true);
@@ -110,7 +109,7 @@ class MemoryMonitor {
                 }
             }
 
-            $key = $processName;// "MEMORY_MONITOR:" . $processName . ":" . SERVER_NODE_ID;
+            $key = $processName;
             $data = [
                 'process' => $processName,
                 'usage_mb' => $usageMb,
@@ -127,12 +126,6 @@ class MemoryMonitor {
                 $processList[] = $key;
             }
             Runtime::instance()->set('MEMORY_MONITOR_KEYS', $processList);
-            //Redis::pool()->set($key, $data, intval($interval / 1000) + 5);
-            //$globalSetKey = 'MEMORY_MONITOR_KEYS_' . SERVER_NODE_ID;
-//            if (!Redis::pool()->sIsMember($globalSetKey, $key)) {
-//                Redis::pool()->sAdd($globalSetKey, $key);
-//            }
-
             if ($limitMb > 0 && $usageMb > $limitMb) {
                 Console::warning("[MemoryMonitor][WARN] {$processName} memory exceed {$limitMb}MB, current={$usageMb}MB");
                 if ($forceExit) {
@@ -147,7 +140,6 @@ class MemoryMonitor {
         // 启动第一次
         self::$timerId = Timer::after($interval, $run);
     }
-
 
     public static function stop(): void {
         if (self::$timerId) {

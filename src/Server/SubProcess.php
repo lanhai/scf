@@ -6,9 +6,7 @@ use Exception;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Console;
-use Scf\Core\Key;
 use Scf\Core\Log;
-use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Root;
 use Scf\Server\Manager as ServerManager;
@@ -142,12 +140,14 @@ class SubProcess {
                             Console::write($f);
                         }
                         Console::warning('-------------------------------------------');
+                        $httpServer = Http::instance();
+                        $httpServer->clearWorkerTimer();
+                        $httpServer->sendCommandToCrontabManager('upgrade');
                         $server->reload();
                         // Console::info("重启状态:" . $this->server->reload());
                         //定时任务迭代
-                        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-                        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-
+//                        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+//                        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
                         if ($port && App::isMaster()) {
                             $dashboardHost = PROTOCOL_HTTP . 'localhost:' . Runtime::instance()->dashboardPort() . '/reload';
                             $client = \Scf\Client\Http::create($dashboardHost);

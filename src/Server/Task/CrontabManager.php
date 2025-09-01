@@ -20,6 +20,7 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Swoole\Event;
 use Swoole\Process;
+use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
@@ -36,6 +37,7 @@ class CrontabManager {
         self::$tasks = [];
         $serverConfig = Config::server();
         $list = [];
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
         if (App::isMaster() && $enableStatistics) {
             $list[] = [
@@ -45,7 +47,8 @@ class CrontabManager {
                 'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
                 'mode' => Crontab::RUN_MODE_LOOP,
                 'interval' => $serverConfig['db_statistics_interval'] ?? 3,
-                'timeout' => 3600
+                'timeout' => 3600,
+                'manager_id' => $managerId
             ];
         }
         if (!$modules = App::getModules()) {
@@ -68,7 +71,6 @@ class CrontabManager {
         }
         init:
         if ($list) {
-            $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
             foreach ($list as $task) {
                 $task['id'] = 'CRONTAB:' . md5(SERVER_NODE_ID . App::id() . $task['namespace']);
                 $task['manager_id'] = $managerId;
@@ -96,14 +98,13 @@ class CrontabManager {
 
     /**
      * 开启进程
-     * @return int
+     * @return array
      */
-    public static function start(): int {
+    public static function start(): array {
         if (!App::isReady() || SERVER_CRONTAB_ENABLE != SWITCH_ON) {
-            return time();
+            return [];
         }
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $process = new Process(function () use ($managerId) {
+        $process = new Process(function ()  {
             App::mount();
             $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
             $key = self::redisSetKey();
@@ -127,13 +128,13 @@ class CrontabManager {
         $taskList = static::getTaskTable();
         if (!$taskList) {
             //没有定时任务也启动一个计时器
-            while (true) {
-                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                    break;
-                }
-                sleep(App::isDevEnv() ? 5 : 60);
-            }
-            return time();
+//            while (true) {
+//                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+//                    break;
+//                }
+//                sleep(App::isDevEnv() ? 5 : 60);
+//            }
+            return [];
         }
         foreach ($taskList as &$task) {
             $task['pid'] = static::createTaskProcess($task);
@@ -160,28 +161,28 @@ class CrontabManager {
             ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('进程ID')])
             ->setRows($renderData);
         $table->render();
-        while (true) {
-            $tasks = static::getTaskTable();
-            if (!$tasks) {
-                break;
-            }
-            foreach ($tasks as $processTask) {
-                if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
-                    static::errorReport($processTask);
-                }
-                $status = static::getTaskTableById($processTask['id']);
-                if ($status['is_running'] == STATUS_OFF) {
-                    sleep($processTask['retry_timeout'] ?? 5);
-                    if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
-                        static::createTaskProcess($processTask);
-                    } else {
-                        static::removeTaskTable($processTask['id']);
-                    }
-                }
-            }
-            sleep(5);
-        }
-        return time();
+//        while (true) {
+//            $tasks = static::getTaskTable();
+//            if (!$tasks) {
+//                break;
+//            }
+//            foreach ($tasks as $processTask) {
+//                if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
+//                    static::errorReport($processTask);
+//                }
+//                $status = static::getTaskTableById($processTask['id']);
+//                if ($status['is_running'] == STATUS_OFF) {
+//                    sleep($processTask['retry_timeout'] ?? 5);
+//                    if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
+//                        static::createTaskProcess($processTask);
+//                    } else {
+//                        static::removeTaskTable($processTask['id']);
+//                    }
+//                }
+//            }
+//            sleep(5);
+//        }
+        return $taskList;
     }
 
     /**
@@ -189,8 +190,8 @@ class CrontabManager {
      * @param $task
      * @return bool|int|array
      */
-    protected static function createTaskProcess($task): bool|int|array {
-        $process = new Process(function () use ($task) {
+    public static function createTaskProcess($task): bool|int|array {
+        $process = new Process(function (Process $process) use ($task) {
             App::mount();
             register_shutdown_function(function () use ($task) {
                 $error = error_get_last();
@@ -210,24 +211,37 @@ class CrontabManager {
                     Event::wait();
                 }
             }
-            static::removeTaskTable($task['id']);
+            //static::removeTaskTable($task['id']);
+            Event::exit();
+            $process->exit();
+            // 注意：exit 后面的代码不会被执行
         });
         $pid = $process->start();
+
         static::updateTaskTable($task['id'], [
             'id' => $task['id'],
             'namespace' => $task['namespace'],
             'pid' => $pid,
             'is_running' => STATUS_ON,
+            'manager_id' => $task['manager_id']
         ]);
         return $pid;
     }
 
-    protected static function getTaskTable(): array {
+    public static function getTaskTable(): array {
         return CrontabTable::instance()->rows();
     }
 
     public static function getTaskTableById($id) {
         return CrontabTable::instance()->get($id) ?: [];
+    }
+
+    public static function getTaskTableByPid($pid): array {
+        $tasks = CrontabTable::instance()->rows();
+        $item = array_filter($tasks, function ($task) use ($pid) {
+            return $task['pid'] == $pid;
+        });
+        return $item ? array_values($item)[0] : [];
     }
 
     /**
@@ -260,7 +274,7 @@ class CrontabManager {
         return CrontabTable::instance()->rows();
     }
 
-    protected static function removeTaskTable($id): array {
+    public static function removeTaskTable($id): array {
         if (CrontabTable::instance()->exist($id)) {
             CrontabTable::instance()->delete($id);
         }
@@ -280,7 +294,7 @@ class CrontabManager {
      * @param $processTask
      * @return void
      */
-    protected static function errorReport($processTask): void {
+    public static function errorReport($processTask): void {
         $errorInfo = Runtime::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR_INFO') ?: "未知错误";
         static::updateTaskTable($processTask['id'], [
             'is_running' => STATUS_OFF,
@@ -351,7 +365,7 @@ class CrontabManager {
             }
         }
         clearstatcache();
-        return $dir . '/' . md5($namespace) . '.override.json';
+        return $dir . '/' . str_replace("\\", "", $namespace) . '.override.json';
     }
 
     /**
