@@ -152,7 +152,7 @@ class Crontab extends Struct {
             $masterDB->sAdd($setKey, $this->redisTaskKey());
         }
         //迭代检查计时器
-        Timer::tick(2000, function () {
+        Timer::tick(5000, function () {
             if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
                 //Console::warning("【Crontab#" . $this->manager_id . "】[{$this->name}-{$this->namespace}]管理进程已迭代,清除所有定时器");
                 MemoryMonitor::stop();
