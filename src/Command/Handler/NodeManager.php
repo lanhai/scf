@@ -260,7 +260,7 @@ class NodeManager {
                 $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
                 $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
                 $node = Node::factory($node);
-                if (time() - $node->heart_beat >= 3) {
+                if (time() - $node->heart_beat >= 30) {
                     return;
                 }
                 try {
