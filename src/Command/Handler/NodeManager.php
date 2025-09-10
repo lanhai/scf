@@ -276,7 +276,6 @@ class NodeManager {
                         if ($reply) {
                             if (!$reply->data) {
                                 $count++;
-                                //Console::info("【NODE-" . $node->ip . "】升级完成", false);
                                 break;
                             } else {
                                 Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
