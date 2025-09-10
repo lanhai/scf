@@ -42,7 +42,7 @@ class SubProcess {
                                 register($process, $server, $node);
                             });
                         }
-                        Timer::tick(1000, function () use ($manager, $node, $server, $process) {
+                        Timer::tick(1000 * 10, function () use ($manager, $node, $server, $process) {
                             $manager->heartbeat($server, $node);
                         });
                         \Swoole\Event::wait();
@@ -50,7 +50,6 @@ class SubProcess {
                         Console::log('【Server】节点报道失败:' . Color::red($exception->getMessage()));
                     }
                 }
-
                 register($process, $server, $node);
             }
         });
@@ -68,7 +67,7 @@ class SubProcess {
                 Console::info("【Server】日志备份PID:" . $process->pid, false);
                 App::mount();
                 $logger = Log::instance();
-                Timer::tick(3000, function () use ($logger, $server, $process) {
+                Timer::tick(5000, function () use ($logger, $server, $process) {
                     $logger->backup();
                 });
                 \Swoole\Event::wait();
