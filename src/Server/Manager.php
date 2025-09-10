@@ -323,7 +323,7 @@ class Manager extends Component {
         $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $node = $this->getNodeByFingerprint($fingerprint);
         if ($node) {
-            if (time() - $node['heart_beat'] < 5) {
+            if (time() - $node['heart_beat'] < 30) {
                 return false;
             }
             $key = App::id() . '-node-' . $node['id'];
@@ -354,7 +354,7 @@ class Manager extends Component {
                     continue;
                 }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] > 5 && $online) {
+                if (time() - $node['heart_beat'] > 30 && $online) {
                     $node['online'] = false;
                     continue;
                 }
