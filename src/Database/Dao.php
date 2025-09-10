@@ -25,6 +25,8 @@ use Throwable;
 
 /**
  * 数据库访问对象Database Access Objects
+ * @version 1.3
+ * @updated 2025-09-10 10:33:34
  */
 class Dao extends Struct {
     /**
@@ -598,10 +600,15 @@ class Dao extends Struct {
             foreach ($sqlStatements as $sql) {
                 try {
                     Pdo::master($this->getDb())->getDatabase()->exec($sql)->get();
-                    Console::success("【Database】" . $sql . "=>执行成功");
+                    Console::info("【Database】" . $sql . " => " . Color::green('执行成功'));
                 } catch (Throwable $exception) {
-                    $hasError = true;
-                    Console::error("【Database】" . $sql . "=>" . $exception->getMessage());
+                    $msg = $exception->getMessage();
+                    if (!$this->isIgnorableSchemaError($msg)) {
+                        $hasError = true;
+                        Console::info("【Database】" . $sql . " => " . Color::red($msg));
+                    } else {
+                        Console::info("【Database】(忽略) " . $sql . " => " . $msg);
+                    }
                 }
             }
             update:
@@ -1123,6 +1130,29 @@ class Dao extends Struct {
         }
         $uniqueKey = $this->getPrimaryKey();
         return !empty($this->$uniqueKey) ? $this->$uniqueKey : null;
+    }
+
+    /**
+     * 判断是否为可忽略的表结构变更错误
+     * 典型场景：
+     * - 字段已存在 / 不存在（ADD/MODIFY/DROP COLUMN）
+     * - 索引已存在 / 不存在（ADD/DROP INDEX）
+     * - 主键重复定义 / 不存在（PRIMARY KEY）
+     */
+    private function isIgnorableSchemaError(string $message): bool {
+        $m = strtolower($message);
+        return
+            // Column cases
+            str_contains($m, 'column already exists') ||
+            str_contains($m, 'duplicate column name') ||
+            str_contains($m, 'unknown column') ||                              // e.g. MODIFY/DROP 时列不存在
+            // Index cases
+            str_contains($m, 'duplicate key name') ||                          // 索引已存在
+            str_contains($m, "can't drop index") ||                            // 索引不存在
+            (str_contains($m, "can't drop") && str_contains($m, 'check that') && str_contains($m, 'exists')) ||
+            // Primary key cases
+            str_contains($m, 'multiple primary key defined') ||                // 已有主键
+            str_contains($m, "can't drop 'primary'");                          // 没有主键可删
     }
 
     /**
