@@ -42,7 +42,7 @@ class SubProcess {
                                 register($process, $server, $node);
                             });
                         }
-                        Timer::tick(5000, function () use ($manager, $node, $server, $process) {
+                        Timer::tick(10000, function () use ($manager, $node, $server, $process) {
                             $manager->heartbeat($server, $node);
                         });
                         \Swoole\Event::wait();
