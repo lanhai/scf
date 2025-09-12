@@ -56,6 +56,9 @@ class Manager extends Component {
                 sleep(3);
                 return $this->getMasterHost();
             }
+            if (App::isMaster()) {
+                $node['ip'] = '127.0.0.1';
+            }
             $hostIsIp = filter_var($node['ip'], FILTER_VALIDATE_IP) !== false;
             if ($hostIsIp) {
                 $host = $node['ip'] . ':' . $node['port'];

@@ -245,6 +245,7 @@ class NodeManager {
             'type' => $type,
             'version' => $version,
         ]);
+        return Result::success();
 
 //        $this->nodes = Manager::instance()->getServers();
 //        if (!$this->nodes) {
