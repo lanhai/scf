@@ -40,9 +40,9 @@ class Http {
     public static function create($url, int $port = 0, array $certificate = null): static {
         $parsedUrl = parse_url($url);
         $protocol = $parsedUrl['scheme'] ?? 'http';
-        $host = $parsedUrl['host'];
+        $host = $parsedUrl['host'] ?? $url;
         $path = $parsedUrl['path'] ?? '/';
-        $port = $parsedUrl['port'] ?? ($protocol == 'https' ? 443 : 80);
+        $port = $port ?: ($parsedUrl['port'] ?? ($protocol == 'https' ? 443 : 80));
         if (!empty($parsedUrl['query'])) {
             $path .= '?' . $parsedUrl['query'];
         }
