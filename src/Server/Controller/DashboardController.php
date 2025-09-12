@@ -449,7 +449,6 @@ class DashboardController extends Controller {
             'port' => Request\Validator::required("端口号不能为空"),
         ])->assign($host, $port);
         $client = Http::create($host . '/install', $port);
-
         $app = App::info();
         $installData = [
             str_shuffle(time()) => time(),
