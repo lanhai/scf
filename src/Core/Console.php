@@ -3,11 +3,11 @@
 namespace Scf\Core;
 
 use JetBrains\PhpStorm\NoReturn;
-use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
+use Scf\Server\Manager;
 use Scf\Util\Time;
 use Swoole\Coroutine;
 use Swoole\Timer;
@@ -17,69 +17,23 @@ use function Laravel\Prompts\text;
 
 /**
  * 带推送功能的控制台打印
+ * @version 1.11
+ * @updated 2025-09-12 16:42:20
  */
 class Console {
     use Singleton;
 
-    protected static bool $enablePush = true;
-    private static string $subscribersTableKey = 'log_subscribers';
+    protected static string $enablePushKey = 'CONSOLE_LOG_PUSH_ENABLE';
 
     /**
-     * 设置服务器对象,此方法必须放在Config:init()后执行,否则读取不到配置文件
-     * @param bool $status
+     * 开启日志推送
+     * @param int $status
      * @return void
      */
-    public static function enablePush(bool $status = true): void {
-        self::$enablePush = $status;
-        if (Runtime::instance()->get(self::$subscribersTableKey)) {
-            Runtime::instance()->delete(self::$subscribersTableKey);
-        }
+    public static function enablePush(int $status = 1): void {
+        Runtime::instance()->set(self::$enablePushKey, $status);
     }
 
-    /**
-     * 订阅日志推送
-     * @param $fd
-     * @return bool
-     */
-    public static function subscribe($fd): bool {
-        $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-        if (!in_array($fd, $subscribers)) {
-            $subscribers[] = $fd;
-            return Runtime::instance()->set(self::$subscribersTableKey, $subscribers);
-        }
-        return true;
-    }
-
-    /**
-     * 取消订阅
-     * @param $fd
-     * @return bool
-     */
-    public static function unsubscribe($fd): bool {
-        $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-        if ($subscribers) {
-            foreach ($subscribers as $key => $subscriber) {
-                if ($fd == $subscriber) {
-                    unset($subscribers[$key]);
-                }
-            }
-            return Runtime::instance()->set(self::$subscribersTableKey, $subscribers);
-        }
-        return true;
-    }
-
-    public static function clearAllSubscribe(): bool {
-        return Runtime::instance()->delete(self::$subscribersTableKey);
-    }
-
-    /**
-     * 判断是否存在日志监听
-     * @return bool
-     */
-    public static function hasSubscriber(): bool {
-        $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-        return count($subscribers) > 0;
-    }
 
     #[NoReturn]
     public static function exit(): void {
@@ -265,25 +219,15 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if (defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
-            //Coroutine::create(function () use ($str) {
+        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
             Timer::after(100, function () use ($str) {
-                $port = Runtime::instance()->httpPort() ?: (defined('SERVER_PORT') ? SERVER_PORT : 9580);
-                $client = Http::create('http://localhost:' . $port . '/@console.message@/');
-                $client->post([
-                    'message' => $str
-                ]);
-                $client->close();
+                Manager::instance()->pushConsoleLog($str);
             });
-//            defer(function () use ($client) {
-//                $client->close();
-//            });
-            //});
         }
         if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
         } else {
-            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";// . " 内存占用:" . Thread::memoryUseage()
+            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";
         }
         echo $str;
         //fwrite(STDOUT, $str);

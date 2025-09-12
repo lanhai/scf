@@ -2,7 +2,6 @@
 
 namespace Scf\Server;
 
-use JetBrains\PhpStorm\ArrayShape;
 use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Core\App;
@@ -12,6 +11,7 @@ use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\ATable;
+use Scf\Core\Table\Runtime;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
@@ -19,11 +19,13 @@ use Scf\Server\Struct\Node;
 use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
+use Swlib\Saber\WebSocket;
 use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Swoole\WebSocket\Server;
 use Throwable;
+use Swlib\Http\Exception\RequestException;
 
 class Manager extends Component {
 
@@ -36,11 +38,227 @@ class Manager extends Component {
         parent::_init();
     }
 
+    public static function clearAllSocketClients(): bool {
+        Runtime::instance()->delete('DASHBOARD_CLIENTS');
+        return Runtime::instance()->delete('NODE_CLIENTS');
+    }
+
     /**
+     * 获取master节点host
      * @return string
      */
-    public function getNodeId(): string {
-        return App::id() . '-node-' . SERVER_NODE_ID;
+    public function getMasterHost(): string {
+        $host = Runtime::instance()->get('_MASTER_HOST_');
+        if (!$host) {
+            $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+            $key = App::id() . ':node:master';
+            if (!$node = $masterDB->get($key)) {
+                sleep(3);
+                return $this->getMasterHost();
+            }
+            $hostIsIp = filter_var($node['ip'], FILTER_VALIDATE_IP) !== false;
+            if ($hostIsIp) {
+                $host = $node['ip'] . ':' . $node['port'];
+            } else {
+                $host = $node['ip'];
+            }
+            Runtime::instance()->set('_MASTER_HOST_', $host);
+        }
+        return $host;
+    }
+
+    /**
+     * 连接master节点
+     * @return WebSocket
+     */
+    public function getMasterSocketConnection(): WebSocket {
+        $socketHost = $this->getMasterHost();
+        if (!str_contains($socketHost, ':')) {
+            $socketHost .= '/dashboard.socket';
+        }
+        try {
+            $socket = SaberGM::websocket('ws://' . $socketHost . '?username=node-' . SERVER_NODE_ID . '&password=' . md5(App::authKey()));
+            if (!$this->wsConnected($socket)) {
+                $cli = $this->getWsClient($socket);
+                $status = $cli->statusCode ?? 'null';
+                $err = $cli->errCode ?? 'null';
+                Console::warning("【Server】连接master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
+                sleep(10);
+                return $this->getMasterSocketConnection();
+            }
+            return $socket;
+        } catch (RequestException $throwable) {
+            Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
+            sleep(10);
+            return $this->getMasterSocketConnection();
+        }
+    }
+
+    /**
+     * 推送控制台日志到master节点
+     * @param $log
+     * @return void
+     */
+    public function pushConsoleLog($log): void {
+        $socketHost = $this->getMasterHost();
+        $client = \Scf\Client\Http::create("http://{$socketHost}/console.socket");
+        $client->post([
+            'message' => $log,
+            'host' => App::isMaster() ? 'master' : SERVER_HOST
+        ]);
+        $client->close();
+    }
+
+    /**
+     * 向所有节点发送指令
+     * @param string $command
+     * @param array $params
+     * @return void
+     */
+    public function sendCommandToAllNodeClients(string $command, array $params = []): void {
+        $server = Http::server();
+        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
+        if ($nodes) {
+            $successed = 0;
+            $changed = false;
+            foreach ($nodes as $index => $fd) {
+                if ($server->exist($fd) && $server->isEstablished($fd) && $server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
+                        'command' => $command,
+                        'params' => $params
+                    ]]))) {
+                    $successed++;
+                } else {
+                    unset($nodes[$index]);
+                    $changed = true;
+                }
+            }
+            if ($changed) {
+                Runtime::instance()->set('NODE_CLIENTS', $nodes);
+            }
+            Console::log("【Server】已向" . Color::cyan($successed) . "个节点发送命令：{$command}");
+        }
+    }
+
+    /**
+     * 添加节点客户端
+     * @param $fd
+     * @return bool
+     */
+    public function addNodeClient($fd): bool {
+        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
+        if (!in_array($fd, $nodes)) {
+            $nodes[] = $fd;
+            Runtime::instance()->set('NODE_CLIENTS', $nodes);
+        }
+        return true;
+    }
+
+    /**
+     * 移除节点客户端
+     * @param $fd
+     * @return bool
+     */
+    public function removeNodeClient($fd): bool {
+        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
+        if (in_array($fd, $nodes)) {
+            $nodes = array_diff($nodes, [$fd]);
+            Runtime::instance()->set('NODE_CLIENTS', $nodes);
+        }
+        return true;
+    }
+
+    /**
+     * 添加控制面板客户端
+     * @param $fd
+     * @return bool
+     */
+    public function addDashboardClient($fd): bool {
+        $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
+        if (!in_array($fd, $nodes)) {
+            $nodes[] = $fd;
+            Runtime::instance()->set('DASHBOARD_CLIENTS', $nodes);
+        }
+        return true;
+    }
+
+    /**
+     * 向所有控制面板连接发送消息
+     * @param string $message
+     * @return void
+     */
+    public function sendMessageToAllDashboardClients(string $message): void {
+        $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
+        if ($nodes) {
+            $server = Http::server();
+            $changed = false;
+            foreach ($nodes as $index => $fd) {
+                if (!$server->exist($fd) || !$server->isEstablished($fd) || !$server->push($fd, $message)) {
+                    unset($nodes[$index]);
+                    $changed = true;
+                }
+            }
+            if ($changed) {
+                // 仅在移除了客户端时才回写更新，避免无意义的写入
+                Runtime::instance()->set('DASHBOARD_CLIENTS', array_values($nodes));
+            }
+        }
+    }
+
+    /**
+     * 移除控制面板客户端
+     * @param $fd
+     * @return bool
+     */
+    public function removeDashboardClient($fd): bool {
+        $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
+        if (in_array($fd, $nodes)) {
+            $nodes = array_diff($nodes, [$fd]);
+            Runtime::instance()->set('DASHBOARD_CLIENTS', $nodes);
+        }
+        return true;
+    }
+
+    /**
+     * 取出 Saber WebSocket 底层 client（不同版本可能有 getClient 方法；否则用反射）
+     */
+    protected function getWsClient(WebSocket $ws) {
+        if (method_exists($ws, 'getClient')) {
+            return $ws->getClient();
+        }
+        $ref = new \ReflectionObject($ws);
+        if ($ref->hasProperty('client')) {
+            $prop = $ref->getProperty('client');
+            //$prop->setAccessible(true);
+            return $prop->getValue($ws);
+        }
+        return null;
+    }
+
+    /**
+     * 判断 Saber WebSocket 是否握手成功（HTTP 101 + connected=true + 无错误码）
+     */
+    protected function wsConnected(WebSocket $ws): bool {
+        $cli = $this->getWsClient($ws);
+        if (!$cli) return false;
+        $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
+        $status = property_exists($cli, 'statusCode') ? (int)$cli->statusCode : 0;
+        $errCode = property_exists($cli, 'errCode') ? (int)$cli->errCode : 0;
+        return $connected && $status === 101 && $errCode === 0;
+    }
+
+    /**
+     * 仅在握手成功的情况下 push，失败返回 false
+     */
+    protected function wsSafePush(WebSocket $ws, string $data): bool {
+        if (!$this->wsConnected($ws)) {
+            return false;
+        }
+        try {
+            $ws->push($data);
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     /**
@@ -90,8 +308,11 @@ class Manager extends Component {
         $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-        $key = $profile->appid . '-node-' . SERVER_NODE_ID;
-        return Redis::pool($this->_config['service_center_server'] ?? 'main')->set($key, $node->toArray(), -1);
+        $nodeId = App::isMaster() ? 'master' : $node->id;
+        $key = $profile->appid . ':node:' . $nodeId;
+        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+        //App::isMaster() and $masterDB->set($profile->appid . '_MASTER_PORT', Runtime::instance()->httpPort(), -1);
+        return $masterDB->set($key, $node->asArray(), 60);
     }
 
     /**
@@ -106,17 +327,20 @@ class Manager extends Component {
         }
         $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         $profile = App::profile();
-        if (!$masterDB->sIsMember($profile->appid . '-nodes', $node->id)) {
-            $masterDB->sAdd($profile->appid . '-nodes', $node->id);
+        $nodeId = App::isMaster() ? 'master' : $node->id;
+        if (!$masterDB->sIsMember($profile->appid . ':nodes', $nodeId)) {
+            $masterDB->sAdd($profile->appid . ':nodes', $nodeId);
         }
-        $key = $profile->appid . '-node-' . $node->id;
-        return $masterDB->set($key, $node->toArray(), -1);
+        $key = $profile->appid . ':node:' . $nodeId;
+        //App::isMaster() and $masterDB->set($profile->appid . '_MASTER_PORT', Runtime::instance()->httpPort(), -1);
+        return $masterDB->set($key, $node->toArray(), 60);
     }
 
+
     /**
+     * 所有节点状态
      * @return array
      */
-    #[ArrayShape(['event' => "string", 'info' => "array", 'servers' => "array", 'framework_update_ready' => "boolean", 'logs' => "array[]"])]
     public function getStatus(): array {
         $servers = $this->getServers();
         $master = 0;
@@ -249,50 +473,6 @@ class Manager extends Component {
     }
 
     /**
-     * 获取master节点
-     * @return ?Node
-     */
-    public function getMasterNode(): ?Node {
-        $servers = $this->getServers();
-        /** @var Node $master */
-        $master = null;
-        foreach ($servers as $item) {
-            $item['framework_build_version'] = $item['framework_build_version'] ?? '--';
-            $item['framework_update_ready'] = $item['framework_update_ready'] ?? false;
-            $node = Node::factory($item);
-            if ($node->role == 'master') {
-                $master = $node;
-                break;
-            }
-        }
-        return $master;
-    }
-
-    /**
-     * 重启排程任务
-     * @return bool
-     */
-    public function restart(): bool {
-        $master = $this->getMasterNode();
-        if (is_null($master)) {
-            return false;
-        }
-        if (SERVER_HOST_IS_IP) {
-            $socketHost = $master->ip . ':' . $master->socketPort;
-        } else {
-            $socketHost = $master->socketPort . '.' . SERVER_HOST;
-        }
-        try {
-            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-            $websocket->push('reload');
-        } catch (Throwable $exception) {
-            Console::log(Color::red("【" . $socketHost . "】" . "连接失败:" . $exception->getMessage()), false);
-            return false;
-        }
-        return true;
-    }
-
-    /**
      * 获取所有节点的指纹
      * @param bool $online
      * @return array
@@ -328,7 +508,7 @@ class Manager extends Component {
             }
             $key = App::id() . '-node-' . $node['id'];
             try {
-                $masterDB->sRemove(App::id() . '-nodes', $node['id']);
+                $masterDB->sRemove(App::id() . ':nodes', $node['id']);
                 $masterDB->delete($key);
                 return true;
             } catch (Throwable $exception) {
@@ -339,22 +519,22 @@ class Manager extends Component {
     }
 
     /**
-     * 获取服务器列表
+     * 获取节点列表
      * @param bool $online
      * @return array
      */
     public function getServers(bool $online = true): array {
         $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        $this->servers = $masterDB->sMembers(App::id() . '-nodes') ?: [];
+        $this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
         $list = [];
         if ($this->servers) {
             foreach ($this->servers as $id) {
-                $key = App::id() . '-node-' . $id;
+                $key = App::id() . ':node:' . $id;
                 if (!$node = $masterDB->get($key)) {
                     continue;
                 }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] > 30 && $online) {
+                if (time() - $node['heart_beat'] > 20 && $online) {
                     $node['online'] = false;
                     continue;
                 }

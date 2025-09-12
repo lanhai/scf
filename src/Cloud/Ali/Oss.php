@@ -469,6 +469,7 @@ class Oss extends Aliyun {
         $client->setHeader('Referer', $url);
         $tmpFile = APP_TMP_PATH . '/' . md5($object) . '.' . $extension;
         $downloadResult = $client->download($tmpFile, $timeout);
+        $client->close();
         if ($downloadResult->hasError() || !file_exists($tmpFile)) {
             file_exists($tmpFile) and unlink($tmpFile);
             if ((int)$client->statusCode() == 302) {

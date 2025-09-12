@@ -8,6 +8,7 @@ use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Log;
 use Scf\Core\Table\Runtime;
+use Scf\Helper\JsonHelper;
 use Scf\Root;
 use Scf\Server\Manager as ServerManager;
 use Scf\Server\Struct\Node;
@@ -15,8 +16,87 @@ use Scf\Util\Dir;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use function Co\run;
 
 class SubProcess {
+
+    public static function connectMaster(Server $server): Process {
+        return new Process(function ($process) use ($server) {
+            if (!Process::kill($server->manager_pid, 0)) {
+                return;
+            }
+            Console::info("【Server】主节点连接PID:" . $process->pid, false);
+            App::mount();
+            run(function () use ($server) {
+                while (true) {
+                    // 主进程存活检测
+                    if (!Process::kill($server->manager_pid, 0)) {
+                        Console::warning('【Server】主进程退出，connectMaster 随之退出');
+                        break;
+                    }
+                    $socket = Manager::instance()->getMasterSocketConnection();
+                    $socket->push('slave-node-report');
+                    // 读循环：直到断开
+                    while (true) {
+                        // 若是非阻塞 recv，则需要小睡避免空转
+                        $reply = $socket->recv();  // 你这边的 recv() 看起来返回对象
+                        if ($reply === false) {
+                            // 读错误：断开
+                            Console::warning('【Server】与master节点连接读错误，准备重连', false);
+                            $socket->close(); // 若有
+                            break;
+                        }
+                        if ($reply && empty($reply->data)) {
+                            Console::warning("【Server】已断开master节点连接", false);
+                            $socket->close(); // 若有
+                            break;
+                        }
+                        if ($reply && !empty($reply->data)) {
+                            Console::info("【Server】收到master消息:" . $reply->data, false);
+                            if (JsonHelper::is($reply->data)) {
+                                $data = JsonHelper::recover($reply->data);
+                                $event = $data['event'] ?? 'message';
+                                if ($event == 'command') {
+                                    $command = $data['data']['command'];
+                                    $params = $data['data']['params'];
+                                    switch ($command) {
+                                        case 'restart':
+                                            $socket->push("[" . SERVER_HOST . "]start reload");
+                                            Http::instance()->reload();
+                                            break;
+                                        case 'appoint_update':
+                                            if (App::appointUpdateTo($params['type'], $params['version'])) {
+                                                $socket->push("[" . SERVER_HOST . "]版本更新成功:{$params['type']} => {$params['version']}");
+                                            } else {
+                                                $socket->push("[" . SERVER_HOST . "]版本更新失败:{$params['type']} => {$params['version']}");
+                                            }
+                                            break;
+                                        default:
+                                            Console::warning("【Server】Command '$command' is not supported", false);
+                                    }
+                                } elseif ($event == 'welcome') {
+                                    Console::success('【Server】已连接到master节点:' . $data['data']['host'], false);
+                                }
+                            }
+                        } else {
+                            // 无数据可读（非阻塞场景）
+                            usleep(100 * 1000); // 100ms，避免 Coroutine::sleep 在非协程环境的问题
+                        }
+                        // 周期性检测主进程是否还在
+                        static $tick = 0;
+                        if ((++$tick % 10) === 0 && !Process::kill($server->manager_pid, 0)) {
+                            Console::warning('【Server】主进程退出，断开并退出');
+                            // $socket->close(); // 若有
+                            break 2; // 跳出两层循环
+                        }
+                    }
+                    // 下一轮外层 while 会尝试重连（带退避）
+                }
+            });
+            \Swoole\Event::wait();
+
+        });
+    }
 
     /**
      * 心跳进程
@@ -42,7 +122,7 @@ class SubProcess {
                                 register($process, $server, $node);
                             });
                         }
-                        Timer::tick(10000, function () use ($manager, $node, $server, $process) {
+                        Timer::tick(5000, function () use ($manager, $node, $server, $process) {
                             $manager->heartbeat($server, $node);
                         });
                         \Swoole\Event::wait();
@@ -50,6 +130,7 @@ class SubProcess {
                         Console::log('【Server】节点报道失败:' . Color::red($exception->getMessage()));
                     }
                 }
+
                 register($process, $server, $node);
             }
         });

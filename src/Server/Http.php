@@ -164,6 +164,8 @@ class Http extends \Scf\Core\Server {
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? 1000);
+        //开启日志推送
+        Console::enablePush($serverConfig['enable_log_push'] ?? 1);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         //添加后台任务管理子进程
@@ -206,23 +208,24 @@ class Http extends \Scf\Core\Server {
             exit(1);
         }
         //监听SOCKET请求
-        $socketPort = self::getUseablePort($this->bindPort + 1);
-        try {
-            $socketServer = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
-            $socketServer->set([
-                'open_http_protocol' => false,
-                'open_http2_protocol' => false,
-                'open_websocket_protocol' => true
-            ]);
-            Runtime::instance()->socketPort($socketPort);
-        } catch (Throwable $exception) {
-            Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
-            exit(1);
-        }
+//        $socketPort = self::getUseablePort($this->bindPort + 1);
+//        try {
+//            $socketServer = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
+//            $socketServer->set([
+//                'open_http_protocol' => false,
+//                'open_http2_protocol' => false,
+//                'open_websocket_protocol' => true
+//            ]);
+//            Runtime::instance()->socketPort($socketPort);
+//        } catch (Throwable $exception) {
+//            Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
+//            exit(1);
+//        }
         //监听RPC服务(tcp)请求
-        if (isset($serverConfig['rpc_port'])) {
+        $rport = RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0);
+        if ($rport) {
             try {
-                $rpcPort = self::getUseablePort($serverConfig['rpc_port']);
+                $rpcPort = self::getUseablePort($rport);
                 /** @var Server $rpcServer */
                 $rpcServer = $this->server->listen('0.0.0.0', $rpcPort, SWOOLE_SOCK_TCP);
                 $rpcServer->set([
@@ -261,7 +264,7 @@ class Http extends \Scf\Core\Server {
                         $server->disconnect($fd);
                     }
                 }
-                Console::clearAllSubscribe();
+                \Scf\Server\Manager::clearAllSocketClients();
             }
         });
         $this->server->on("AfterReload", function () {
@@ -318,9 +321,8 @@ class Http extends \Scf\Core\Server {
 INFO;
             Console::write(Color::cyan($info));
             $renderData = [
-                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
                 ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green($this->bindPort)],
-                ['SOCKET', "--", Color::green(Runtime::instance()->socketPort())],
+                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
             ];
             if ($rpcPort = Runtime::instance()->rpcPort()) {
                 $renderData[] = ['RPC', "--", Color::green($rpcPort)];
@@ -340,6 +342,8 @@ INFO;
         try {
             //日志备份进程
             $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
+            //连接主节点
+            $this->server->addProcess(SubProcess::connectMaster($this->server));
             //心跳进程
             $this->addHeartbeatProcess();
             //启动文件监听进程
@@ -511,8 +515,8 @@ INFO;
         $node->name = $this->name;
         $node->ip = $this->ip;
         $node->fingerprint = APP_FINGERPRINT;
-        $node->port = $this->bindPort;
-        $node->socketPort = Runtime::instance()->socketPort();
+        $node->port = Runtime::instance()->httpPort();
+        $node->socketPort = Runtime::instance()->httpPort();
         $node->role = App::isMaster() ? 'master' : 'slave';
         $node->started = $this->started;
         $node->restart_times = 0;
@@ -571,7 +575,6 @@ INFO;
      */
     public function push($fd, $str): bool {
         if (!$this->server->exist($fd) || !$this->server->isEstablished($fd)) {
-            Console::unsubscribe($fd);
             return false;
         }
         try {

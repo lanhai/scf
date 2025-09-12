@@ -30,7 +30,6 @@ class WorkerListener extends Listener {
         });
         //要使用app命名空间必须先加载模块
         App::mount();
-        Console::enablePush();
         //给每个worker添加RPC服务
         try {
             Rpc::addService($workerId);

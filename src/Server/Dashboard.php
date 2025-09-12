@@ -36,10 +36,10 @@ class Dashboard {
             return;
         }
         if (!App::isReady()) {
-            $port = (SERVER_PORT ?: 9580) + 2;
+            $port = (SERVER_PORT ?: 9580) + 1;
         } else {
             $serverConfig = Config::server();
-            $port = \Scf\Core\Server::getUseablePort(($serverConfig['port'] ?? 9580) + 2);
+            $port = \Scf\Core\Server::getUseablePort((SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1);
         }
         $process = new Process(function () use ($port) {
             try {

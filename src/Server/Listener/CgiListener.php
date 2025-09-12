@@ -5,7 +5,6 @@ namespace Scf\Server\Listener;
 use Scf\Client\Http;
 use Scf\Core\App;
 use Scf\Core\Config;
-use Scf\Core\Console;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
@@ -21,16 +20,17 @@ use Scf\Mode\Web\Response;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Env;
 use Scf\Server\Http as Server;
+use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\Sn;
+use Scf\Util\Time;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Timer;
 use Throwable;
 
 class CgiListener extends Listener {
-    private static string $subscribersTableKey = 'log_subscribers';
 
     /**
      * @param \Swoole\Http\Request $request
@@ -182,18 +182,9 @@ class CgiListener extends Listener {
      * @return bool
      */
     protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/@console.message@/')) {
+        if (str_starts_with($request->server['path_info'], '/console.socket')) {
             $data = Request::instance()->post()->pack();
-            $subscribers = Runtime::instance()->get(self::$subscribersTableKey) ?: [];
-            if ($subscribers) {
-                foreach ($subscribers as $subscriber) {
-                    if (!$this->server->exist($subscriber) || !$this->server->isEstablished($subscriber)) {
-                        Console::unsubscribe($subscriber);
-                        continue;
-                    }
-                    $this->server->push($subscriber, $data['message']);
-                }
-            }
+            Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson(['event' => 'console', 'message' => ['data' => $data['message']], 'time' => date('m-d H:i:s') . "." . substr(Time::millisecond(), -3), 'node' => $data['host']]));
             $response->end('ok');
             return true;
         }
