@@ -87,6 +87,9 @@ class SocketListener extends Listener {
                     }
                     $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->disconnect($frame->fd);
                     break;
+                case '::ping':
+                    $server->push($frame->fd, "::pong");
+                    break;
                 default:
                     Console::info($frame->data, false);
                     $server->push($frame->fd, "message received:" . $frame->data);
