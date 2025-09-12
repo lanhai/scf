@@ -13,13 +13,9 @@ use Scf\Server\Struct\Node;
 use Swlib\Http\Exception\RequestException;
 use Swlib\SaberGM;
 use Swoole\Coroutine;
-use Swoole\Coroutine\Barrier;
 use Swoole\Event;
-use Swoole\Exception;
 use Swoole\Runtime;
 use Symfony\Component\Console\Helper\Table;
-use Symfony\Component\Console\Helper\TableCell;
-use Symfony\Component\Console\Helper\TableSeparator;
 use Symfony\Component\Console\Output\ConsoleOutput;
 
 use function Swoole\Coroutine\run;
@@ -243,54 +239,58 @@ class NodeManager {
 
     /**
      * 向所有节点发送更新到指定版本命令
-     * @throws Exception
      */
     public function appointUpdate($type, $version): Result {
-        $this->nodes = Manager::instance()->getServers();
-        if (!$this->nodes) {
-            return Result::error('节点获取失败');
-        }
-        $barrier = Barrier::make();
-        $count = 0;
-        foreach ($this->nodes as $node) {
-            if (!$node) {
-                continue;
-            }
-            Coroutine::create(function () use ($barrier, $node, $type, $version, &$count) {
-                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
-                $node = Node::factory($node);
-                if (time() - $node->heart_beat >= 30) {
-                    return;
-                }
-                try {
-                    if (SERVER_HOST_IS_IP) {
-                        $socketHost = $node->ip . ':' . $node->socketPort;
-                    } else {
-                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
-                    }
-                    $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-                    $websocket->push('appoint_update:' . $type . '|' . $version);
-                    while (true) {
-                        $reply = $websocket->recv(1);
-                        if ($reply) {
-                            if (!$reply->data) {
-                                $count++;
-                                break;
-                            } else {
-                                Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
-                            }
-                        }
-                        Coroutine::sleep(0.5);
-                    }
+        Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+            'type' => $type,
+            'version' => $version,
+        ]);
 
-                } catch (RequestException $exception) {
-                    Console::error("【node-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
-                }
-            });
-        }
-        Barrier::wait($barrier);
-        return Result::success($count);
+//        $this->nodes = Manager::instance()->getServers();
+//        if (!$this->nodes) {
+//            return Result::error('节点获取失败');
+//        }
+//        $barrier = Barrier::make();
+//        $count = 0;
+//        foreach ($this->nodes as $node) {
+//            if (!$node) {
+//                continue;
+//            }
+//            Coroutine::create(function () use ($barrier, $node, $type, $version, &$count) {
+//                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
+//                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
+//                $node = Node::factory($node);
+//                if (time() - $node->heart_beat >= 30) {
+//                    return;
+//                }
+//                try {
+//                    if (SERVER_HOST_IS_IP) {
+//                        $socketHost = $node->ip . ':' . $node->socketPort;
+//                    } else {
+//                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
+//                    }
+//                    $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
+//                    $websocket->push('appoint_update:' . $type . '|' . $version);
+//                    while (true) {
+//                        $reply = $websocket->recv(1);
+//                        if ($reply) {
+//                            if (!$reply->data) {
+//                                $count++;
+//                                break;
+//                            } else {
+//                                Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
+//                            }
+//                        }
+//                        Coroutine::sleep(0.5);
+//                    }
+//
+//                } catch (RequestException $exception) {
+//                    Console::error("【node-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
+//                }
+//            });
+//        }
+//        Barrier::wait($barrier);
+//        return Result::success($count);
     }
 
     /**

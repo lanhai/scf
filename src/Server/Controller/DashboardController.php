@@ -307,7 +307,6 @@ class DashboardController extends Controller {
     /**
      * 更新
      * @return Result
-     * @throws Exception
      */
     public function actionUpdate(): Result {
         Request::post([
@@ -490,7 +489,7 @@ class DashboardController extends Controller {
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
             $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         } else {
-            $socketHost = $protocol . 'localhost:' . Runtime::instance()->socketPort();
+            $socketHost = $protocol . 'localhost:' . Runtime::instance()->httpPort();
         }
         $status = Manager::instance()->getStatus();
         $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');

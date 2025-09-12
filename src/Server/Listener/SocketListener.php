@@ -6,23 +6,16 @@ use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Exception;
-use Scf\Core\Log;
 use Scf\Helper\JsonHelper;
-use Scf\Command\Color;
 use Scf\Server\Http;
 use Scf\Server\Manager;
-use Scf\Server\Struct\Node;
 use Scf\Util\Auth;
-use Scf\Util\Time;
-use Swlib\SaberGM;
-use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
 use Swoole\Timer;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
-use Swlib\Http\Exception\RequestException;
 use Throwable;
 
 class SocketListener extends Listener {
@@ -36,39 +29,11 @@ class SocketListener extends Listener {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
                 case 'restartAll':
-                    Console::log("【Server】" . Color::yellow("收到重启服务器指令"));
-                    $servers = Manager::instance()->getServers();
-                    foreach ($servers as $node) {
-                        if (!$node) {
-                            continue;
-                        }
-                        $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-                        $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
-                        $node = Node::factory($node);
-                        if (time() - $node->heart_beat >= 3) {
-                            continue;
-                        }
-                        try {
-                            if (SERVER_HOST_IS_IP) {
-                                $socketHost = $node->ip . ':' . $node->socketPort;
-                            } else {
-                                $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
-                            }
-                            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-                            Coroutine::create(function () use ($websocket, $node, $frame, $server) {
-                                $websocket->push('reload');
-                                Coroutine::defer(function () use ($websocket, $frame) {
-                                    $websocket->close();
-                                    unset($websocket);
-                                });
-                            });
-                        } catch (RequestException $exception) {
-                            Console::log(Color::red($socketHost . "连接失败:" . $exception->getMessage()), false);
-                        }
-                    }
+                    Manager::instance()->sendCommandToAllNodeClients('restart');
                     break;
-                //推送服务器运行状态数据
+                //推送服务器运行状态数据到控制面板
                 case 'server_status':
+                    Manager::instance()->addDashboardClient($frame->fd);
                     Timer::tick(1000, function ($id) use ($server, $frame) {
                         $status = Manager::instance()->getStatus();
                         if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
@@ -79,57 +44,8 @@ class SocketListener extends Listener {
                                 Timer::clear($id);
                             }
                         } else {
+                            Manager::instance()->removeDashboardClient($frame->fd);
                             Timer::clear($id);
-                        }
-                    });
-                    //节点控制台消息转发推送
-                    Coroutine::create(function () use ($frame, $server) {
-                        $servers = Manager::instance()->getServers();
-                        foreach ($servers as $node) {
-                            if (!$node) {
-                                continue;
-                            }
-                            $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-                            $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
-                            $node = Node::factory($node);
-                            if (time() - $node->heart_beat >= 3) {
-                                continue;
-                            }
-                            try {
-                                if (SERVER_HOST_IS_IP) {
-                                    $socketHost = $node->ip . ':' . $node->socketPort;
-                                } else {
-                                    $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
-                                }
-                                $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-                                Coroutine::create(function () use ($websocket, $node, $frame, $server) {
-                                    $websocket->push('log_subscribe');
-                                    while ($server->exist($frame->fd)) {
-                                        if (!$server->isEstablished($frame->fd)) {
-                                            break;
-                                        }
-                                        if ($reply = $websocket->recv(5)) {
-                                            if (!$reply->data) {
-                                                Console::log("日志监听连接已断开 from " . $node->ip, false);
-                                                break;
-                                            } else {
-                                                if (!$server->exist($frame->fd)) {
-                                                    break;
-                                                }
-                                                $reply->data = Log::filter($reply->data);
-                                                $server->push($frame->fd, JsonHelper::toJson(['event' => 'console', 'message' => $reply, 'time' => date('m-d H:i:s') . "." . substr(Time::millisecond(), -3), 'node' => $node->ip]));
-                                            }
-                                        }
-                                        Coroutine::sleep(0.1);
-                                    }
-                                    Coroutine::defer(function () use ($websocket, $frame) {
-                                        $websocket->close();
-                                        unset($websocket);
-                                    });
-                                });
-                            } catch (RequestException $exception) {
-                                Console::log(Color::red($socketHost . "连接失败:" . $exception->getMessage()), false);
-                            }
                         }
                     });
                     break;
@@ -139,13 +55,12 @@ class SocketListener extends Listener {
             }
         } else {
             switch ($frame->data) {
-                case 'log_subscribe':
-                    Console::subscribe($frame->fd);
-                    $server->push($frame->fd, "日志订阅成功!会话ID:" . $frame->fd);
-                    break;
-                case 'reload':
-                    $server->push($frame->fd, "start reload");
-                    Http::instance()->reload();
+                case 'slave-node-report':
+                    if (Manager::instance()->addNodeClient($frame->fd)) {
+                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道成功!客户端ID:" . $frame->fd]));
+                    } else {
+                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道失败!客户端ID:" . $frame->fd]));
+                    }
                     break;
                 case 'version':
                     $version = Updater::instance()->getVersion();
@@ -173,6 +88,7 @@ class SocketListener extends Listener {
                     $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->disconnect($frame->fd);
                     break;
                 default:
+                    Console::info($frame->data, false);
                     $server->push($frame->fd, "message received:" . $frame->data);
                     break;
             }
@@ -225,7 +141,10 @@ class SocketListener extends Listener {
             $response->end();
             $fd = $request->fd;
             Event::defer(function () use ($fd) {
-                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'time' => date('Y-m-d H:i:s')]));
+                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
+                    'time' => date('Y-m-d H:i:s'),
+                    'host' => SERVER_HOST
+                ]]));
             });
         }
     }
@@ -249,7 +168,8 @@ class SocketListener extends Listener {
      */
     protected function onClose(Server $server, $fd): void {
         if ($server->isEstablished($fd)) {
-            Console::unsubscribe($fd);
+            Manager::instance()->removeNodeClient($fd);
+            Manager::instance()->removeDashboardClient($fd);
         }
     }
 }
