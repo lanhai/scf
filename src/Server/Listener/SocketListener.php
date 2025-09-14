@@ -28,6 +28,13 @@ class SocketListener extends Listener {
         if (JsonHelper::is($frame->data)) {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
+                case 'appoint_update':
+                    Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+                        'type' => $data['data']['type'],
+                        'version' => $data['data']['version'],
+                    ]);
+                    $server->push($frame->fd, "success");
+                    break;
                 case 'restartAll':
                     Manager::instance()->sendCommandToAllNodeClients('restart');
                     break;

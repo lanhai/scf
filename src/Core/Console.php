@@ -17,8 +17,8 @@ use function Laravel\Prompts\text;
 
 /**
  * 带推送功能的控制台打印
- * @version 1.11
- * @updated 2025-09-12 16:42:20
+ * @version 1.12
+ * @updated 2025-09-13 10:34:53
  */
 class Console {
     use Singleton;
@@ -221,7 +221,7 @@ class Console {
     public static function log(string $str, bool $push = true): void {
         if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
             Timer::after(100, function () use ($str) {
-                Manager::instance()->pushConsoleLog($str);
+                Manager::instance()->pushConsoleLog(Log::filter($str));
             });
         }
         if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {

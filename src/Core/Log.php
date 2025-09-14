@@ -46,8 +46,6 @@ class Log {
 
     public static function filter($msg): string {
         $symbols = [
-            '[0;36m',
-            '[36;4m',
             '[0m',
             '[0;31m',
             '[0;32m',
@@ -56,7 +54,8 @@ class Log {
             '[0;35m',
             '[0;36m',
             '[0;37m',
-            '[1;33m'
+            '[1;33m',
+            '[36;4m',
         ];
         foreach ($symbols as $symbol) {
             $msg = str_replace($symbol, "", $msg);
