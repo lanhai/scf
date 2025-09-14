@@ -99,7 +99,7 @@ class SocketListener extends Listener {
                     break;
                 default:
                     Console::info($frame->data, false);
-                    $server->push($frame->fd, "message received:" . $frame->data);
+                    //$server->push($frame->fd, "message received:" . $frame->data);
                     break;
             }
         }
