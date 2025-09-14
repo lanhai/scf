@@ -197,12 +197,12 @@ class Http extends \Scf\Core\Server {
         try {
             $httpServer = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
             $httpServer->set([
-                'package_max_length' => $serverConfig['package_max_length'] ?? 8 * 1024 * 1024,
+                'package_max_length' => $serverConfig['package_max_length'] ?? 10 * 1024 * 1024,
                 'open_http_protocol' => true,
                 'open_http2_protocol' => true,
                 'open_websocket_protocol' => true,
-                'heartbeat_check_interval' => 60,
-                'heartbeat_idle_time' => 180
+//                'heartbeat_check_interval' => 60,
+//                'heartbeat_idle_time' => 180
             ]);
             Runtime::instance()->httpPort($this->bindPort);
         } catch (Throwable $exception) {

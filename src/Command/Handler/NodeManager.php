@@ -8,6 +8,7 @@ use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Command\Color;
+use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
 use Scf\Server\Struct\Node;
 use Swlib\Http\Exception\RequestException;
@@ -15,6 +16,7 @@ use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Runtime;
+use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 
@@ -241,12 +243,14 @@ class NodeManager {
      * 向所有节点发送更新到指定版本命令
      */
     public function appointUpdate($type, $version): Result {
-        Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
-            'type' => $type,
-            'version' => $version,
-        ]);
+        $socket = Manager::instance()->getMasterSocketConnection();
+        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version]]));
+        $reply = $socket->recv(30);
+        if ($reply === false) {
+            $socket->close();
+            return Result::error('向master节点发送指令失败');
+        }
         return Result::success();
-
 //        $this->nodes = Manager::instance()->getServers();
 //        if (!$this->nodes) {
 //            return Result::error('节点获取失败');
@@ -323,6 +327,9 @@ class NodeManager {
         });
     }
 
+    /**
+     * @throws ErrorException
+     */
     protected function ready(): string {
         $input = Console::input('请输入要执行的指令(status|reload|message|reloadall|logs|update) 示范:restart 1');
         return $this->cmd($input);
