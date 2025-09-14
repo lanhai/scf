@@ -83,14 +83,14 @@ class SubProcess {
                                         $params = $data['data']['params'];
                                         switch ($command) {
                                             case 'restart':
-                                                $socket->push("[" . SERVER_HOST . "]start reload");
+                                                $socket->push("【" . SERVER_HOST . "】start reload");
                                                 Http::instance()->reload();
                                                 break;
                                             case 'appoint_update':
                                                 if (App::appointUpdateTo($params['type'], $params['version'])) {
-                                                    $socket->push("[" . SERVER_HOST . "]版本更新成功:{$params['type']} => {$params['version']}");
+                                                    $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
                                                 } else {
-                                                    $socket->push("[" . SERVER_HOST . "]版本更新失败:{$params['type']} => {$params['version']}");
+                                                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}");
                                                 }
                                                 break;
                                             default:

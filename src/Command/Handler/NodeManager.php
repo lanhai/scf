@@ -16,7 +16,6 @@ use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Runtime;
-use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 
@@ -251,51 +250,6 @@ class NodeManager {
             return Result::error('向master节点发送指令失败');
         }
         return Result::success();
-//        $this->nodes = Manager::instance()->getServers();
-//        if (!$this->nodes) {
-//            return Result::error('节点获取失败');
-//        }
-//        $barrier = Barrier::make();
-//        $count = 0;
-//        foreach ($this->nodes as $node) {
-//            if (!$node) {
-//                continue;
-//            }
-//            Coroutine::create(function () use ($barrier, $node, $type, $version, &$count) {
-//                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-//                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
-//                $node = Node::factory($node);
-//                if (time() - $node->heart_beat >= 30) {
-//                    return;
-//                }
-//                try {
-//                    if (SERVER_HOST_IS_IP) {
-//                        $socketHost = $node->ip . ':' . $node->socketPort;
-//                    } else {
-//                        $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
-//                    }
-//                    $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
-//                    $websocket->push('appoint_update:' . $type . '|' . $version);
-//                    while (true) {
-//                        $reply = $websocket->recv(1);
-//                        if ($reply) {
-//                            if (!$reply->data) {
-//                                $count++;
-//                                break;
-//                            } else {
-//                                Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
-//                            }
-//                        }
-//                        Coroutine::sleep(0.5);
-//                    }
-//
-//                } catch (RequestException $exception) {
-//                    Console::error("【node-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
-//                }
-//            });
-//        }
-//        Barrier::wait($barrier);
-//        return Result::success($count);
     }
 
     /**
