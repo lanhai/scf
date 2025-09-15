@@ -240,8 +240,10 @@ class Updater {
             Log::instance()->info("【Server】框架升级包下载成功:" . $version);
             return true;
         }
-        $localVersion = $this->getVersion();
-        if ($localVersion && $localVersion['local'] == $version) {
+        $localVersion = $this->getLocalVersion();
+        $current = (int)str_replace('.', '', $localVersion['version']);
+        $target = (int)str_replace('.', '', $version);
+        if ($current == $target) {
             Console::warning("【Server】已是当前版本:" . $version);
             return false;
         }
