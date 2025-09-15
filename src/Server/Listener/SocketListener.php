@@ -9,6 +9,7 @@ use Scf\Helper\JsonHelper;
 use Scf\Server\Http;
 use Scf\Server\Manager;
 use Scf\Util\Auth;
+use Swoole\Coroutine\Channel;
 use Swoole\Event;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
@@ -35,24 +36,32 @@ class SocketListener extends Listener {
                     if ($data['data']['type'] == 'app') {
                         $finishCount = 0;
                         $round = 1;
-                        Timer::tick(1000 * 5, function ($timerId) use ($data, &$finishCount, &$round) {
+                        // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
+                        $waitCh = new Channel(1);
+                        Timer::tick(1000 * 5, function ($timerId) use ($data, &$finishCount, &$round, $waitCh) {
                             $finish = true;
+                            $count  = 0;
                             $nodes = Manager::instance()->getServers();
                             if ($nodes) {
                                 foreach ($nodes as $node) {
                                     if ($node['app_version'] !== $data['data']['version']) {
                                         $finish = false;
                                     } else {
-                                        $finishCount++;
+                                        $count++;
                                     }
                                 }
                             }
                             if ($finish || $round >= 12 * 10) {
+                                $finishCount = $count; // 记录最终完成数
                                 Timer::clear($timerId);
+                                // 通知等待方（非阻塞：如果已有人在等则唤醒）
+                                if (!$waitCh->isEmpty()) { /* no-op */ }
+                                $waitCh->push(true);
                             }
                             $round++;
                         });
-                        Event::wait();
+                        // 等待最多 600 秒（12*10 轮 * 5s）或被提前唤醒
+                        $waitCh->pop(600);
                         Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
                     if (App::appointUpdateTo($data['data']['ty'], $data['data']['version'])) {
