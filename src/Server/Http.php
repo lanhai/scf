@@ -133,7 +133,8 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\RouteTable',
             'Scf\Core\Table\RouteCache',
             'Scf\Core\Table\CrontabTable',
-            'Scf\Core\Table\MemoryMonitorTable'
+            'Scf\Core\Table\MemoryMonitorTable',
+            'Scf\Core\Table\ServerNodeTable'
         ]);
         Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
@@ -261,7 +262,6 @@ class Http extends \Scf\Core\Server {
             //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {
-                //\Scf\Server\Manager::clearAllSocketClients();
                 foreach ($clients as $fd) {
                     if ($server->isEstablished($fd)) {
                         \Scf\Server\Manager::instance()->removeNodeClient($fd);

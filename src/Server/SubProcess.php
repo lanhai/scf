@@ -32,7 +32,7 @@ class SubProcess {
                         break;
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
-                    $socket->push('slave-node-report');
+                    $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => SERVER_HOST]));
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 30, function () use ($socket) {
                         $socket->push('::ping');
