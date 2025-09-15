@@ -12,6 +12,7 @@ use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ServerNodeTable;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
@@ -36,11 +37,6 @@ class Manager extends Component {
 
     public function _init(): void {
         parent::_init();
-    }
-
-    public static function clearAllSocketClients(): bool {
-        Runtime::instance()->delete('DASHBOARD_CLIENTS');
-        return Runtime::instance()->delete('NODE_CLIENTS');
     }
 
     /**
@@ -120,24 +116,19 @@ class Manager extends Component {
      */
     public function sendCommandToAllNodeClients(string $command, array $params = []): int {
         $server = Http::server();
-        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
+        $nodes = ServerNodeTable::instance()->rows();
         $successed = 0;
         if ($nodes) {
-            $changed = false;
-            foreach ($nodes as $fd) {
-                if ($server->isEstablished($fd)) {
-                    $server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
+            foreach ($nodes as $node) {
+                if ($server->isEstablished($node['socket_fd'])) {
+                    $server->push($node['socket_fd'], JsonHelper::toJson(['event' => 'command', 'data' => [
                         'command' => $command,
                         'params' => $params
                     ]])) and $successed++;
                 } else {
-                    $server->close($fd);
-                    $nodes = array_diff($nodes, [$fd]);
-                    $changed = true;
+                    $server->close($node['socket_fd']);
+                    $this->removeNodeClient($node['socket_fd']);
                 }
-            }
-            if ($changed) {
-                Runtime::instance()->set('NODE_CLIENTS', array_values($nodes));
             }
             Console::log("【Server】已向" . Color::cyan($successed) . "个节点发送命令：{$command}");
         }
@@ -147,15 +138,15 @@ class Manager extends Component {
     /**
      * 添加节点客户端
      * @param $fd
+     * @param string $host
      * @return bool
      */
-    public function addNodeClient($fd): bool {
-        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
-        if (!in_array($fd, $nodes)) {
-            $nodes[] = $fd;
-            Runtime::instance()->set('NODE_CLIENTS', $nodes);
-        }
-        return true;
+    public function addNodeClient($fd, string $host): bool {
+        return ServerNodeTable::instance()->set($host, [
+            'host' => $host,
+            'socket_fd' => $fd,
+            'connect_time' => time()
+        ]);
     }
 
     /**
@@ -164,26 +155,15 @@ class Manager extends Component {
      * @return bool
      */
     public function removeNodeClient($fd): bool {
-        $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
-        if (in_array($fd, $nodes)) {
-            $nodes = array_diff($nodes, [$fd]);
-            Runtime::instance()->set('NODE_CLIENTS', array_values($nodes));
+        $nodes = ServerNodeTable::instance()->rows();
+        $deleted = false;
+        foreach ($nodes as $node) {
+            if ($node['socket_fd'] == $fd) {
+                ServerNodeTable::instance()->delete($node['host']);
+                $deleted = true;
+            }
         }
-        return true;
-    }
-
-    /**
-     * 添加控制面板客户端
-     * @param $fd
-     * @return bool
-     */
-    public function addDashboardClient($fd): bool {
-        $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
-        if (!in_array($fd, $nodes)) {
-            $nodes[] = $fd;
-            Runtime::instance()->set('DASHBOARD_CLIENTS', $nodes);
-        }
-        return true;
+        return $deleted;
     }
 
     /**
@@ -208,6 +188,20 @@ class Manager extends Component {
                 Runtime::instance()->set('DASHBOARD_CLIENTS', array_values($nodes));
             }
         }
+    }
+
+    /**
+     * 添加控制面板客户端
+     * @param $fd
+     * @return bool
+     */
+    public function addDashboardClient($fd): bool {
+        $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
+        if (!in_array($fd, $nodes)) {
+            $nodes[] = $fd;
+            Runtime::instance()->set('DASHBOARD_CLIENTS', $nodes);
+        }
+        return true;
     }
 
     /**

@@ -5,6 +5,7 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Table\ServerNodeTable;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Http;
 use Scf\Server\Manager;
@@ -40,7 +41,7 @@ class SocketListener extends Listener {
                         $waitCh = new Channel(1);
                         Timer::tick(1000 * 5, function ($timerId) use ($data, &$finishCount, &$round, $waitCh) {
                             $finish = true;
-                            $count  = 0;
+                            $count = 0;
                             $nodes = Manager::instance()->getServers();
                             if ($nodes) {
                                 foreach ($nodes as $node) {
@@ -55,7 +56,8 @@ class SocketListener extends Listener {
                                 $finishCount = $count; // 记录最终完成数
                                 Timer::clear($timerId);
                                 // 通知等待方（非阻塞：如果已有人在等则唤醒）
-                                if (!$waitCh->isEmpty()) { /* no-op */ }
+                                if (!$waitCh->isEmpty()) { /* no-op */
+                                }
                                 $waitCh->push(true);
                             }
                             $round++;
@@ -95,19 +97,23 @@ class SocketListener extends Listener {
                         }
                     });
                     break;
+                //节点报道
+                case 'slave_node_report':
+                    $host = $data['data'];
+                    if (Manager::instance()->addNodeClient($frame->fd, $host)) {
+                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道成功!客户端ID:" . $frame->fd]));
+                    } else {
+                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道失败!客户端ID:" . $frame->fd]));
+                    }
+                    $nodes = ServerNodeTable::instance()->rows();
+                    Console::info("【Server】{$host} 节点加入,客户端连接ID:{$frame->fd},当前累计连接数:" . count($nodes));
+                    break;
                 default:
                     $server->push($frame->fd, "不支持的事件");
                     break;
             }
         } else {
             switch ($frame->data) {
-                case 'slave-node-report':
-                    if (Manager::instance()->addNodeClient($frame->fd)) {
-                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道成功!客户端ID:" . $frame->fd]));
-                    } else {
-                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道失败!客户端ID:" . $frame->fd]));
-                    }
-                    break;
                 case 'version':
                     $version = Updater::instance()->getVersion();
                     $server->push($frame->fd, JsonHelper::toJson($version));
