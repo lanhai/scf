@@ -244,12 +244,12 @@ class NodeManager {
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
         $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version]]));
-        $reply = $socket->recv(30);
-        if ($reply === false) {
+        $reply = $socket->recv(60 * 10);
+        if ($reply === false || $reply->data == '') {
             $socket->close();
-            return Result::error('向master节点发送指令失败');
+            return Result::error('升级未完成');
         }
-        return Result::success();
+        return Result::success($reply->data ?: 0);
     }
 
     /**
