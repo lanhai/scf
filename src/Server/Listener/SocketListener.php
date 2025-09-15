@@ -5,7 +5,6 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
-use Scf\Core\Exception;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Http;
 use Scf\Server\Manager;
@@ -22,21 +21,52 @@ class SocketListener extends Listener {
 
     /**
      * 接收消息
-     * @throws Exception
      */
     protected function onMessage(Server $server, Frame $frame): void {
         if (JsonHelper::is($frame->data)) {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
                 case 'appoint_update':
-                    Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+                    $finishCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
                         'type' => $data['data']['type'],
                         'version' => $data['data']['version'],
                     ]);
-                    $server->push($frame->fd, "success");
+                    //等待所有节点升级完成
+                    if ($data['data']['type'] == 'app') {
+                        $finishCount = 0;
+                        $round = 1;
+                        Timer::tick(1000 * 5, function ($timerId) use ($data, &$finishCount, &$round) {
+                            $finish = true;
+                            $nodes = Manager::instance()->getServers();
+                            if ($nodes) {
+                                foreach ($nodes as $node) {
+                                    if ($node['app_version'] !== $data['data']['version']) {
+                                        $finish = false;
+                                    } else {
+                                        $finishCount++;
+                                    }
+                                }
+                            }
+                            if ($finish || $round >= 12 * 10) {
+                                Timer::clear($timerId);
+                            }
+                            $round++;
+                        });
+                        Event::wait();
+                        Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
+                    }
+                    if (App::appointUpdateTo($data['data']['ty'], $data['data']['version'])) {
+                        $finishCount++;
+                    }
+                    $server->push($frame->fd, $finishCount);
                     break;
                 case 'restartAll':
                     Manager::instance()->sendCommandToAllNodeClients('restart');
+                    try {
+                        Http::instance()->reload();
+                    } catch (Throwable $e) {
+                        Console::warning($e->getMessage());
+                    }
                     break;
                 //推送服务器运行状态数据到控制面板
                 case 'server_status':
@@ -72,27 +102,6 @@ class SocketListener extends Listener {
                 case 'version':
                     $version = Updater::instance()->getVersion();
                     $server->push($frame->fd, JsonHelper::toJson($version));
-                    break;
-                case 'update':
-                    $server->push($frame->fd, "开始执行更新");
-                    if (App::forceUpdate()) {
-                        $server->push($frame->fd, "更新成功");
-                    } else {
-                        $server->push($frame->fd, "更新失败");
-                    }
-                    $server->disconnect($frame->fd);
-                    break;
-                case str_starts_with($frame->data, 'appoint_update')://指定更新
-                    $data = explode(":", $frame->data)[1];
-                    $arr = explode("|", $data);
-                    $type = $arr[0];
-                    $version = $arr[1];
-                    if (App::appointUpdateTo($type, $version)) {
-                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新成功:{$type}=>{$version}");
-                    } else {
-                        $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->push($frame->fd, "版本更新失败:{$type}=>{$version}");
-                    }
-                    $server->exist($frame->fd) && $server->isEstablished($frame->fd) and $server->disconnect($frame->fd);
                     break;
                 case '::ping':
                     $server->push($frame->fd, "::pong");

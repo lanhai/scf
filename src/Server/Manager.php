@@ -116,30 +116,32 @@ class Manager extends Component {
      * 向所有节点发送指令
      * @param string $command
      * @param array $params
-     * @return void
+     * @return int
      */
-    public function sendCommandToAllNodeClients(string $command, array $params = []): void {
+    public function sendCommandToAllNodeClients(string $command, array $params = []): int {
         $server = Http::server();
         $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
+        $successed = 0;
         if ($nodes) {
-            $successed = 0;
             $changed = false;
-            foreach ($nodes as $index => $fd) {
-                if ($server->exist($fd) && $server->isEstablished($fd) && $server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
+            foreach ($nodes as $fd) {
+                if ($server->isEstablished($fd)) {
+                    $server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
                         'command' => $command,
                         'params' => $params
-                    ]]))) {
-                    $successed++;
+                    ]])) and $successed++;
                 } else {
-                    unset($nodes[$index]);
+                    $server->close($fd);
+                    $nodes = array_diff($nodes, [$fd]);
                     $changed = true;
                 }
             }
             if ($changed) {
-                Runtime::instance()->set('NODE_CLIENTS', $nodes);
+                Runtime::instance()->set('NODE_CLIENTS', array_values($nodes));
             }
             Console::log("【Server】已向" . Color::cyan($successed) . "个节点发送命令：{$command}");
         }
+        return $successed;
     }
 
     /**
@@ -165,7 +167,7 @@ class Manager extends Component {
         $nodes = Runtime::instance()->get('NODE_CLIENTS') ?: [];
         if (in_array($fd, $nodes)) {
             $nodes = array_diff($nodes, [$fd]);
-            Runtime::instance()->set('NODE_CLIENTS', $nodes);
+            Runtime::instance()->set('NODE_CLIENTS', array_values($nodes));
         }
         return true;
     }
@@ -194,9 +196,10 @@ class Manager extends Component {
         if ($nodes) {
             $server = Http::server();
             $changed = false;
-            foreach ($nodes as $index => $fd) {
-                if (!$server->exist($fd) || !$server->isEstablished($fd) || !$server->push($fd, $message)) {
-                    unset($nodes[$index]);
+            foreach ($nodes as $fd) {
+                if (!$server->isEstablished($fd) || !$server->push($fd, $message)) {
+                    $server->close($fd);
+                    $nodes = array_diff($nodes, [$fd]);
                     $changed = true;
                 }
             }
@@ -216,7 +219,7 @@ class Manager extends Component {
         $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
         if (in_array($fd, $nodes)) {
             $nodes = array_diff($nodes, [$fd]);
-            Runtime::instance()->set('DASHBOARD_CLIENTS', $nodes);
+            Runtime::instance()->set('DASHBOARD_CLIENTS', array_values($nodes));
         }
         return true;
     }

@@ -261,12 +261,14 @@ class Http extends \Scf\Core\Server {
             //断开所有客户端连接
             $clients = $this->server->getClientList();
             if ($clients) {
+                //\Scf\Server\Manager::clearAllSocketClients();
                 foreach ($clients as $fd) {
                     if ($server->isEstablished($fd)) {
+                        \Scf\Server\Manager::instance()->removeNodeClient($fd);
+                        \Scf\Server\Manager::instance()->removeDashboardClient($fd);
                         $server->disconnect($fd);
                     }
                 }
-                \Scf\Server\Manager::clearAllSocketClients();
             }
         });
         $this->server->on("AfterReload", function () {
@@ -345,7 +347,9 @@ INFO;
             //日志备份进程
             $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
             //连接主节点
-            $this->server->addProcess(SubProcess::connectMaster($this->server));
+            if (!App::isMaster()) {
+                $this->server->addProcess(SubProcess::connectMaster($this->server));
+            }
             //心跳进程
             $this->addHeartbeatProcess();
             //启动文件监听进程

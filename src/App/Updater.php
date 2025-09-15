@@ -2,9 +2,11 @@
 
 namespace Scf\App;
 
+use Error;
 use PhpZip\Exception\ZipException;
 use PhpZip\ZipFile;
 use Scf\Client\Http;
+use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Helper\JsonHelper;
 use Scf\Core\App;
@@ -13,6 +15,7 @@ use Scf\Command\Color;
 use Scf\Util\Auth;
 use Scf\Util\File;
 use Swoole\Coroutine\Http\Client;
+use Throwable;
 
 class Updater {
 
@@ -68,7 +71,7 @@ class Updater {
             }
             $remote = $result->getData();
             $appVersion = $remote['app'];
-        } catch (\Error $error) {
+        } catch (Error $error) {
             Log::instance()->error('【Server】获取版本服务器版本号失败:' . $error->getMessage());
             return false;
         }
@@ -203,43 +206,54 @@ class Updater {
      * 自定义更新src/public到指定版本
      * @param $type
      * @param $version
-     * @return Result
+     * @return bool
      */
-    public function appointUpdateTo($type, $version): Result {
+    public function appointUpdateTo($type, $version): bool {
         if ($type == 'framework') {
             $saveDir = SCF_ROOT . '/build';
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
-                return Result::error('创建更新目录失败');
+                Console::warning('【updater】创建更新目录失败');
+                return false;
             }
             $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
             $remoteVersionResponse = $client->get();
             if ($remoteVersionResponse->hasError()) {
-                return Result::error('远程版本获取失败:' . $remoteVersionResponse->getMessage());
+                Console::warning('【updater】远程版本获取失败:' . $remoteVersionResponse->getMessage());
+                return false;
             }
             $remoteVersion = $remoteVersionResponse->getData();
             $updateFile = $saveDir . '/update.pack';
             $client = Http::create($remoteVersion['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
-                return Result::error('框架升级包下载失败:' . $downloadResult->getMessage());
+                Console::warning('【updater】框架升级包下载失败:' . $downloadResult->getMessage());
+                return false;
             }
             //下载引导文件
             $bootFile = SCF_ROOT . '/boot';
             $client = Http::create($remoteVersion['boot']);
             $downloadResult = $client->download($bootFile, 1800);
             if ($downloadResult->hasError()) {
-                return Result::error('引导文件下载失败:' . $downloadResult->getMessage());
+                Console::warning('【updater】引导文件下载失败:' . $downloadResult->getMessage());
+                return false;
             }
             Log::instance()->info("【Server】框架升级包下载成功:" . $version);
-            return Result::success("框架升级包下载成功:" . $version);
+            return true;
+        }
+        $localVersion = $this->getVersion();
+        if ($localVersion && $localVersion['local'] == $version) {
+            Console::warning("【Server】已是当前版本:" . $version);
+            return false;
         }
         $result = $this->getRemoteVersionsRecord();
         if ($result->hasError()) {
-            return Result::error($result->getMessage());
+            Console::warning('【updater】' . $result->getMessage());
+            return false;
         }
         $versions = $result->getData();
         if (!$versions) {
-            return Result::error('message');
+            Console::warning('【updater】版本清单获取失败');
+            return false;
         }
         $versionInfo = null;
         foreach ($versions as $item) {
@@ -248,17 +262,21 @@ class Updater {
             }
         }
         if (is_null($versionInfo)) {
-            return Result::error('未匹配到版本记录');
+            Console::warning('【updater】未匹配到版本记录');
+            return false;
         }
         if ($type == 'app' && !$versionInfo['app_object']) {
-            return Result::error('未匹配到内核文件');
+            Console::warning('【updater】未匹配到内核文件');
+            return false;
         } else if ($type == 'public' && !$versionInfo['public_object']) {
-            return Result::error('未匹配到资源文件');
+            Console::warning('【updater】未匹配到资源文件');
+            return false;
         }
         if (!$this->changeAppVersion($version, appoint: $type)) {
-            return Result::error('更新失败');
+            Console::warning('【updater】更新失败');
+            return false;
         }
-        return Result::success(App::info()->toArray());
+        return true;
     }
 
     /**
@@ -343,7 +361,6 @@ class Updater {
             $remote = [];
         } else {
             try {
-                //Console::log("查询版本信息:" . $app->update_server . '?time=' . time());
                 $client = Http::create($app->update_server . '?time=' . time());
                 $result = $client->get();
                 if ($result->hasError()) {
@@ -355,7 +372,7 @@ class Updater {
                         'scf' => $remote['scf'][0] ?? null,
                     ];
                 }
-            } catch (\Error $error) {
+            } catch (Throwable $error) {
                 Log::instance()->error('获取版本服务器版本号失败:' . $error->getMessage());
             }
         }
@@ -386,7 +403,7 @@ class Updater {
                 if (!is_dir($fullpath)) {
                     try {
                         unlink($fullpath);
-                    } catch (\Throwable) {
+                    } catch (Throwable) {
 
                     }
                 } else {

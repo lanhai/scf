@@ -24,6 +24,7 @@ use Swoole\Runtime;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Symfony\Component\Yaml\Yaml;
+use Throwable;
 use function Swoole\Coroutine\run;
 
 class App {
@@ -45,15 +46,18 @@ class App {
      * @param $type
      * @param $version
      * @return bool
-     * @throws Exception
      */
     public static function appointUpdateTo($type, $version): bool {
-        $httpServer = \Scf\Server\Http::instance();
-        if (Updater::instance()->appointUpdateTo($type, $version)) {
-            $type == 'app' and $httpServer->reload();
-            return true;
+        try {
+            $httpServer = \Scf\Server\Http::instance();
+            if (Updater::instance()->appointUpdateTo($type, $version)) {
+                $type == 'app' and $httpServer->reload();
+                return true;
+            }
+            return false;
+        } catch (Throwable) {
+            return false;
         }
-        return false;
     }
 
     /**

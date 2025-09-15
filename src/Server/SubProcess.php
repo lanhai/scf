@@ -22,9 +22,6 @@ class SubProcess {
 
     public static function connectMaster(Server $server): Process {
         return new Process(function ($process) use ($server) {
-            if (!Process::kill($server->manager_pid, 0)) {
-                return;
-            }
             Console::info("【Server】主节点连接PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
@@ -36,36 +33,27 @@ class SubProcess {
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
                     $socket->push('slave-node-report');
-                    // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致 60s 断开
+                    // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 30, function () use ($socket) {
-                        try {
-                            // 改为应用层心跳，避免某些代理/FRP 对 PING 控制帧处理不一致导致的断开
-                            // 发送轻量文本帧（例如 '::ping'），服务端可选择忽略或打印
-                            $ok = $socket->push('::ping');
-                            if ($ok === false) {
-                                // 发送失败让读循环去处理断开
-                            }
-                        } catch (\Throwable $e) {
-                            // 忽略发送失败，读循环会感知断开
-                        }
+                        $socket->push('::ping');
                     });
                     // 读循环：直到断开
                     while (true) {
                         // 若是非阻塞 recv，则需要小睡避免空转
-                        $reply = $socket->recv();  // 你这边的 recv() 看起来返回对象
+                        $reply = $socket->recv();
                         if ($reply === false) {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
                             // 读错误：断开
                             Console::warning('【Server】与master节点连接读错误，准备重连', false);
-                            $socket->close(); // 若有
+                            $socket->close();
                             break;
                         }
                         if ($reply && empty($reply->data)) {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
                             Console::warning("【Server】已断开master节点连接", false);
-                            $socket->close(); // 若有
+                            $socket->close();
                             break;
                         }
                         if ($reply && !empty($reply->data)) {
@@ -73,33 +61,34 @@ class SubProcess {
                             if (isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
                                 $socket->push('', WEBSOCKET_OPCODE_PONG);
                             }
-                            if ($reply->data !== "::pong") {
-                                Console::info("【Server】收到master消息:" . $reply->data, false);
-                                if (JsonHelper::is($reply->data)) {
-                                    $data = JsonHelper::recover($reply->data);
-                                    $event = $data['event'] ?? 'message';
-                                    if ($event == 'command') {
-                                        $command = $data['data']['command'];
-                                        $params = $data['data']['params'];
-                                        switch ($command) {
-                                            case 'restart':
-                                                $socket->push("【" . SERVER_HOST . "】start reload");
-                                                Http::instance()->reload();
-                                                break;
-                                            case 'appoint_update':
-                                                if (App::appointUpdateTo($params['type'], $params['version'])) {
-                                                    $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
-                                                } else {
-                                                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}");
-                                                }
-                                                break;
-                                            default:
-                                                Console::warning("【Server】Command '$command' is not supported", false);
-                                        }
-                                    } elseif ($event == 'welcome') {
-                                        $masterHost = Manager::instance()->getMasterHost();
-                                        Console::success('【Server】已连接到master节点:' . $masterHost, false);
+                            if ($reply->data == "::pong") {
+                                continue;
+                            }
+                            Console::info("【Server】收到master消息:" . $reply->data, false);
+                            if (JsonHelper::is($reply->data)) {
+                                $data = JsonHelper::recover($reply->data);
+                                $event = $data['event'] ?? 'message';
+                                if ($event == 'command') {
+                                    $command = $data['data']['command'];
+                                    $params = $data['data']['params'];
+                                    switch ($command) {
+                                        case 'restart':
+                                            $socket->push("【" . SERVER_HOST . "】start reload");
+                                            Http::instance()->reload();
+                                            break;
+                                        case 'appoint_update':
+                                            if (App::appointUpdateTo($params['type'], $params['version'])) {
+                                                $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
+                                            } else {
+                                                $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}");
+                                            }
+                                            break;
+                                        default:
+                                            Console::warning("【Server】Command '$command' is not supported", false);
                                     }
+                                } elseif ($event == 'welcome') {
+                                    $masterHost = Manager::instance()->getMasterHost();
+                                    Console::success('【Server】已连接到master节点:' . $masterHost, false);
                                 }
                             }
                         } else {
@@ -110,15 +99,13 @@ class SubProcess {
                         static $tick = 0;
                         if ((++$tick % 10) === 0 && !Process::kill($server->manager_pid, 0)) {
                             Console::warning('【Server】主进程退出，断开并退出');
-                            // $socket->close(); // 若有
+                            $socket->close();
                             break 2; // 跳出两层循环
                         }
                     }
-                    // 下一轮外层 while 会尝试重连（带退避）
                 }
             });
             \Swoole\Event::wait();
-
         });
     }
 
