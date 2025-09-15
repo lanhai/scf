@@ -45,14 +45,19 @@ class SocketListener extends Listener {
                             $nodes = Manager::instance()->getServers();
                             if ($nodes) {
                                 foreach ($nodes as $node) {
-                                    if ($node['app_version'] !== $data['data']['version']) {
+                                    if ($node['role'] == 'master') {
+                                        continue;
+                                    }
+                                    $current = (int)str_replace('.', '', $node['app_version']);
+                                    $target = (int)str_replace('.', '', $data['data']['version']);
+                                    if ($current !== $target) {
                                         $finish = false;
                                     } else {
                                         $count++;
                                     }
                                 }
                             }
-                            if ($finish || $round >= 12 * 10) {
+                            if ($finish || $round >= 12 * 5) {
                                 $finishCount = $count; // 记录最终完成数
                                 Timer::clear($timerId);
                                 // 通知等待方（非阻塞：如果已有人在等则唤醒）
@@ -63,13 +68,11 @@ class SocketListener extends Listener {
                             $round++;
                         });
                         // 等待最多 600 秒（12*10 轮 * 5s）或被提前唤醒
-                        $waitCh->pop(600);
+                        $waitCh->pop(305);
                         Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
-                    if (App::appointUpdateTo($data['data']['type'], $data['data']['version'])) {
-                        $finishCount++;
-                    }
                     $server->push($frame->fd, $finishCount);
+                    App::appointUpdateTo($data['data']['type'], $data['data']['version']);
                     break;
                 case 'restartAll':
                     Manager::instance()->sendCommandToAllNodeClients('restart');
@@ -141,7 +144,6 @@ class SocketListener extends Listener {
         $token = $request->get['token'] ?? '';
         if ((!$password || $password != md5(App::authKey())) && (!$token || strlen(Auth::decode($token)) != 10)) {
             $response->status(403);
-            $response->end();
         } else {
             //websocket握手连接算法验证
             $secWebSocketKey = $request->header['sec-websocket-key'];
@@ -172,15 +174,15 @@ class SocketListener extends Listener {
                 $response->header($key, $val);
             }
             $response->status(101);
-            $response->end();
-            $fd = $request->fd;
-            Event::defer(function () use ($fd) {
-                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
-                    'time' => date('Y-m-d H:i:s'),
-                    'host' => SERVER_HOST
-                ]]));
-            });
+            //            $fd = $request->fd;
+//            Event::defer(function () use ($fd) {
+//                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
+//                    'time' => date('Y-m-d H:i:s'),
+//                    'host' => SERVER_HOST
+//                ]]));
+//            });
         }
+        $response->end();
     }
 
     /**

@@ -244,7 +244,7 @@ class NodeManager {
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
         $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version]]));
-        $reply = $socket->recv(60 * 10);
+        $reply = $socket->recv(60 * 5);
         if ($reply === false || $reply->data == '') {
             $socket->close();
             return Result::error('升级未完成');
