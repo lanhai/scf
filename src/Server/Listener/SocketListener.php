@@ -64,7 +64,7 @@ class SocketListener extends Listener {
                         $waitCh->pop(600);
                         Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
-                    if (App::appointUpdateTo($data['data']['ty'], $data['data']['version'])) {
+                    if (App::appointUpdateTo($data['data']['type'], $data['data']['version'])) {
                         $finishCount++;
                     }
                     $server->push($frame->fd, $finishCount);
