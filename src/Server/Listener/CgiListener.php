@@ -262,6 +262,13 @@ class CgiListener extends Listener {
                 ]));
             } else {
                 $headers = $client->responseHeaders();
+                $response->header('Content-Type', $headers['content-type']);
+                if (isset($headers['error-info'])) {
+                    $response->header('Error-Info', $headers['error-info']);
+                }
+                if (isset($headers['server'])) {
+                    $response->header('Server', $headers['server']);
+                }
                 $cookie = $headers['set-cookie'] ?? null;
                 $cookie && $sessionId and File::write($cookieFile, $cookie);
                 if ($path == '/logout' && file_exists($cookieFile)) {

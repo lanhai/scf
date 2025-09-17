@@ -6,6 +6,7 @@ namespace Scf\Mode\Web;
 use JetBrains\PhpStorm\NoReturn;
 use Scf\Core\Result;
 use Scf\Core\Traits\ProcessLifeSingleton;
+use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Server\Env;
 use Scf\Server\Worker\ProcessLife;
@@ -237,9 +238,9 @@ EOT;
     public function json($data): void {
         $logger = ProcessLife::instance();
         Env::isDev() and $data['debug'] = $logger->requestDebugInfo();
-        $this->setHeader('content-type', 'application/json;charset=utf-8', true);
-        $this->setHeader('Server', 'scf-http-server', true);
-        $this->end(json_encode($data, JSON_UNESCAPED_UNICODE));
+        $this->setHeader('Content-Type', 'application/json;charset=utf-8');
+        $this->setHeader('Server', 'scf-http-server');
+        $this->end(JsonHelper::toJson($data));
     }
 
     public function write($content): void {
