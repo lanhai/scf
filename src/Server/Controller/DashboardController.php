@@ -27,7 +27,6 @@ use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
 use Scf\Util\Date;
-use Swoole\Exception;
 use Throwable;
 
 class DashboardController extends Controller {
