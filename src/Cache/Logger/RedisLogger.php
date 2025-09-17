@@ -23,7 +23,7 @@ class RedisLogger implements LoggerInterface {
         }
         PRINT_REDIS_LOG and Console::info("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         if (!is_null($exception)) {
-            Console::error("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile());
+            Console::error("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile(), false);
         }
     }
 }

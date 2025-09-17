@@ -14,6 +14,7 @@ class ServerNodeTable extends ATable {
         'size' => 1024,
         'colums' => [
             'host' => ['type' => Table::TYPE_STRING, 'size' => 128],
+            'role' => ['type' => Table::TYPE_STRING, 'size' => 16],
             'socket_fd' => ['type' => Table::TYPE_INT, 'size' => 0],
             'connect_time' => ['type' => Table::TYPE_INT, 'size' => 0],
         ]

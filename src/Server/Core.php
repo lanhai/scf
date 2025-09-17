@@ -45,7 +45,7 @@ class Core {
         }
         !defined('APP_RUN_MODE') and define('APP_RUN_MODE', $runMode ?: ($options['mode'] ?? (APP_RUN_ENV == 'production' ? 'phar' : (is_dir(SCF_APPS_ROOT . '/' . $path . '/' . 'src/lib') ? 'src' : 'phar'))));
         $app = App::appoint($path);
-        $role = Manager::instance()->issetOpt('master') ? 'master' : ($options['role'] ?? ($serverRole ?: ($app->role ?: 'master')));
+        $role = Manager::instance()->issetOpt(NODE_ROLE_MASTER) ? NODE_ROLE_MASTER : ($options['role'] ?? ($serverRole ?: ($app->role ?: NODE_ROLE_MASTER)));
         if (!$app->role) {
             $app->role = $role;
         }
@@ -58,8 +58,9 @@ class Core {
         !defined('SERVER_MODE') and define('SERVER_MODE', $mode);
         !defined('SERVER_ALIAS') and define('SERVER_ALIAS', $options['alias'] ?? $app->app_path);
         !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? ($mode == MODE_NATIVE ? 9501 : 0));
+        !defined('MASTER_PORT') and define('MASTER_PORT', $options['mport'] ?? 0);
         !defined('SERVER_PORT_FILE') and define('SERVER_PORT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_port');
-        !defined('MDB_PORT') and define('MDB_PORT', $options['mport'] ?? 16379);
+        !defined('MDB_PORT') and define('MDB_PORT', $options['mdbport'] ?? 16379);
         !defined('RPC_PORT') and define('RPC_PORT', $options['rport'] ?? 0);
         !defined('SERVER_NODE_ID') and define('SERVER_NODE_ID', strtolower(SERVER_ROLE) . '-' . $app->node_id);
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');

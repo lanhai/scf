@@ -49,3 +49,5 @@ const DBS_MASTER = 1;
 const DBS_SLAVE = 2;
 //项目顶级命名空间
 const APP_TOP_NAMESPACE = 'App';
+const NODE_ROLE_MASTER = 'master';
+const NODE_ROLE_SLAVE = 'slave';

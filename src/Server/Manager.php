@@ -6,25 +6,20 @@ use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Component;
+use Scf\Core\Config;
 use Scf\Core\Console;
-use Scf\Core\Exception;
-use Scf\Core\Key;
-use Scf\Core\Table\Counter;
-use Scf\Core\Table\ATable;
 use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
-use Scf\Server\Struct\Node;
 use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Swlib\Saber\WebSocket;
 use Swlib\SaberGM;
-use Swoole\Coroutine;
 use Swoole\Coroutine\System;
-use Swoole\WebSocket\Server;
 use Throwable;
 use Swlib\Http\Exception\RequestException;
 
@@ -46,20 +41,15 @@ class Manager extends Component {
     public function getMasterHost(): string {
         $host = Runtime::instance()->get('_MASTER_HOST_');
         if (!$host) {
-            $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-            $key = App::id() . ':node:master';
-            if (!$node = $masterDB->get($key)) {
-                sleep(3);
-                return $this->getMasterHost();
-            }
+            $host = Config::get('app')['master_host'] ?? '127.0.0.1';
             if (App::isMaster()) {
-                $node['ip'] = '127.0.0.1';
+                $host = '127.0.0.1';
             }
-            $hostIsIp = filter_var($node['ip'], FILTER_VALIDATE_IP) !== false;
+            $hostIsIp = filter_var($host, FILTER_VALIDATE_IP) !== false;
             if ($hostIsIp) {
-                $host = $node['ip'] . ':' . $node['port'];
-            } else {
-                $host = $node['ip'];
+                $serverConfig = Config::server();
+                $port = MASTER_PORT ?: $serverConfig['port'] ?? 9580;
+                $host = $host . ':' . $port;
             }
             Runtime::instance()->set('_MASTER_HOST_', $host);
         }
@@ -120,6 +110,10 @@ class Manager extends Component {
         $successed = 0;
         if ($nodes) {
             foreach ($nodes as $node) {
+                if ($node['role'] == NODE_ROLE_MASTER) {
+                    //跳过master节点
+                    continue;
+                }
                 if ($server->isEstablished($node['socket_fd'])) {
                     $server->push($node['socket_fd'], JsonHelper::toJson(['event' => 'command', 'data' => [
                         'command' => $command,
@@ -130,7 +124,7 @@ class Manager extends Component {
                     $this->removeNodeClient($node['socket_fd']);
                 }
             }
-            Console::log("【Server】已向" . Color::cyan($successed) . "个节点发送命令：{$command}");
+            $successed and Console::log("【Server】已向" . Color::cyan($successed) . "个子节点发送命令：{$command}");
         }
         return $successed;
     }
@@ -145,7 +139,8 @@ class Manager extends Component {
         return ServerNodeTable::instance()->set($host, [
             'host' => $host,
             'socket_fd' => $fd,
-            'connect_time' => time()
+            'connect_time' => time(),
+            'role' => SERVER_ROLE
         ]);
     }
 
@@ -256,86 +251,10 @@ class Manager extends Component {
         try {
             $ws->push($data);
             return true;
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             return false;
         }
     }
-
-    /**
-     * 更新
-     * @param $id
-     * @param $updateKey
-     * @param $value
-     * @return bool
-     */
-    public function update($id, $updateKey, $value): bool {
-        $key = App::id() . '-node-' . $id;
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        if ($node = $masterDB->get($key)) {
-            $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-            $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
-            $node = Node::factory($node);
-            $node->heart_beat = time();
-            $node->$updateKey = $value;
-            return $masterDB->set($key, $node->toArray());
-        }
-        return false;
-    }
-
-    /**
-     * 心跳
-     * @param Server $server
-     * @param Node $node
-     * @return bool
-     */
-    public function heartbeat(Server $server, Node $node): bool {
-        $profile = App::profile();
-        $node->app_version = $profile->version;
-        $node->public_version = $profile->public_version ?: '--';
-        $node->heart_beat = time();
-        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
-        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
-        $node->tables = ATable::list();
-        $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
-        $node->stack_useage = memory_get_usage(true);
-        $node->threads = count(Coroutine::list());
-        $node->thread_status = Coroutine::stats();
-        $node->server_stats = $server->stats();
-        //$node->tasks = CrontabManager::allStatus();
-        $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
-        $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
-        $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
-        $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
-        $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
-        $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-        $nodeId = App::isMaster() ? 'master' : $node->id;
-        $key = $profile->appid . ':node:' . $nodeId;
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        //App::isMaster() and $masterDB->set($profile->appid . '_MASTER_PORT', Runtime::instance()->httpPort(), -1);
-        return $masterDB->set($key, $node->asArray(), 60);
-    }
-
-    /**
-     * 节点报到
-     * @param Node $node
-     * @return string|bool
-     * @throws Exception
-     */
-    public function register(Node $node): string|bool {
-        if (!$node->validate()) {
-            throw new Exception("节点设置错误:" . $node->getError());
-        }
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        $profile = App::profile();
-        $nodeId = App::isMaster() ? 'master' : $node->id;
-        if (!$masterDB->sIsMember($profile->appid . ':nodes', $nodeId)) {
-            $masterDB->sAdd($profile->appid . ':nodes', $nodeId);
-        }
-        $key = $profile->appid . ':node:' . $nodeId;
-        //App::isMaster() and $masterDB->set($profile->appid . '_MASTER_PORT', Runtime::instance()->httpPort(), -1);
-        return $masterDB->set($key, $node->toArray(), 60);
-    }
-
 
     /**
      * 所有节点状态
@@ -346,7 +265,7 @@ class Manager extends Component {
         $master = 0;
         $slave = 0;
         foreach ($servers as $s) {
-            if ($s['role'] == 'master') {
+            if ($s['role'] == NODE_ROLE_MASTER) {
                 $master++;
             } else {
                 $slave++;
@@ -446,30 +365,35 @@ class Manager extends Component {
      * @return bool|int
      */
     public function addLog(string $type, mixed $message): bool|int {
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        if ($masterDB instanceof NullPool) {
-            if (!IS_HTTP_SERVER) {
-                //日志本地化
-                if ($type == 'crontab') {
-                    $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
-                    $content = $message['message'];
-                } else {
-                    $dir = APP_LOG_PATH . '/' . $type . '/';
-                    $content = $message;
+        try {
+            //TODO 日志推送到master节点
+            $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+            if ($masterDB instanceof NullPool) {
+                if (!IS_HTTP_SERVER) {
+                    //日志本地化
+                    if ($type == 'crontab') {
+                        $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
+                        $content = $message['message'];
+                    } else {
+                        $dir = APP_LOG_PATH . '/' . $type . '/';
+                        $content = $message;
+                    }
+                    $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
+                    if (!is_dir($dir)) {
+                        mkdir($dir, 0775, true);
+                    }
+                    File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
                 }
-                $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
-                if (!is_dir($dir)) {
-                    mkdir($dir, 0775, true);
-                }
-                File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
+                return false;
             }
+            $queueKey = "_LOGS_" . $type;
+            return $masterDB->lPush($queueKey, [
+                'day' => Date::today(),
+                'message' => $message
+            ]);
+        } catch (Throwable) {
             return false;
         }
-        $queueKey = "_LOGS_" . $type;
-        return $masterDB->lPush($queueKey, [
-            'day' => Date::today(),
-            'message' => $message
-        ]);
     }
 
     /**
@@ -495,44 +419,21 @@ class Manager extends Component {
     }
 
     /**
-     * 根据指纹移除节点
-     * @param $fingerprint
-     * @return bool
-     */
-    public function removeNodeByFingerprint($fingerprint): bool {
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        $node = $this->getNodeByFingerprint($fingerprint);
-        if ($node) {
-            if (time() - $node['heart_beat'] < 30) {
-                return false;
-            }
-            $key = App::id() . '-node-' . $node['id'];
-            try {
-                $masterDB->sRemove(App::id() . ':nodes', $node['id']);
-                $masterDB->delete($key);
-                return true;
-            } catch (Throwable $exception) {
-                Console::log(Color::red("【" . $key . "】" . "删除失败:" . $exception->getMessage()), false);
-            }
-        }
-        return false;
-    }
-
-    /**
      * 获取节点列表
      * @param bool $online
      * @return array
      */
     public function getServers(bool $online = true): array {
-        $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        $this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
+        //$masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+        //$this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
+        $nodes = ServerNodeStatusTable::instance()->rows();
         $list = [];
-        if ($this->servers) {
-            foreach ($this->servers as $id) {
-                $key = App::id() . ':node:' . $id;
-                if (!$node = $masterDB->get($key)) {
-                    continue;
-                }
+        if ($nodes) {
+            foreach ($nodes as $node) {
+//                $key = App::id() . ':node:' . $id;
+//                if (!$node = $masterDB->get($key)) {
+//                    continue;
+//                }
                 $node['online'] = true;
                 if (time() - $node['heart_beat'] > 20 && $online) {
                     $node['online'] = false;

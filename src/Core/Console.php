@@ -15,11 +15,6 @@ use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
 
-/**
- * 带推送功能的控制台打印
- * @version 1.12
- * @updated 2025-09-13 10:34:53
- */
 class Console {
     use Singleton;
 
@@ -219,7 +214,7 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1) {
+        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1 && defined('APP_ID')) {
             Timer::after(100, function () use ($str) {
                 Manager::instance()->pushConsoleLog(Log::filter($str));
             });

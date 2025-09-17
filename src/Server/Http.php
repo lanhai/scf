@@ -134,7 +134,8 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\RouteCache',
             'Scf\Core\Table\CrontabTable',
             'Scf\Core\Table\MemoryMonitorTable',
-            'Scf\Core\Table\ServerNodeTable'
+            'Scf\Core\Table\ServerNodeTable',
+            'Scf\Core\Table\ServerNodeStatusTable'
         ]);
         Runtime::instance()->serverStatus(false);
         //启动master节点管理面板服务器
@@ -142,22 +143,22 @@ class Http extends \Scf\Core\Server {
         //启动masterDB(redis协议)服务器
         //MasterDB::start(MDB_PORT);
         //检查Redis是否配置
-        $process = new Process(function () {
-            App::mount();
-            $pool = Redis::pool(\Scf\Server\Manager::instance()->getConfig('service_center_server') ?: 'main');
-            if ($pool instanceof NullPool) {
-                Runtime::instance()->set('REDIS_ENABLE', false);
-                Runtime::instance()->set('REDIS_UNAVAILABLE_REMARK', $pool->getError());
-            } else {
-                Runtime::instance()->set('REDIS_ENABLE', true);
-            }
-        });
-        $process->start();
-        Process::wait();
-        if (!Runtime::instance()->get('REDIS_ENABLE')) {
-            Console::error("【Server】服务注册不可用:" . Runtime::instance()->get('REDIS_UNAVAILABLE_REMARK'));
-            exit(0);
-        }
+//        $process = new Process(function () {
+//            App::mount();
+//            $pool = Redis::pool(\Scf\Server\Manager::instance()->getConfig('service_center_server') ?: 'main');
+//            if ($pool instanceof NullPool) {
+//                Runtime::instance()->set('REDIS_ENABLE', false);
+//                Runtime::instance()->set('REDIS_UNAVAILABLE_REMARK', $pool->getError());
+//            } else {
+//                Runtime::instance()->set('REDIS_ENABLE', true);
+//            }
+//        });
+//        $process->start();
+//        Process::wait();
+//        if (!Runtime::instance()->get('REDIS_ENABLE')) {
+//            Console::error("【Server】服务注册不可用:" . Runtime::instance()->get('REDIS_UNAVAILABLE_REMARK'));
+//            exit(0);
+//        }
         //加载服务器配置
         $serverConfig = Config::server();
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
@@ -347,11 +348,7 @@ INFO;
             //日志备份进程
             $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
             //连接主节点
-            if (!App::isMaster()) {
-                $this->server->addProcess(SubProcess::connectMaster($this->server));
-            }
-            //心跳进程
-            $this->addHeartbeatProcess();
+            $this->server->addProcess(SubProcess::createHeartbeatProcess($this->server));
             //启动文件监听进程
             if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
                 $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
@@ -511,55 +508,20 @@ INFO;
     }
 
     /**
-     * 创建心跳进程
-     * @return void
-     */
-    protected function addHeartbeatProcess(): void {
-        //心跳进程
-        $node = Node::factory();
-        $node->id = $this->id;
-        $node->name = $this->name;
-        $node->ip = $this->ip;
-        $node->fingerprint = APP_FINGERPRINT;
-        $node->port = Runtime::instance()->httpPort();
-        $node->socketPort = Runtime::instance()->httpPort();
-        $node->role = App::isMaster() ? 'master' : 'slave';
-        $node->started = $this->started;
-        $node->restart_times = 0;
-        $node->master_pid = $this->server->master_pid;
-        $node->manager_pid = $this->server->manager_pid;
-        $node->swoole_version = swoole_version();
-        $node->cpu_num = swoole_cpu_num();
-        $node->stack_useage = Coroutine::getStackUsage();
-        $node->heart_beat = time();
-        $node->scf_version = SCF_VERSION;
-        $node->tables = ATable::list();
-        $node->threads = count(Coroutine::list());
-        $node->thread_status = Coroutine::stats();
-        $node->server_run_mode = APP_RUN_MODE;
-        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
-        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
-        $this->server->addProcess(SubProcess::heartbeat($this->server, $node));
-    }
-
-    /**
      * 重启服务器
      * @return void
      */
     public function reload(): void {
-        $countdown = 3;
+        $this->sendCommandToCrontabManager('upgrade', [
+            'scene' => 'reload'
+        ]);
+        $this->clearWorkerTimer();
+        $countdown = App::isDevEnv() ? 1 : 3;
         Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
         Timer::tick(1000, function ($id) use (&$countdown) {
             $countdown--;
             if ($countdown == 0) {
                 Timer::clear($id);
-                //定时任务迭代
-//                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-//                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                $this->sendCommandToCrontabManager('upgrade', [
-                    'scene' => 'reload'
-                ]);
-                $this->clearWorkerTimer();
                 $this->server->reload();
                 //重启控制台
                 if (App::isMaster()) {

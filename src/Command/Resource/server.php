@@ -1,9 +1,8 @@
 <?php
 return [
     'module_style' => 1,//模块风格 1:微应用;2:大型应用
-    'dashboard_port' => 8580,
     'port' => 9580,
-    'rpc_port' => 10580,
+    'rpc_port' => 9680,
     'worker_num' => 8,
     'max_wait_time' => 60,
     'task_worker_num' => 8,

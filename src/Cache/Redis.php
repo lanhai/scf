@@ -122,6 +122,7 @@ class Redis extends Cache {
     private function createPool(string|array $server = 'main'): static {
         $config = is_array($server) ? $server : $this->_config['servers'][$server];
         $httpServer = Http::master();
+
         $isTaskWorker = !is_null($httpServer) && $httpServer->taskworker;
         try {
             if (!$config['host']) {
@@ -142,7 +143,7 @@ class Redis extends Cache {
             $this->connection->setLogger($logger);
             $this->keyPrefix = $config["key_prefix"] ?? APP_ID;
         } catch (RedisException $exception) {
-            $msg = '【Redis】[' . $config['host'] . ':' . $config['port'] . ']创建连接池失败：' . $exception->getMessage();
+            $msg = '【Redis】[' . $config['host'] . ':' . $config['port'] . '-p=' . $config['auth'] . ']创建连接池失败：' . $exception->getMessage();
             throw new AppError($msg);
         }
         return $this;
@@ -312,10 +313,10 @@ class Redis extends Cache {
      */
     public function lock($key, int $expire = 5): bool {
         try {
-            if ($this->connection->get($key) || $this->connection->setNX($key, time()) === false) {
+            if ($this->connection->get($this->setPrefix($key)) || $this->connection->setNX($this->setPrefix($key), time()) === false) {
                 return false;
             }
-            $this->connection->expire($key, $expire);
+            $this->connection->expire($this->setPrefix($key), $expire);
             return true;
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);

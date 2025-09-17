@@ -318,7 +318,7 @@ class App {
      */
     public static function isMaster(): bool {
         $role = SERVER_ROLE;// self::installer()->role ?: SERVER_ROLE;
-        return $role === 'master';
+        return $role === NODE_ROLE_MASTER;
     }
 
     /**

@@ -84,7 +84,6 @@ class PdoLogger implements ILogger {
                 }
             }
             ($executeSql !== 'select 1' && $recordLog) and Log::instance()->error($exception->getMessage() . ';SQL:' . $executeSql, file: $file, line: $line);
-            //throw new AppError($exception->getMessage());
         }
     }
 }
