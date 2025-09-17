@@ -277,9 +277,9 @@ class Http extends \Scf\Core\Server {
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
             $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
         });
-        $this->server->on('pipeMessage', function ($server, $src_worker_id, $data) {
-            echo "#{$server->worker_id} message from #$src_worker_id: $data\n";
-        });
+//        $this->server->on('pipeMessage', function ($server, $src_worker_id, $data) {
+//            echo "#{$server->worker_id} message from #$src_worker_id: $data\n";
+//        });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
             $this->log(Color::red('服务器即将关闭'));
