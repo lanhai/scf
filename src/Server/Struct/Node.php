@@ -11,9 +11,9 @@ class Node extends Struct {
      */
     public string $id;
     /**
-     * @var string 应用ID
+     * @var ?string 应用ID
      */
-    public string $appid;
+    public ?string $appid;
     /**
      * @var string 节点名称
      */
