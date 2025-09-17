@@ -45,10 +45,8 @@ class Manager extends Component {
             if (App::isMaster()) {
                 $host = '127.0.0.1';
             }
-            $hostIsIp = filter_var($host, FILTER_VALIDATE_IP) !== false;
-            if ($hostIsIp) {
-                $serverConfig = Config::server();
-                $port = MASTER_PORT ?: $serverConfig['port'] ?? 9580;
+            if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+                $port = MASTER_PORT ?: Runtime::instance()->httpPort();
                 $host = $host . ':' . $port;
             }
             Runtime::instance()->set('_MASTER_HOST_', $host);
@@ -72,13 +70,13 @@ class Manager extends Component {
                 $status = $cli->statusCode ?? 'null';
                 $err = $cli->errCode ?? 'null';
                 Console::warning("【Server】连接master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
-                sleep(10);
+                sleep(5);
                 return $this->getMasterSocketConnection();
             }
             return $socket;
         } catch (RequestException $throwable) {
             Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
-            sleep(10);
+            sleep(5);
             return $this->getMasterSocketConnection();
         }
     }
@@ -125,6 +123,8 @@ class Manager extends Component {
                 }
             }
             $successed and Console::log("【Server】已向" . Color::cyan($successed) . "个子节点发送命令：{$command}");
+        } else {
+            Console::log("【Server】没有可用的节点");
         }
         return $successed;
     }
@@ -133,14 +133,15 @@ class Manager extends Component {
      * 添加节点客户端
      * @param $fd
      * @param string $host
+     * @param string $role
      * @return bool
      */
-    public function addNodeClient($fd, string $host): bool {
+    public function addNodeClient($fd, string $host, string $role): bool {
         return ServerNodeTable::instance()->set($host, [
             'host' => $host,
             'socket_fd' => $fd,
             'connect_time' => time(),
-            'role' => SERVER_ROLE
+            'role' => $role
         ]);
     }
 
@@ -435,9 +436,11 @@ class Manager extends Component {
 //                    continue;
 //                }
                 $node['online'] = true;
-                if (time() - $node['heart_beat'] > 20 && $online) {
+                if (time() - $node['heart_beat'] > 20) {
                     $node['online'] = false;
-                    continue;
+                    if ($online) {
+                        continue;
+                    }
                 }
                 $node['tasks'] = CrontabManager::allStatus();
                 $list[] = $node;

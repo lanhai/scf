@@ -34,7 +34,7 @@ class SocketListener extends Listener {
                         'version' => $data['data']['version'],
                     ]);
                     //等待所有节点升级完成
-                    if ($data['data']['type'] == 'app') {
+                    if ($finishCount && $data['data']['type'] == 'app') {
                         $finishCount = 0;
                         $round = 1;
                         // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
@@ -71,7 +71,9 @@ class SocketListener extends Listener {
                         $waitCh->pop(305);
                         $finishCount and Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
-                    $server->push($frame->fd, $finishCount);
+                    if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
+                        $server->push($frame->fd, $finishCount);
+                    }
                     App::appointUpdateTo($data['data']['type'], $data['data']['version']);
                     break;
                 case 'restartAll':
@@ -102,9 +104,10 @@ class SocketListener extends Listener {
                     break;
                 //节点报道
                 case 'slave_node_report':
-                    $host = $data['data'];
-                    if (Manager::instance()->addNodeClient($frame->fd, $host)) {
-                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道成功!客户端ID:" . $frame->fd]));
+                    $host = $data['data']['host'] ?? $data['data'];
+                    $role = $data['data']['role'] ?? NODE_ROLE_SLAVE;
+                    if (Manager::instance()->addNodeClient($frame->fd, $host, $role)) {
+                        $server->push($frame->fd, JsonHelper::toJson(['event' => 'slave_node_report_response', 'data' => $frame->fd]));
                     } else {
                         $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道失败!客户端ID:" . $frame->fd]));
                     }

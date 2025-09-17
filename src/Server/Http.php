@@ -377,7 +377,7 @@ INFO;
             if ($pid > 0) Process::kill($pid, SIGUSR2);
         }
 
-        Console::info('【Server】已向所有 worker 发送清理定时器指令');
+        Console::info('【Server】已向所有worker发送清理定时器指令');
     }
 
     /**
@@ -512,16 +512,16 @@ INFO;
      * @return void
      */
     public function reload(): void {
-        $this->sendCommandToCrontabManager('upgrade', [
-            'scene' => 'reload'
-        ]);
-        $this->clearWorkerTimer();
         $countdown = App::isDevEnv() ? 1 : 3;
         Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
         Timer::tick(1000, function ($id) use (&$countdown) {
             $countdown--;
             if ($countdown == 0) {
                 Timer::clear($id);
+                $this->sendCommandToCrontabManager('upgrade', [
+                    'scene' => 'reload'
+                ]);
+                $this->clearWorkerTimer();
                 $this->server->reload();
                 //重启控制台
                 if (App::isMaster()) {

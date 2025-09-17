@@ -11,12 +11,12 @@ class ServerNodeTable extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 1024,
+        'size' => 300,
         'colums' => [
             'host' => ['type' => Table::TYPE_STRING, 'size' => 128],
-            'role' => ['type' => Table::TYPE_STRING, 'size' => 16],
+            'role' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'socket_fd' => ['type' => Table::TYPE_INT, 'size' => 0],
-            'connect_time' => ['type' => Table::TYPE_INT, 'size' => 0],
+            'connect_time' => ['type' => Table::TYPE_INT, 'size' => 0]
         ]
     ];
 

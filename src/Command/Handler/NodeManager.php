@@ -202,8 +202,6 @@ class NodeManager {
                 if (!$node) {
                     continue;
                 }
-                $node['framework_build_version'] = $node['framework_build_version'] ?? '--';
-                $node['framework_update_ready'] = $node['framework_update_ready'] ?? false;
                 $node = Node::factory($node);
                 if (time() - $node->heart_beat >= 3) {
                     continue;
@@ -244,7 +242,7 @@ class NodeManager {
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
         $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version]]));
-        $reply = $socket->recv(60 * 5);
+        $reply = $socket->recv(30);
         if ($reply === false || $reply->data == '') {
             $socket->close();
             return Result::error('升级未完成');

@@ -35,8 +35,12 @@ class SubProcess {
                         break;
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
-                    $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => SERVER_HOST]));
+                    $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => [
+                        'host' => SERVER_HOST,
+                        'role' => SERVER_ROLE
+                    ]]));
                     $node = Node::factory();
+                    $node->appid = APP_ID;
                     $node->id = SERVER_NODE_ID;
                     $node->name = SERVER_NAME;
                     $node->ip = SERVER_HOST;
@@ -130,9 +134,9 @@ class SubProcess {
                                         default:
                                             Console::warning("【Server】Command '$command' is not supported", false);
                                     }
-                                } elseif ($event == 'welcome') {
+                                } elseif ($event == 'slave_node_report_response') {
                                     $masterHost = Manager::instance()->getMasterHost();
-                                    Console::success('【Server】已连接到master节点:' . $masterHost, false);
+                                    Console::success('【Server】已和master[' . $masterHost . ']建立连接,客户端ID:' . $data['data'], false);
                                 }
                             }
                         } else {
