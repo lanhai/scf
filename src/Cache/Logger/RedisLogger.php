@@ -21,9 +21,9 @@ class RedisLogger implements LoggerInterface {
         if (!is_null(Http::server())) {
             ProcessLife::instance()->addRedis("{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         }
-        PRINT_REDIS_LOG and Console::info("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
+        PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? "") . "【{$time}】ms");
         if (!is_null($exception)) {
-            Console::error("【RedisLogger】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile(), false);
+            Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile(), false);
         }
     }
 }

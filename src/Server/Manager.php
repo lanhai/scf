@@ -3,6 +3,7 @@
 namespace Scf\Server;
 
 use Scf\Cache\Redis;
+use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Component;
@@ -421,13 +422,23 @@ class Manager extends Component {
 
     /**
      * 获取节点列表
-     * @param bool $online
+     * @param bool $onlineOnly
      * @return array
      */
-    public function getServers(bool $online = true): array {
+    public function getServers(bool $onlineOnly = true): array {
         //$masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         //$this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
-        $nodes = ServerNodeStatusTable::instance()->rows();
+        if (SERVER_MODE == MODE_CGI) {
+            $nodes = ServerNodeStatusTable::instance()->rows();
+        } else {
+            $client = Http::create('http://localhost:' . File::read(SERVER_PORT_FILE) . '/nodes');
+            $result = $client->get();
+            if ($result->hasError()) {
+                Console::error($result->getMessage());
+                return [];
+            }
+            $nodes = $result->getData('data');
+        }
         $list = [];
         if ($nodes) {
             foreach ($nodes as $node) {
@@ -438,7 +449,7 @@ class Manager extends Component {
                 $node['online'] = true;
                 if (time() - $node['heart_beat'] > 20) {
                     $node['online'] = false;
-                    if ($online) {
+                    if ($onlineOnly) {
                         continue;
                     }
                 }

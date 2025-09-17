@@ -36,11 +36,20 @@ class DashboardController extends Controller {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
             Response::interrupt("应用尚未完成初始化安装", 'APP_NOT_INSTALL_YET', status: 200);
         }
-        $publisPaths = ['/install', '/install_check', '/login', '/memory'];
+        $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes'];
         if (!in_array($path, $publisPaths) && !$this->isLogin()) {
             Response::interrupt("未授权的访问: " . $path, status: 200);
         }
 
+    }
+
+    /**
+     * 节点列表
+     * @return Result
+     */
+    public function actionNodes(): Result {
+        $nodes = Manager::instance()->getServers(false);
+        return Result::success($nodes);
     }
 
     /**

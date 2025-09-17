@@ -56,9 +56,8 @@ class Install implements CommandInterface {
         $path = $options['path'] ?? Console::input('请输入应用路径(位于apps下的相对路径),缺省值:app');
         $installer = Installer::mount($path, create: true);
         $installer->app_path = $path ?: 'app';
-        $defaultAppid = $installer->app_path . '-' . Random::character();
+        $defaultAppid = 'SCF' . Random::character();
         $installer->appid = $options['appid'] ?? Console::input('请输入appid', default: $defaultAppid);
-
         if (is_dir(SCF_APPS_ROOT . '/' . $installer->app_path)) {
             Console::log(Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作:' . SCF_APPS_ROOT . '/' . $installer->app_path));
         }
@@ -145,14 +144,6 @@ class Install implements CommandInterface {
             }
             $remote = $result->getData();
             $appVersion = $remote['app'] ?? '';
-//        $updateServerVersion = file_get_contents($server . '?time=' . time());
-//        if (!$updateServerVersion) {
-//            Console::log('获取云端版本号失败');
-//            exit();
-//        }
-
-//            $remote = JsonHelper::recover($updateServerVersion);
-//            $appVersion = $remote['app'];
             if ($appVersion) {
                 $creater->version = $appVersion[0]['version'];;
                 $creater->appid = $appVersion[0]['appid'];
