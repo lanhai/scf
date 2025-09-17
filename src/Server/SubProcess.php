@@ -2,17 +2,20 @@
 
 namespace Scf\Server;
 
-use Exception;
-use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Log;
+use Scf\Core\Table\ATable;
+use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Helper\JsonHelper;
 use Scf\Root;
-use Scf\Server\Manager as ServerManager;
 use Scf\Server\Struct\Node;
+use Scf\Util\Date;
 use Scf\Util\Dir;
+use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -20,7 +23,7 @@ use function Co\run;
 
 class SubProcess {
 
-    public static function connectMaster(Server $server): Process {
+    public static function createHeartbeatProcess(Server $server): Process {
         return new Process(function ($process) use ($server) {
             Console::info("【Server】主节点连接PID:" . $process->pid, false);
             App::mount();
@@ -33,9 +36,53 @@ class SubProcess {
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
                     $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => SERVER_HOST]));
+                    $node = Node::factory();
+                    $node->id = SERVER_NODE_ID;
+                    $node->name = SERVER_NAME;
+                    $node->ip = SERVER_HOST;
+                    $node->fingerprint = APP_FINGERPRINT;
+                    $node->port = Runtime::instance()->httpPort();
+                    $node->socketPort = Runtime::instance()->httpPort();
+                    $node->role = SERVER_ROLE;
+                    $node->started = time();
+                    $node->restart_times = 0;
+                    $node->master_pid = $server->master_pid;
+                    $node->manager_pid = $server->manager_pid;
+                    $node->swoole_version = swoole_version();
+                    $node->cpu_num = swoole_cpu_num();
+                    $node->stack_useage = Coroutine::getStackUsage();
+                    $node->scf_version = SCF_VERSION;
+                    $node->server_run_mode = APP_RUN_MODE;
+                    $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
-                    $pingTimerId = Timer::tick(1000 * 30, function () use ($socket) {
-                        $socket->push('::ping');
+                    $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, $server, &$node) {
+                        $profile = App::profile();
+                        $node->app_version = $profile->version;
+                        $node->public_version = $profile->public_version ?: '--';
+                        $node->heart_beat = time();
+                        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
+                        $node->tables = ATable::list();
+                        $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
+                        $node->stack_useage = memory_get_usage(true);
+                        $node->threads = count(Coroutine::list());
+                        $node->thread_status = Coroutine::stats();
+                        $node->server_stats = $server->stats();
+                        $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
+                        $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
+                        $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
+                        $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
+                        $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
+                        $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
+                        //$node->tasks = CrontabManager::allStatus();
+                        if ($node->role == NODE_ROLE_MASTER) {
+                            ServerNodeStatusTable::instance()->set(SERVER_HOST, $node->asArray());
+                            $socket->push('::ping');
+                        } else {
+                            $socket->push(JsonHelper::toJson(['event' => 'node_heart_beat', 'data' => [
+                                'host' => SERVER_HOST,
+                                'status' => $node->asArray()
+                            ]]));
+                        }
                     });
                     // 读循环：直到断开
                     while (true) {
@@ -56,13 +103,10 @@ class SubProcess {
                             $socket->close();
                             break;
                         }
-                        if ($reply && !empty($reply->data)) {
+                        if ($reply && !empty($reply->data) && $reply->data !== "::pong") {
                             // 如果服务端发来 ping 帧，立刻回 pong，保持长连接
                             if (isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
                                 $socket->push('', WEBSOCKET_OPCODE_PONG);
-                            }
-                            if ($reply->data == "::pong") {
-                                continue;
                             }
                             Console::info("【Server】收到master消息:" . $reply->data, false);
                             if (JsonHelper::is($reply->data)) {
@@ -110,44 +154,6 @@ class SubProcess {
     }
 
     /**
-     * 心跳进程
-     * @param Server $server
-     * @param Node $node
-     * @return Process
-     */
-    public static function heartbeat(Server $server, Node $node): Process {
-        return new Process(function ($process) use ($server, $node) {
-            sleep(1);
-            if (Process::kill($server->manager_pid, 0)) {
-                Console::info("【Server】心跳服务PID:" . $process->pid, false);
-                App::mount();
-                $node->appid = App::id();
-                $node->app_version = App::version();
-                $node->public_version = App::publicVersion();
-                function register($process, $server, $node): void {
-                    $manager = ServerManager::instance();
-                    try {
-                        if ($manager->register($node) === false) {
-                            Console::log('【Server】节点报道失败:' . Color::red("MasterDB不可用"));
-                            Timer::after(5000, function () use ($process, $server, $node) {
-                                register($process, $server, $node);
-                            });
-                        }
-                        Timer::tick(5000, function () use ($manager, $node, $server, $process) {
-                            $manager->heartbeat($server, $node);
-                        });
-                        \Swoole\Event::wait();
-                    } catch (Exception $exception) {
-                        Console::log('【Server】节点报道失败:' . Color::red($exception->getMessage()));
-                    }
-                }
-
-                register($process, $server, $node);
-            }
-        });
-    }
-
-    /**
      * 日志备份
      * @param Server $server
      * @return Process
@@ -156,8 +162,8 @@ class SubProcess {
         return new Process(function ($process) use ($server) {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
-                Console::info("【Server】日志备份PID:" . $process->pid, false);
                 App::mount();
+                Console::info("【Server】日志备份PID:" . $process->pid, false);
                 $logger = Log::instance();
                 Timer::tick(5000, function () use ($logger, $server, $process) {
                     $logger->backup();
@@ -177,6 +183,7 @@ class SubProcess {
         return new Process(function ($process) use ($server, $port) {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
+                App::mount();
                 Console::info("【Server】文件改动监听服务PID:" . $process->pid, false);
                 $scanDirectories = function () {
                     if (APP_RUN_MODE == 'src') {
@@ -197,10 +204,8 @@ class SubProcess {
                 while (true) {
                     $changed = false;
                     $changedFiles = [];
-                    // Rescan directories to find new files
                     $currentFiles = $scanDirectories();
                     $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
-                    // Check for new files
                     foreach ($currentFilePaths as $path) {
                         if (!in_array($path, array_column($fileList, 'path'))) {
                             $fileList[] = [
@@ -231,19 +236,7 @@ class SubProcess {
                             Console::write($f);
                         }
                         Console::warning('-------------------------------------------');
-                        $httpServer = Http::instance();
-                        $httpServer->clearWorkerTimer();
-                        $httpServer->sendCommandToCrontabManager('upgrade');
-                        $server->reload();
-                        // Console::info("重启状态:" . $this->server->reload());
-                        //定时任务迭代
-//                        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-//                        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                        if ($port && App::isMaster()) {
-                            $dashboardHost = PROTOCOL_HTTP . 'localhost:' . Runtime::instance()->dashboardPort() . '/reload';
-                            $client = \Scf\Client\Http::create($dashboardHost);
-                            $client->get();
-                        }
+                        Http::instance()->reload();
                     }
                     sleep(3);
                 }

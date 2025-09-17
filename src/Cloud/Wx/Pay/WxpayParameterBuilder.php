@@ -12,6 +12,7 @@ use Scf\Util\Sn;
 use Throwable;
 
 class WxpayParameterBuilder extends Component {
+
     /**
      * API版本
      * @var string
@@ -24,6 +25,7 @@ class WxpayParameterBuilder extends Component {
     protected ?array $pem = null;
     protected array $params = [];
     protected string $action;
+    protected array $pathParams = [];
 
     /**
      * 创建转账参数
@@ -50,6 +52,7 @@ class WxpayParameterBuilder extends Component {
         }
         return $obj;
     }
+
 
     /**
      * 预交易下单
@@ -94,38 +97,35 @@ class WxpayParameterBuilder extends Component {
      */
     public function transfer(int $amount, string $desc = "系统转账", ?string $paySn = null): Result {
         $this->action = 'transfer';
+        if (empty($this->pem['cert']) || empty($this->pem['key'])) {
+            return Result::error('缺少API操作证书');
+        }
+        if (!$this->_mchId) {
+            return Result::error('缺少参数:mchId');
+        }
+        if (!$this->_openid) {
+            return Result::error('缺少参数:openid');
+        }
+        $paySn = $paySn ?: Sn::create('T');
+        $this->params = [];
+
         if (!$this->_key) {
             return Result::error('缺少参数:key');
         }
-        if ($this->_version == 'v3') {
-            return Result::error('V3暂不支持');
-        } else {
-            if (empty($this->pem['cert']) || empty($this->pem['key'])) {
-                return Result::error('缺少API操作证书');
-            }
-            if (!$this->_mchId) {
-                return Result::error('缺少参数:mchId');
-            }
-            if (!$this->_openid) {
-                return Result::error('缺少参数:openid');
-            }
-            $paySn = $paySn ?: Sn::create('T');
-            $this->params = [];
-            $nonceStr = Random::character(16);
-            $this->setParameter('mch_appid', $this->_appid);
-            $this->setParameter('mchid', $this->_mchId);
-            $this->setParameter('nonce_str', $nonceStr);
-            $this->setParameter('partner_trade_no', $paySn);
-            $this->setParameter('openid', $this->_openid);
-            $this->setParameter('check_name', 'NO_CHECK');
-            $this->setParameter('amount', $amount);
-            $this->setParameter('desc', $desc);
-            //$this->setParameter('spbill_create_ip', get_client_ip());
-            if (!$sign = $this->createSign()) {
-                return Result::error('签名生成失败');
-            }
-            $this->setParameter('sign', $sign); //签名
+        $nonceStr = Random::character(16);
+        $this->setParameter('mch_appid', $this->_appid);
+        $this->setParameter('mchid', $this->_mchId);
+        $this->setParameter('openid', $this->_openid);
+        $this->setParameter('nonce_str', $nonceStr);
+        $this->setParameter('partner_trade_no', $paySn);
+        $this->setParameter('check_name', 'NO_CHECK');
+        $this->setParameter('amount', $amount);
+        $this->setParameter('desc', $desc);
+        //$this->setParameter('spbill_create_ip', get_client_ip());
+        if (!$sign = $this->createSign()) {
+            return Result::error('签名生成失败');
         }
+        $this->setParameter('sign', $sign); //签名
         return Result::success();
     }
 
@@ -157,6 +157,14 @@ class WxpayParameterBuilder extends Component {
     public function mchId(string $mchId): static {
         $this->_mchId = $mchId;
         return $this;
+    }
+
+    /**
+     * 获取微信支付商户ID
+     * @return string
+     */
+    public function getMchId(): string {
+        return $this->_mchId;
     }
 
     /**
@@ -203,10 +211,10 @@ class WxpayParameterBuilder extends Component {
     /**
      * 设置签名参数值
      * @param string $parameter 字段名
-     * @param string $parameterValue 字段值
+     * @param string|array|int $parameterValue 字段值
      */
-    protected function setParameter(string $parameter, string $parameterValue): void {
-        $this->params[StringHelper::trim($parameter)] = StringHelper::trim($parameterValue);
+    protected function setParameter(string $parameter, string|array|int $parameterValue): void {
+        $this->params[StringHelper::trim($parameter)] = is_array($parameterValue) ? $parameterValue : (is_string($parameterValue) ? StringHelper::trim($parameterValue) : (int)$parameterValue);
     }
 
     /**

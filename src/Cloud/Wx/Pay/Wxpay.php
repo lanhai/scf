@@ -3,18 +3,16 @@
 namespace Scf\Cloud\Wx\Pay;
 
 use Scf\Client\Http;
+use Scf\Core\App;
 use Scf\Core\Component;
 use Scf\Core\Result;
 use Scf\Helper\XmlHelper;
 
-/**
- * 微信支付请求组件
- * 单例模式,勿使用属性参数!
- */
 class Wxpay extends Component {
+    protected string $apiHost = 'https://api.mch.weixin.qq.com';
     protected array $gateway = [
-        'transfer_v2' => 'https://api.mch.weixin.qq.com/mmpaymkttransfers/promotion/transfers',
-        'unifiedorder_v2' => 'https://api.mch.weixin.qq.com/pay/unifiedorder'
+        'transfer' => '/mmpaymkttransfers/promotion/transfers',
+        'unifiedorder' => '/pay/unifiedorder'
     ];
 
     /**
@@ -35,8 +33,7 @@ class Wxpay extends Component {
      * @return Result
      */
     protected function unifiedorder(WxpayParameterBuilder $builder): Result {
-        $client = Http::create($this->gateway['unifiedorder_v2']);
-        return $this->http($builder, $client);
+        return $this->http($builder, $this->gateway['unifiedorder']);
     }
 
     /**
@@ -45,24 +42,22 @@ class Wxpay extends Component {
      * @return Result
      */
     protected function transfer(WxpayParameterBuilder $builder): Result {
-        if ($builder->getVersion() == 'v3') {
-            return Result::error('不支持的方法');
-        }
-        $pem = $builder->getPem();
-        $client = Http::create($this->gateway['transfer_v2'], certificate: $pem);
-        return $this->http($builder, $client);
+        return $this->http($builder, $this->gateway['transfer']);
     }
 
     /**
      * 提交HTTP请求
      * @param WxpayParameterBuilder $builder
-     * @param Http $client
+     * @param string|array $path
      * @return Result
      */
-    protected function http(WxpayParameterBuilder $builder, Http $client): Result {
+    protected function http(WxpayParameterBuilder $builder, string|array $path): Result {
+        $apiHost = App::isDevEnv() ? 'https://api.weixin.lkyapp.com/pay' : $this->apiHost;
+        $pem = $builder->getPem();
+        $client = Http::create($apiHost . $path, certificate: $pem);
         $request = $client->XPost($builder->getParams());
         if ($request->hasError()) {
-            return Result::error($request->getMessage(), 'REQUEST_ERROR');
+            return Result::error($request->getMessage(), $request->getErrCode());
         }
         $result = XmlHelper::toArray($request->getData());
         $returnCode = $result['return_code'] ?? "FAIL";

@@ -39,7 +39,9 @@
     "symfony/yaml": "6.4.8",
     "symfony/console": "^6.4",
     "alibabacloud/darabonba-openapi": "0.2.13",
-    "alibabacloud/dysmsapi-20170525": "3.1.0"
+    "alibabacloud/dysmsapi-20170525": "3.1.0",
+    "ext-sodium": "*",
+    "ext-libsodium": "*"
   },
   "license": "MIT",
   "authors": [

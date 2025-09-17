@@ -5,13 +5,13 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Http;
 use Scf\Server\Manager;
 use Scf\Util\Auth;
 use Swoole\Coroutine\Channel;
-use Swoole\Event;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
 use Swoole\Timer;
@@ -45,7 +45,7 @@ class SocketListener extends Listener {
                             $nodes = Manager::instance()->getServers();
                             if ($nodes) {
                                 foreach ($nodes as $node) {
-                                    if ($node['role'] == 'master') {
+                                    if ($node['role'] == NODE_ROLE_MASTER) {
                                         continue;
                                     }
                                     $current = (int)str_replace('.', '', $node['app_version']);
@@ -69,7 +69,7 @@ class SocketListener extends Listener {
                         });
                         // 等待最多 600 秒（12*10 轮 * 5s）或被提前唤醒
                         $waitCh->pop(305);
-                        Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
+                        $finishCount and Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
                     $server->push($frame->fd, $finishCount);
                     App::appointUpdateTo($data['data']['type'], $data['data']['version']);
@@ -110,6 +110,12 @@ class SocketListener extends Listener {
                     }
                     $nodes = ServerNodeTable::instance()->rows();
                     Console::info("【Server】{$host} 节点加入,客户端连接ID:{$frame->fd},当前累计连接数:" . count($nodes));
+                    break;
+                case 'node_heart_beat':
+                    $host = $data['data']['host'];
+                    $status = $data['data']['status'];
+                    ServerNodeStatusTable::instance()->set($host, $status);
+                    $server->push($frame->fd, "::pong");
                     break;
                 default:
                     $server->push($frame->fd, "不支持的事件");

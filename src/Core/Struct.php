@@ -13,10 +13,12 @@ use Scf\Helper\JsonHelper;
 /**
  * 数据结构类型基类
  * 提供基于注释的字段验证
- * @version 1.1 添加验证规则func和method的支持
- * @version 1.2 增加@skip标签,字段可以被赋值,但不会参加验证和toArray(true)返回,应用于ID字段等
- * @version 1.2.1 增加@ghost标签,字段可以被赋值,但不会参加验证和toArray()任何参数都不会返回,应用于表单重复密码字段等
- * @version 1.3 增加标签的标签,[scene],设置标签的应用场景
+ * @v 1.3 添加验证规则func和method的支持
+ * @v 1.2 增加@skip标签,字段可以被赋值,但不会参加验证和toArray(true)返回,应用于ID字段等
+ * @v 1.2.1 增加@ghost标签,字段可以被赋值,但不会参加验证和toArray()任何参数都不会返回,应用于表单重复密码字段等
+ * @v 1.3 增加标签的标签,[scene],设置标签的应用场景
+ * @version 1.2
+ * @updated 2025-09-17 01:20:59
  */
 class Struct {
     /**
@@ -170,12 +172,17 @@ class Struct {
                 continue;
             }
             if (!isset($this->$f)) {
-                $this->$f = null;
+                if (!$filterNull) {
+                    $_data[$f] = null;
+                }
+                continue;
+                //$this->$f = null;
+                //continue; // 过滤null字段
             }
             if ($filterNull && !is_array($this->$f)) {
-                if (is_null($this->$f)) {
-                    continue; // 过滤null字段
-                }
+//                if (is_null($this->$f)) {
+//                    continue; // 过滤null字段
+//                }
                 if (is_string($this->$f) && 'null' == strtolower($this->$f)) {
                     continue; // 过滤null字段
                 }

@@ -199,7 +199,7 @@ class Log {
             }
             $types = ['info', 'error', 'slow', 'crontab'];
             foreach ($types as $type) {
-                $logLength = min(10, $masterDB->lLength('_LOGS_' . $type));
+                $logLength = min(20, $masterDB->lLength('_LOGS_' . $type));
                 if (!$logLength) {
                     continue;
                 }

@@ -69,7 +69,6 @@ INFO;
         Process::signal(SIGUSR2, function () use ($workerId) {
             try {
                 //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器");
-                // 清理所有定时器
                 MemoryMonitor::stop();
                 Timer::clearAll();
             } catch (Throwable $e) {
