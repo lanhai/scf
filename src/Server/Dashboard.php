@@ -31,6 +31,10 @@ class Dashboard {
 
     protected ?Server $_SERVER = null;
 
+    public static function host(): string {
+        return 'http://127.0.0.1:' . File::read(SERVER_PORT_FILE);
+    }
+
     public static function start(): void {
         if (!App::isMaster() && App::isReady()) {
             return;
@@ -112,7 +116,7 @@ class Dashboard {
             $this->_SERVER->reload();
         } else {
             try {
-                $this->_SERVER = new Server('0.0.0.0');
+                $this->_SERVER = new Server('127.0.0.1');
                 $setting = [
                     'worker_num' => 2,
                     'max_wait_time' => 60,
@@ -129,7 +133,7 @@ class Dashboard {
                 $this->_SERVER->set($setting);
                 //监听HTTP请求
                 try {
-                    $httpPort = $this->_SERVER->listen('0.0.0.0', $port, SWOOLE_BASE);
+                    $httpPort = $this->_SERVER->listen('127.0.0.1', $port, SWOOLE_BASE);
                     $httpPort->set([
                         'open_http_protocol' => true,
                         'open_http2_protocol' => true,
