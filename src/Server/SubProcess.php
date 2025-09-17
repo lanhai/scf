@@ -28,6 +28,25 @@ class SubProcess {
             Console::info("【Server】主节点连接PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
+                $node = Node::factory();
+                $node->appid = APP_ID;
+                $node->id = SERVER_NODE_ID;
+                $node->name = SERVER_NAME;
+                $node->ip = SERVER_HOST;
+                $node->fingerprint = APP_FINGERPRINT;
+                $node->port = Runtime::instance()->httpPort();
+                $node->socketPort = Runtime::instance()->httpPort();
+                $node->role = SERVER_ROLE;
+                $node->started = time();
+                $node->restart_times = 0;
+                $node->master_pid = $server->master_pid;
+                $node->manager_pid = $server->manager_pid;
+                $node->swoole_version = swoole_version();
+                $node->cpu_num = swoole_cpu_num();
+                $node->stack_useage = Coroutine::getStackUsage();
+                $node->scf_version = SCF_VERSION;
+                $node->server_run_mode = APP_RUN_MODE;
+                $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                 while (true) {
                     // 主进程存活检测
                     if (!Process::kill($server->manager_pid, 0)) {
@@ -39,25 +58,6 @@ class SubProcess {
                         'host' => SERVER_HOST,
                         'role' => SERVER_ROLE
                     ]]));
-                    $node = Node::factory();
-                    $node->appid = APP_ID;
-                    $node->id = SERVER_NODE_ID;
-                    $node->name = SERVER_NAME;
-                    $node->ip = SERVER_HOST;
-                    $node->fingerprint = APP_FINGERPRINT;
-                    $node->port = Runtime::instance()->httpPort();
-                    $node->socketPort = Runtime::instance()->httpPort();
-                    $node->role = SERVER_ROLE;
-                    $node->started = time();
-                    $node->restart_times = 0;
-                    $node->master_pid = $server->master_pid;
-                    $node->manager_pid = $server->manager_pid;
-                    $node->swoole_version = swoole_version();
-                    $node->cpu_num = swoole_cpu_num();
-                    $node->stack_useage = Coroutine::getStackUsage();
-                    $node->scf_version = SCF_VERSION;
-                    $node->server_run_mode = APP_RUN_MODE;
-                    $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, $server, &$node) {
                         $profile = App::profile();
