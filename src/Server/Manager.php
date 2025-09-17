@@ -104,7 +104,7 @@ class Manager extends Component {
      * @return int
      */
     public function sendCommandToAllNodeClients(string $command, array $params = []): int {
-        $server = Http::server();
+        $server = \Scf\Server\Http::server();
         $nodes = ServerNodeTable::instance()->rows();
         $successed = 0;
         if ($nodes) {
