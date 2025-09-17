@@ -32,6 +32,10 @@ use Throwable;
 
 class DashboardController extends Controller {
 
+    public static array $protectedActions = [
+        '/nodes', '/memory'
+    ];
+
     public function init($path): void {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
             Response::interrupt("应用尚未完成初始化安装", 'APP_NOT_INSTALL_YET', status: 200);

@@ -171,7 +171,7 @@ class Manager extends Component {
     public function sendMessageToAllDashboardClients(string $message): void {
         $nodes = Runtime::instance()->get('DASHBOARD_CLIENTS') ?: [];
         if ($nodes) {
-            $server = Http::server();
+            $server = \Scf\Server\Http::server();
             $changed = false;
             foreach ($nodes as $fd) {
                 if (!$server->isEstablished($fd) || !$server->push($fd, $message)) {
@@ -431,7 +431,7 @@ class Manager extends Component {
         if (SERVER_MODE == MODE_CGI) {
             $nodes = ServerNodeStatusTable::instance()->rows();
         } else {
-            $client = Http::create('http://localhost:' . File::read(SERVER_PORT_FILE) . '/nodes');
+            $client = Http::create(Dashboard::host() . '/nodes');
             $result = $client->get();
             if ($result->hasError()) {
                 Console::error($result->getMessage());

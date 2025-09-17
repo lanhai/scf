@@ -201,6 +201,14 @@ class CgiListener extends Listener {
         if (str_starts_with($request->server['path_info'], '/~',)) {
             $isIndex = $request->server['path_info'] == '/~/' || $request->server['path_info'] == '/~';
             $path = str_replace("/~", "", $request->server['path_info']);
+            if (in_array($path, DashboardController::$protectedActions)) {
+                $response->status(200);
+                $response->end(JsonHelper::toJson([
+                    'errCode' => 'UNAUTHORIZED',
+                    'message' => "未授权的访问",
+                    'data' => null
+                ]));
+            }
             $controller = new DashboardController();
             $method = 'action' . StringHelper::lower2camel(str_replace("/", "_", substr($path, 1)));
             if (!$isIndex && !method_exists($controller, $method)) {
@@ -208,17 +216,18 @@ class CgiListener extends Listener {
                 return false;
             }
             $port = Runtime::instance()->dashboardPort();
-            if (App::isReady()) {
-                $masterHost = App::isMaster() ? 'localhost' : (Config::get('app')['master_host'] ?? 'localhost');
-                if (SERVER_HOST_IS_IP || App::isMaster()) {
-                    $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . $port;
-                } else {
-                    $dashboardHost = PROTOCOL_HTTP . $port . '.' . $masterHost;
-                }
-            } else {
-                $masterHost = 'localhost';
-                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $port;
-            }
+//            if (App::isReady()) {
+//                $masterHost = App::isMaster() ? 'localhost' : (Config::get('app')['master_host'] ?? 'localhost');
+//                if (SERVER_HOST_IS_IP || App::isMaster()) {
+//                    $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . $port;
+//                } else {
+//                    $dashboardHost = PROTOCOL_HTTP . $port . '.' . $masterHost;
+//                }
+//            } else {
+//                $masterHost = 'localhost';
+//                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $port;
+//            }
+            $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . $port;
             if ($isIndex) {
                 $url = $dashboardHost . '/dashboard';
             } else {
@@ -231,8 +240,8 @@ class CgiListener extends Listener {
             foreach ($request->header as $key => $value) {
                 $client->setHeader($key, $value);
             }
-            $client->setHeader('host', $request->header['host'] ?? $masterHost);
-            $client->setHeader('referer', $request->header['referer'] ?? $masterHost);
+            $client->setHeader('host', $request->header['host'] ?? 'localhost');
+            $client->setHeader('referer', $request->header['referer'] ?? 'localhost');
             $sessionId = Request::cookie('_SESSIONID_');
             if (!$sessionId) {
                 $sessionId = Sn::create_uuid();
@@ -253,7 +262,6 @@ class CgiListener extends Listener {
                     'errCode' => $result->getErrCode(),
                     'message' => "转发请求至控制面板失败:" . $result->getMessage(),
                     'data' => [
-                        'master' => $masterHost,
                         'host' => $dashboardHost,
                         'url' => $url,
                         'method' => $request->server['request_method'],

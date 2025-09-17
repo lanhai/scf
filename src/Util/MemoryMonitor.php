@@ -9,6 +9,7 @@ use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
+use Scf\Server\Dashboard;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Timer;
@@ -23,7 +24,7 @@ class MemoryMonitor {
      */
     public static function useage($filter = null): void {
         Coroutine::create(function () use ($filter) {
-            $client = Http::create('http://localhost:' . File::read(SERVER_PORT_FILE) . '/memory');
+            $client = Http::create(Dashboard::host() . '/memory');
             $result = $client->get();
             if ($result->hasError()) {
                 Console::error($result->getMessage());
