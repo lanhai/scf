@@ -2,7 +2,6 @@
 
 namespace Scf\Command\DefaultCommand;
 
-use JetBrains\PhpStorm\NoReturn;
 use Phar;
 use PhpZip\ZipFile;
 use Scf\Cloud\Ali\Oss;
@@ -81,7 +80,7 @@ class Build implements CommandInterface {
     }
 
 
-    #[NoReturn] public function framework(): void {
+    public function framework(): void {
         Console::log('开始构建框架:' . Root::root());
         $buildDir = BUILD_PATH . 'framework/';
         if (!is_dir($buildDir)) {
@@ -113,7 +112,7 @@ class Build implements CommandInterface {
         $phar->setDefaultStub('version.php', 'version.php');
         $localFile = $buildDir . "/" . $version . ".update";
         exec('mv ' . $buildFilePath . ' ' . $localFile);
-        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/update.pack");
+        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/src.pack");
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
@@ -151,6 +150,7 @@ class Build implements CommandInterface {
             'boot' => "https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot"
         ], true));
         $versionFileContent = "<?php\n  return $versionInputData;";
+        unlink($localFile);
         if (!File::write($versionFile, $versionFileContent)) {
             Console::log('本地版本文件还原写入失败:' . $versionFile);
         }
@@ -304,6 +304,7 @@ class Build implements CommandInterface {
                 exit();
             } else {
                 Console::log('源码包上传成功:' . Color::green($uploadResult->getData()));
+                unlink($encryptedFilePath);
             }
             $releaseVersion['app_object'] = $versionObject;
         }
@@ -344,6 +345,7 @@ class Build implements CommandInterface {
                         Console::log('资源文件包上传成功:' . Color::green($uploadResult->getData()));
                     }
                     $releaseVersion['public_object'] = $publicObject;
+                    unlink($publicFilePath);
                 } catch (\Exception $exception) {
                     Console::log('打包资源文件失败:' . Color::red($exception->getMessage()));
                     exit();

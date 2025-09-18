@@ -5,6 +5,7 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Helper\JsonHelper;
@@ -34,12 +35,12 @@ class SocketListener extends Listener {
                         'version' => $data['data']['version'],
                     ]);
                     //等待所有节点升级完成
-                    if ($finishCount && $data['data']['type'] == 'app') {
+                    if ($finishCount) {
                         $finishCount = 0;
                         $round = 1;
                         // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
                         $waitCh = new Channel(1);
-                        Timer::tick(1000 * 5, function ($timerId) use ($data, &$finishCount, &$round, $waitCh) {
+                        Timer::tick(1000 * 3, function ($timerId) use ($data, &$finishCount, &$round, $waitCh) {
                             $finish = true;
                             $count = 0;
                             $nodes = Manager::instance()->getServers();
@@ -48,7 +49,8 @@ class SocketListener extends Listener {
                                     if ($node['role'] == NODE_ROLE_MASTER) {
                                         continue;
                                     }
-                                    $current = (int)str_replace('.', '', $node['app_version']);
+                                    $updateType = $data['data']['type'];
+                                    $current = (int)str_replace('.', '', $updateType == 'app' ? $node['app_version'] : $node['framework_build_version']);
                                     $target = (int)str_replace('.', '', $data['data']['version']);
                                     if ($current !== $target) {
                                         $finish = false;
@@ -88,6 +90,11 @@ class SocketListener extends Listener {
                 case 'server_status':
                     Manager::instance()->addDashboardClient($frame->fd);
                     Timer::tick(1000, function ($id) use ($server, $frame) {
+                        if (!Runtime::instance()->serverRunning()) {
+                            $server->close($frame->fd);
+                            Timer::clear($id);
+                            return;
+                        }
                         $status = Manager::instance()->getStatus();
                         if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
                             try {

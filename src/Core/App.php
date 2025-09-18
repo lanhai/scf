@@ -21,6 +21,7 @@ use Swoole\Coroutine\Http\Client;
 use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Runtime;
+use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Symfony\Component\Yaml\Yaml;
@@ -51,7 +52,13 @@ class App {
         try {
             $httpServer = \Scf\Server\Http::instance();
             if (Updater::instance()->appointUpdateTo($type, $version)) {
-                $type == 'app' and $httpServer->reload();
+                if ($type == 'app') {
+                    $httpServer->reload();
+                } else {
+                    Timer::after(1000, function () use ($httpServer) {
+                        $httpServer->shutdown();
+                    });
+                }
                 return true;
             }
             return false;

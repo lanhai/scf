@@ -55,6 +55,13 @@ class Runtime extends ATable {
         return $this->get(Key::RUNTIME_SERVER_STATUS) ?: false;
     }
 
+    public function serverRunning(?bool $status = null) {
+        if (is_bool($status)) {
+            return $this->set(Key::COUNTER_SERVER_ISRUNNING, $status);
+        }
+        return $this->get(Key::COUNTER_SERVER_ISRUNNING) ?: false;
+    }
+
     /**
      * Rpc服务端口
      * @param int|null $port

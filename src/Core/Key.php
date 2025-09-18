@@ -19,6 +19,7 @@ class Key {
     public const COUNTER_REQUEST_REJECT_ = '_REQUEST_REJECT_';
     public const COUNTER_MYSQL_PROCESSING = '_MYSQL_PROCESSING_';
     public const COUNTER_SERVER_RESTART = '_SERVER_RESTART_';
+    public const COUNTER_SERVER_ISRUNNING = '_SERVER_IS_RUNNING_';
 
 
 }
