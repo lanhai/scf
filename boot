@@ -20,7 +20,7 @@ function _UpdateFramework_($boot = false): string {
     $updatePack = __DIR__ . '/build/update.pack';
     if (FRAMEWORK_IS_PHAR) {
         if (file_exists($updatePack)) {
-            //file_exists($srcPack) and unlink($srcPack);
+            file_exists($srcPack) and unlink($srcPack);
             if (!rename($updatePack, $srcPack)) {
                 echo("写入更新文件失败!\n");
                 if ($boot) {
@@ -75,7 +75,7 @@ use Scf\Command\Runner;
 use Swoole\Process;
 use function Co\run;
 
-function execute($argv): void {
+function start($argv): void {
     _UpdateFramework_();
     $caller = new Caller();
     $caller->setScript(current($argv));
@@ -88,7 +88,7 @@ function execute($argv): void {
 }
 
 if (!IS_HTTP_SERVER) {
-    execute($argv);
+    start($argv);
 } else {
     while (true) {
         $managerProcess = new Process(function () use ($argv) {
@@ -96,7 +96,7 @@ if (!IS_HTTP_SERVER) {
             define("FRAMEWORK_REMOTE_VERSION_SERVER", 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
             define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
             define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
-            execute($argv);
+            start($argv);
         });
         $managerProcess->start();
         Process::wait();

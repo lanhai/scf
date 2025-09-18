@@ -212,7 +212,7 @@ class Http extends \Scf\Core\Server {
             Runtime::instance()->httpPort($this->bindPort);
         } catch (Throwable $exception) {
             $this->log(Color::yellow('服务端口[' . $this->bindPort . ']监听启动失败:' . $exception->getMessage()));
-            sleep(1);
+            sleep(5);
             exit(1);
         }
         //监听SOCKET请求
