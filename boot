@@ -12,7 +12,7 @@ define('IS_PUBLISH', in_array('publish', $argv));//发布
 define('IS_TOOLBOX', in_array('toolbox', $argv));//cli工具
 define('IS_HTTP_SERVER', in_array('server', $argv));//启动服务器
 define('IS_PACKAGE', in_array('package', $argv));//包发布
-const FRAMEWORK_IS_PHAR = false; //IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);//框架源码是否打包
+const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);//框架源码是否打包
 function _UpdateFramework_($boot = false): string {
     clearstatcache();
     //替换升级包
@@ -69,7 +69,6 @@ use Scf\Root;
 
 require Root::dir() . '/Const.php';
 
-
 use Scf\Command\Caller;
 use Scf\Command\Runner;
 
@@ -87,6 +86,7 @@ function execute($argv): void {
         echo $ret->getMsg() . "\n";
     }
 }
+
 if (!IS_HTTP_SERVER) {
     execute($argv);
 } else {
