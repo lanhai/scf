@@ -4,7 +4,7 @@ return [
     'port' => 9580,
     'rpc_port' => 9680,
     'worker_num' => 8,
-    'max_wait_time' => 60,
+    'max_wait_time' => 30,
     'task_worker_num' => 8,
     'static_handler_locations' => ['/cp'],
     'enable_coroutine' => true,

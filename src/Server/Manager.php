@@ -70,7 +70,7 @@ class Manager extends Component {
                 $cli = $this->getWsClient($socket);
                 $status = $cli->statusCode ?? 'null';
                 $err = $cli->errCode ?? 'null';
-                Console::warning("【Server】连接master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
+                Console::warning("【Server】与master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
                 sleep(5);
                 return $this->getMasterSocketConnection();
             }

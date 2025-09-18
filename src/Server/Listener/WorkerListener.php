@@ -57,9 +57,9 @@ class WorkerListener extends Listener {
             Runtime::instance()->serverStatus(true);
             $info = <<<INFO
 ---------Workers启动完成---------
-内核版本：{$version}
+应用版本：{$version}
 资源版本：{$publicVersion}
-源码目录：{$srcPath}
+应用源码：{$srcPath}
 ---------------------------------
 INFO;
             Console::write(Color::green($info));

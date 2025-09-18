@@ -43,7 +43,7 @@ class Dashboard {
             $port = (SERVER_PORT ?: 9580) + 1;
         } else {
             $serverConfig = Config::server();
-            $port = \Scf\Core\Server::getUseablePort((SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1);
+            $port = (SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1;// \Scf\Core\Server::getUseablePort((SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1);
         }
         $process = new Process(function () use ($port) {
             try {
@@ -67,6 +67,8 @@ class Dashboard {
         usleep(1000 * 100);
         Runtime::instance()->set('DASHBOARD_PID', "Master:{$masterPid},Server:" . Runtime::instance()->get('DASHBOARD_SERVER_PID'));
         Console::info("【Dashboard】" . Color::green("服务启动完成"));
+
+
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
@@ -124,6 +126,10 @@ class Dashboard {
                     'daemonize' => $daemonize,
                     'log_file' => APP_PATH . '/log/server.log',
                     'pid_file' => SERVER_DASHBOARD_PID_FILE,
+                    'enable_reuse_port' => true,
+                    'open_http_protocol' => true,
+                    'open_http2_protocol' => true,
+                    'open_websocket_protocol' => false
                 ];
                 $setting['document_root'] = SCF_ROOT . '/build/public';
                 $setting['enable_static_handler'] = true;
@@ -133,12 +139,7 @@ class Dashboard {
                 $this->_SERVER->set($setting);
                 //监听HTTP请求
                 try {
-                    $httpPort = $this->_SERVER->listen('127.0.0.1', $port, SWOOLE_BASE);
-                    $httpPort->set([
-                        'open_http_protocol' => true,
-                        'open_http2_protocol' => true,
-                        'open_websocket_protocol' => false
-                    ]);
+                    $this->_SERVER->listen('127.0.0.1', $port, SWOOLE_BASE);
                 } catch (Throwable $exception) {
                     Console::log(Color::red('【Dashboard】服务[' . $port . ']启动失败:' . $exception->getMessage()));
                     exit(1);
@@ -154,6 +155,9 @@ class Dashboard {
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {
                     Console::info("【Dashboard】重启完成");
+                });
+                $this->_SERVER->on("BeforeShutdown", function (Server $server) {
+                    Console::info("【Dashboard】" . Color::red('服务器即将关闭'));
                 });
                 $this->_SERVER->on('Task', function (Server $server, Task $task) {
                     //执行任务
@@ -232,11 +236,13 @@ class Dashboard {
                         Console::info("【Dashboard】应用安装成功!配置文件加载完成!开始重启");
                         $server->reload();
                     }
+                    Timer::tick(1000 * 3, function ($tid) use ($server) {
+                        if (!Runtime::instance()->serverRunning()) {
+                            Timer::clear($tid);
+                            $server->shutdown();
+                        }
+                    });
                 });
-                //启动文件监听进程
-//                if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
-//                    $this->_SERVER->addProcess(SubProcess::createFileWatchProcess($this->_SERVER, $this->bindPort));
-//                }
                 $this->_SERVER->start();
             } catch (Throwable $exception) {
                 Console::log('【Dashboard】' . Color::red($exception->getMessage()));

@@ -23,9 +23,10 @@ use function Co\run;
 
 class SubProcess {
 
+
     public static function createHeartbeatProcess(Server $server): Process {
         return new Process(function ($process) use ($server) {
-            Console::info("【Server】主节点连接PID:" . $process->pid, false);
+            Console::info("【Heatbeat】主节点连接PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
                 $node = Node::factory();
@@ -46,11 +47,10 @@ class SubProcess {
                 $node->stack_useage = Coroutine::getStackUsage();
                 $node->scf_version = SCF_VERSION;
                 $node->server_run_mode = APP_RUN_MODE;
-                $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                 while (true) {
                     // 主进程存活检测
-                    if (!Process::kill($server->manager_pid, 0)) {
-                        Console::warning('【Server】主进程退出，connectMaster 随之退出');
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                        Console::warning('【Heatbeat】主进程退出，connectMaster 随之退出');
                         break;
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
@@ -61,6 +61,7 @@ class SubProcess {
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, $server, &$node) {
                         $profile = App::profile();
+                        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                         $node->app_version = $profile->version;
                         $node->public_version = $profile->public_version ?: '--';
                         $node->heart_beat = time();
@@ -167,9 +168,14 @@ class SubProcess {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
                 App::mount();
-                Console::info("【Server】日志备份PID:" . $process->pid, false);
+                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
                 $logger = Log::instance();
-                Timer::tick(5000, function () use ($logger, $server, $process) {
+                Timer::tick(5000, function ($tid) use ($logger, $server, $process) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                        Console::warning("【LogBackup】Manager process {$server->manager_pid} is dead");
+                        Timer::clear($tid);
+                        return;
+                    }
                     $logger->backup();
                 });
                 \Swoole\Event::wait();
@@ -188,7 +194,7 @@ class SubProcess {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
                 App::mount();
-                Console::info("【Server】文件改动监听服务PID:" . $process->pid, false);
+                Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
                 $scanDirectories = function () {
                     if (APP_RUN_MODE == 'src') {
                         $appFiles = Dir::scan(APP_PATH . '/src');
@@ -206,6 +212,10 @@ class SubProcess {
                     ];
                 }
                 while (true) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                        Console::warning("【FileWatcher】Manager process {$server->manager_pid} is dead");
+                        break;
+                    }
                     $changed = false;
                     $changedFiles = [];
                     $currentFiles = $scanDirectories();
