@@ -54,7 +54,7 @@ class WorkerListener extends Listener {
             } catch (Throwable $throwable) {
                 Console::error($throwable->getMessage());
             }
-            Runtime::instance()->serverStatus(true);
+            Runtime::instance()->serverUseable(true);
             $info = <<<INFO
 ---------Workers启动完成---------
 应用版本：{$version}
@@ -83,6 +83,10 @@ INFO;
                 $server->stop($worker_id);
             }
         });
+    }
+
+    protected function onpipeMessage(Server $server, $workerId, $data) {
+
     }
 
     protected function onWorkerStop(Server $server, $workerId): void {

@@ -138,8 +138,8 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\ServerNodeTable',
             'Scf\Core\Table\ServerNodeStatusTable'
         ]);
-        Runtime::instance()->serverStatus(false);
-        Runtime::instance()->serverRunning(true);
+        Runtime::instance()->serverUseable(false);
+        Runtime::instance()->serverIsAlive(true);
         //启动master节点管理面板服务器
         Dashboard::start();
         //启动masterDB(redis协议)服务器
@@ -172,7 +172,6 @@ class Http extends \Scf\Core\Server {
         Console::enablePush($serverConfig['enable_log_push'] ?? 1);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
-
         $setting = [
             'worker_num' => $serverConfig['worker_num'] ?? 128,
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 30,
@@ -211,8 +210,17 @@ class Http extends \Scf\Core\Server {
             ]);
             Runtime::instance()->httpPort($this->bindPort);
         } catch (Throwable $exception) {
-            $this->log(Color::yellow('服务端口[' . $this->bindPort . ']监听启动失败:' . $exception->getMessage()));
-            sleep(5);
+            // 尝试杀掉占用端口的进程
+            if (self::isPortInUse($this->bindPort)) {
+                $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程'));
+                if (!self::killProcessByPort($this->bindPort)) {
+                    $this->log(Color::red('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程失败'));
+                }
+            } else {
+                $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']监听启动失败:' . $exception->getMessage()));
+            }
+            // 稍等片刻再退出/或由外层管理器重试
+            usleep(500 * 1000);
             exit(1);
         }
         //监听SOCKET请求
@@ -233,7 +241,7 @@ class Http extends \Scf\Core\Server {
         $rport = RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0);
         if ($rport) {
             try {
-                $rpcPort = self::getUseablePort($rport);
+                $rpcPort = $rport;// self::getUseablePort($rport);
                 /** @var Server $rpcServer */
                 $rpcServer = $this->server->listen('0.0.0.0', $rpcPort, SWOOLE_SOCK_TCP);
                 $rpcServer->set([
@@ -246,11 +254,21 @@ class Http extends \Scf\Core\Server {
                     'package_length_offset' => 0,               // 包头长度字段在第0字节开始
                     'package_body_offset' => 4,               // 从第4字节开始是包体
                 ]);
-                Runtime::instance()->rpcPort($rpcPort);
             } catch (Throwable $exception) {
-                Console::log(Color::red('RPC服务端口监听失败:' . $exception->getMessage()));
+                // 尝试杀掉占用端口的进程
+                if (self::isPortInUse($rpcPort)) {
+                    $this->log(Color::yellow('RPC服务端口[' . $rpcPort . ']被占用,尝试结束进程'));
+                    if (!self::killProcessByPort($rpcPort)) {
+                        $this->log(Color::red('RPC服务端口[' . $rpcPort . ']被占用,尝试结束进程失败'));
+                    }
+                } else {
+                    $this->log(Color::red('RPC服务端口[' . $rpcPort . ']监听启动失败:' . $exception->getMessage()));
+                }
+                // 稍等片刻再退出/或由外层管理器重试
+                usleep(500 * 1000);
                 exit(1);
             }
+            Runtime::instance()->rpcPort($rpcPort);
         }
         Listener::register([
             'SocketListener',
@@ -261,7 +279,7 @@ class Http extends \Scf\Core\Server {
         ]);
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
-            Runtime::instance()->serverStatus(false);
+            Runtime::instance()->serverUseable(false);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
             //断开所有客户端连接
@@ -280,7 +298,7 @@ class Http extends \Scf\Core\Server {
             //重置执行中的请求数统计
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
             $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
-            Runtime::instance()->serverStatus(true);
+            Runtime::instance()->serverUseable(true);
         });
 //        $this->server->on('pipeMessage', function ($server, $src_worker_id, $data) {
 //            echo "#{$server->worker_id} message from #$src_worker_id: $data\n";
@@ -291,7 +309,7 @@ class Http extends \Scf\Core\Server {
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
-            Runtime::instance()->serverStatus(true);
+            Runtime::instance()->serverUseable(true);
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
@@ -415,7 +433,7 @@ INFO;
         $crontabProcess = new Process(function (Process $process) use ($config) {
             //等待服务器启动完成
             while (true) {
-                if (Runtime::instance()->serverStatus()) {
+                if (Runtime::instance()->serverUseable()) {
                     break;
                 }
                 sleep(1);
@@ -423,7 +441,7 @@ INFO;
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverRunning()) {
+                if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive()) {
                     Runtime::instance()->crontabProcessStatus(true);
                     $taskList = CrontabManager::start();
                     if ($taskList) {
@@ -483,7 +501,7 @@ INFO;
                     }
                     unset($socket);
                 });
-                if (!Runtime::instance()->serverRunning()) {
+                if (!Runtime::instance()->serverIsAlive()) {
                     Console::info("【Crontab】#{$managerId} 服务器已关闭,终止进程");
                     $process->exit();
                     break;
@@ -500,7 +518,7 @@ INFO;
             $redisQueueProcess = new Process(function ($process) use ($config) {
                 //等待服务器启动完成
                 while (true) {
-                    if (Runtime::instance()->serverStatus()) {
+                    if (Runtime::instance()->serverUseable()) {
                         break;
                     }
                     sleep(1);
@@ -508,7 +526,7 @@ INFO;
                 $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                 define('IS_REDIS_QUEUE_PROCESS', true);
                 while (true) {
-                    if (!Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverRunning()) {
+                    if (!Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive()) {
                         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                         Runtime::instance()->redisQueueProcessStatus(true);
                         RQueue::startProcess();
@@ -516,7 +534,7 @@ INFO;
                     Runtime::instance()->redisQueueProcessStatus(false);
                     Console::warning("【RedisQueue】#{$managerId}管理进程已迭代,重启队列进程");
                     sleep(1);
-                    if (!Runtime::instance()->serverRunning()) {
+                    if (!Runtime::instance()->serverIsAlive()) {
                         Console::info("【RedisQueue】#{$managerId} 服务器已关闭,终止进程");
                         $process->exit(0);
                         break;
@@ -533,7 +551,7 @@ INFO;
      * @return void
      */
     public function shutdown(): void {
-        Runtime::instance()->serverRunning(false);
+        Runtime::instance()->serverIsAlive(false);
         $this->clearWorkerTimer();
         $this->sendCommandToCrontabManager('shutdown');
         $this->server->shutdown();

@@ -48,14 +48,14 @@ class Runtime extends ATable {
      * @param ?bool $status
      * @return bool
      */
-    public function serverStatus(?bool $status = null): bool {
+    public function serverUseable(?bool $status = null): bool {
         if (is_bool($status)) {
             return $this->set(Key::RUNTIME_SERVER_STATUS, $status);
         }
         return $this->get(Key::RUNTIME_SERVER_STATUS) ?: false;
     }
 
-    public function serverRunning(?bool $status = null) {
+    public function serverIsAlive(?bool $status = null) {
         if (is_bool($status)) {
             return $this->set(Key::COUNTER_SERVER_ISRUNNING, $status);
         }

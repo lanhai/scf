@@ -17,6 +17,8 @@ use Throwable;
 
 /**
  * master节点的redis服务器,用于存储所有节点的运行状态数据和日志归一化
+ * @version 1.1
+ * @updated 2025-09-19 08:25:30
  */
 class MasterDB {
 
@@ -32,13 +34,13 @@ class MasterDB {
             $masterDbPid = File::read(SERVER_MASTER_DB_PID_FILE);
             if ($masterDbPid && Process::kill((int)$masterDbPid, 0)) {
                 Console::warning("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程");
-                if (!self::kill($masterDbPid)) {
+                if (!\Scf\Core\Server::kill($masterDbPid)) {
                     Console::error("【MasterDB】端口被[{$masterDbPid}]占用,尝试结束进程失败");
                     exit();
                 }
             } else {
                 Console::warning("【MasterDB】端口被占用,尝试重启结束所有PHP进程");
-                if (!self::killall($port)) {
+                if (!\Scf\Core\Server::killall($port)) {
                     Console::error("【MasterDB】端口被占用,尝试结束进程失败");
                     exit();
                 }
@@ -442,53 +444,7 @@ class MasterDB {
         }
     }
 
-    protected static function kill($pid, $try = 0): bool {
-        if ($try >= 10) {
-            return false;
-        }
-        if (Process::kill($pid, 0)) {
-            $try++;
-            exec("kill -9 " . $pid);
-            sleep(1);
-            return self::kill($pid, $try);
-        }
-        return true;
-    }
-
-    protected static function killall($port, $try = 0): bool {
-        if ($try >= 3) {
-            if (self::killProcessByPort($port)) {
-                return true;
-            }
-            return false;
-        }
-        if (\Scf\Core\Server::isPortInUse($port)) {
-            $try++;
-            //exec("killall php");
-            self::killProcessByPort($port);
-            sleep(1);
-            return self::killall($port, $try);
-        }
-        return true;
-    }
-
-    protected static function killProcessByPort(int $port): bool {
-        // 查找占用端口的进程
-        $output = shell_exec("lsof -ti :$port");
-        if (empty($output)) {
-            Console::info("【MasterDB】没有进程占用端口:$port");
-            return true;
-        }
-
-        $pids = explode("\n", trim($output));
-        foreach ($pids as $pid) {
-            if (!empty($pid)) {
-                Console::info("【MasterDB】结束进程 $pid 占用端口:$port");
-                exec("kill -9 $pid");
-            }
-        }
-        return true;
-    }
+    
 
     /**
      * 统计日志文件行数
