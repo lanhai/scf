@@ -103,13 +103,23 @@ spl_autoload_register(function ($class) use ($srcPack) {
     if (str_starts_with($class, 'Scf\\')) {
         $classPath = str_replace('Scf\\', '', $class);
         $relative = str_replace('\\', '/', $classPath) . '.php';
-        if ($class === 'Scf\\Command\\Caller' || $class === 'Scf\\Command\\Runner' || $class === 'Scf\\Root') {
-            // 这两个类强制使用非打包源码，避免在 PHAR 中被固定导致热更新受限
-            $filePath = __DIR__ . '/src/' . $relative;
-        } else if (FRAMEWORK_IS_PHAR) {
-            $filePath = 'phar://' . $srcPack . '/' . $relative;
+        if (FRAMEWORK_IS_PHAR) {
+            if ($class === 'Scf\\Command\\Caller' || $class === 'Scf\\Command\\Runner' || $class === 'Scf\\Root') {
+                // 这两个类强制使用非打包源码，避免在 PHAR 中被固定导致热更新受限
+                if (IS_DEV || is_dir(__DIR__ . '/src/')) {
+                    $filePath = __DIR__ . '/src/' . $relative;
+                } else {
+                    $filePath = __DIR__ . '/vendor/lhai/scf/src/' . $relative;
+                }
+            } else {
+                $filePath = 'phar://' . $srcPack . '/' . $relative;
+            }
         } else {
-            $filePath = __DIR__ . '/src/' . $relative;
+            if (is_dir(__DIR__ . '/src/')) {
+                $filePath = __DIR__ . '/src/' . $relative;
+            } else {
+                $filePath = __DIR__ . '/vendor/lhai/scf/src/' . $relative;
+            }
         }
         if (file_exists($filePath)) {
 //            $fileContent = file_get_contents($filePath);
@@ -117,7 +127,7 @@ spl_autoload_register(function ($class) use ($srcPack) {
 //                $fileContent = str_replace('<?php', '<?php declare(strict_types=1);', $fileContent);
 //                file_put_contents($filePath, $fileContent);
 //            }
-            require $filePath;
+            require_once $filePath;
         }
     }
 });
@@ -129,7 +139,7 @@ require __DIR__ . '/vendor/autoload.php';
 // 优先引入root，因为含系统常量
 use Scf\Root;
 
-require Root::dir() . '/Const.php';
+require_once Root::dir() . '/Const.php';
 
 use Scf\Command\Caller;
 use Scf\Command\Runner;
