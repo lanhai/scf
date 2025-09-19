@@ -3,8 +3,6 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
-use Scf\Core\App;
-use Scf\Core\Config;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
@@ -12,6 +10,7 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
+use Scf\Mode\Web\App;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Log;
@@ -39,21 +38,20 @@ class CgiListener extends Listener {
      * @throws Exception
      */
     public function onRequest(\Swoole\Http\Request $request, \Swoole\Http\Response $response): void {
-//        register_shutdown_function(function () use ($response) {
-//            $error = error_get_last();
-//            switch ($error['type'] ?? null) {
-//                case E_ERROR :
-//                case E_PARSE :
-//                case E_CORE_ERROR :
-//                case E_COMPILE_ERROR :
-//                    // log or send:
-//                    // error_log($message);
-//                    // $server->send($fd, $error['message']);
-//                    $response->status(500);
-//                    $response->end($error['message']);
-//                    break;
-//            }
-//        });
+        register_shutdown_function(function () use ($response) {
+            $error = error_get_last();
+            switch ($error['type'] ?? null) {
+                case E_ERROR :
+                case E_PARSE :
+                case E_CORE_ERROR :
+                case E_COMPILE_ERROR :
+                    Log::instance()->error($error['message']);
+                    // $server->send($fd, $error['message']);
+                    $response->status(500);
+                    $response->end($error['message']);
+                    break;
+            }
+        });
         // 设置CORS响应头
         if (Server::allowCrossOrigin()) {
             $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
@@ -66,12 +64,11 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
-
         if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
             $response->end();
             return;
         }
-        if (!Runtime::instance()->serverStatus()) {
+        if (!Runtime::instance()->serverUseable()) {
             $response->header("Content-Type", "text/html; charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
@@ -83,8 +80,6 @@ class CgiListener extends Listener {
         }
         $mysqlExecuteCount = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
         $requestCount = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
-//        $serverStatus = $this->server->stats();
-//        $requestCount = $serverStatus['connection_num'] ?? 0;
         if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
             Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
             $response->header("Content-Type", "text/html; charset=utf-8");
@@ -117,7 +112,7 @@ class CgiListener extends Listener {
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
             $logger = Log::instance();
-            $app = \Scf\Mode\Web\App::instance();
+            $app = App::instance();
             Env::isDev() and $logger->enableDebug();
             try {
                 $app->init();
@@ -201,8 +196,9 @@ class CgiListener extends Listener {
         if (str_starts_with($request->server['path_info'], '/~',)) {
             $isIndex = $request->server['path_info'] == '/~/' || $request->server['path_info'] == '/~';
             $path = str_replace("/~", "", $request->server['path_info']);
+            $response->status(200);
             if (in_array($path, DashboardController::$protectedActions)) {
-                $response->status(200);
+                $response->header('Content-Type', 'application/json');
                 $response->end(JsonHelper::toJson([
                     'errCode' => 'UNAUTHORIZED',
                     'message' => "未授权的访问",
@@ -216,17 +212,6 @@ class CgiListener extends Listener {
                 return false;
             }
             $port = Runtime::instance()->dashboardPort();
-//            if (App::isReady()) {
-//                $masterHost = App::isMaster() ? 'localhost' : (Config::get('app')['master_host'] ?? 'localhost');
-//                if (SERVER_HOST_IS_IP || App::isMaster()) {
-//                    $dashboardHost = PROTOCOL_HTTP . $masterHost . ':' . $port;
-//                } else {
-//                    $dashboardHost = PROTOCOL_HTTP . $port . '.' . $masterHost;
-//                }
-//            } else {
-//                $masterHost = 'localhost';
-//                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $port;
-//            }
             $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . $port;
             if ($isIndex) {
                 $url = $dashboardHost . '/dashboard';
@@ -256,7 +241,7 @@ class CgiListener extends Listener {
             } else {
                 $result = $client->post(Request::post()->pack());
             }
-            $response->status(200);
+            $response->header('Content-Type', 'application/json');
             if ($result->hasError()) {
                 $response->end(JsonHelper::toJson([
                     'errCode' => $result->getErrCode(),

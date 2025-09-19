@@ -43,12 +43,11 @@ class Dashboard {
             $port = (SERVER_PORT ?: 9580) + 1;
         } else {
             $serverConfig = Config::server();
-            $port = (SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1;// \Scf\Core\Server::getUseablePort((SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1);
+            $port = (SERVER_PORT ?: ($serverConfig['port'] ?? 9580)) + 1;
         }
+        $port = Http::getUseablePort($port);
         $process = new Process(function () use ($port) {
             try {
-                $port = Http::getUseablePort($port);
-                Runtime::instance()->dashboardPort($port);
                 self::instance()->create($port, Manager::instance()->issetOpt('d'));
             } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
@@ -65,10 +64,8 @@ class Dashboard {
             exit();
         }
         usleep(1000 * 100);
+        Runtime::instance()->dashboardPort($port);
         Runtime::instance()->set('DASHBOARD_PID', "Master:{$masterPid},Server:" . Runtime::instance()->get('DASHBOARD_SERVER_PID'));
-        Console::info("【Dashboard】" . Color::green("服务启动完成"));
-
-
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
             try {
@@ -129,13 +126,13 @@ class Dashboard {
                     'enable_reuse_port' => true,
                     'open_http_protocol' => true,
                     'open_http2_protocol' => true,
-                    'open_websocket_protocol' => false
+                    'open_websocket_protocol' => false,
+                    'document_root' => SCF_ROOT . '/build/public',
+                    'enable_static_handler' => true,
+                    'http_autoindex' => true,
+                    'static_handler_locations' => ['/dashboard'],
+                    'http_index_files' => ['index.html']
                 ];
-                $setting['document_root'] = SCF_ROOT . '/build/public';
-                $setting['enable_static_handler'] = true;
-                $setting['http_autoindex'] = true;
-                $setting['static_handler_locations'] = ['/dashboard'];
-                $setting['http_index_files'] = ['index.html'];
                 $this->_SERVER->set($setting);
                 //监听HTTP请求
                 try {
@@ -151,13 +148,12 @@ class Dashboard {
                             Router::loadRoutes();
                         }
                     }
-                    //Console::info("【Dashboard】worker#" . $workerId . " 启动完成");
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {
                     Console::info("【Dashboard】重启完成");
                 });
                 $this->_SERVER->on("BeforeShutdown", function (Server $server) {
-                    Console::info("【Dashboard】" . Color::red('服务器即将关闭'));
+
                 });
                 $this->_SERVER->on('Task', function (Server $server, Task $task) {
                     //执行任务
@@ -237,8 +233,9 @@ class Dashboard {
                         $server->reload();
                     }
                     Timer::tick(1000 * 3, function ($tid) use ($server) {
-                        if (!Runtime::instance()->serverRunning()) {
+                        if (!Runtime::instance()->serverIsAlive()) {
                             Timer::clear($tid);
+                            Console::info("【Dashboard】" . Color::red('服务器即将关闭'));
                             $server->shutdown();
                         }
                     });

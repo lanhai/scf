@@ -90,7 +90,7 @@ class SocketListener extends Listener {
                 case 'server_status':
                     Manager::instance()->addDashboardClient($frame->fd);
                     Timer::tick(1000, function ($id) use ($server, $frame) {
-                        if (!Runtime::instance()->serverRunning()) {
+                        if (!Runtime::instance()->serverIsAlive()) {
                             $server->close($frame->fd);
                             Timer::clear($id);
                             return;
@@ -119,7 +119,7 @@ class SocketListener extends Listener {
                         $server->push($frame->fd, JsonHelper::toJson(['event' => 'message', 'data' => "节点报道失败!客户端ID:" . $frame->fd]));
                     }
                     $nodes = ServerNodeTable::instance()->rows();
-                    Console::info("【Server】{$host} 节点加入,客户端连接ID:{$frame->fd},当前累计连接数:" . count($nodes));
+                    Console::info("【Server】{$host} 节点加入,客户端连接ID:{$frame->fd},累计节点:" . count($nodes));
                     break;
                 case 'node_heart_beat':
                     $host = $data['data']['host'];

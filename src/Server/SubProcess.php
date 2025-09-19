@@ -49,7 +49,7 @@ class SubProcess {
                 $node->server_run_mode = APP_RUN_MODE;
                 while (true) {
                     // 主进程存活检测
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         Console::warning('【Heatbeat】主进程退出，connectMaster 随之退出');
                         break;
                     }
@@ -97,14 +97,14 @@ class SubProcess {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
                             // 读错误：断开
-                            Console::warning('【Server】与master节点连接读错误，准备重连', false);
+                            Console::warning('【Heatbeat】与master节点连接读错误，准备重连', false);
                             $socket->close();
                             break;
                         }
                         if ($reply && empty($reply->data)) {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
-                            Console::warning("【Server】已断开master节点连接", false);
+                            Console::warning("【Heatbeat】已断开master节点连接", false);
                             $socket->close();
                             break;
                         }
@@ -113,10 +113,9 @@ class SubProcess {
                             if (isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
                                 $socket->push('', WEBSOCKET_OPCODE_PONG);
                             }
-                            Console::info("【Server】收到master消息:" . $reply->data, false);
                             if (JsonHelper::is($reply->data)) {
                                 $data = JsonHelper::recover($reply->data);
-                                $event = $data['event'] ?? 'message';
+                                $event = $data['event'] ?? 'unknow';
                                 if ($event == 'command') {
                                     $command = $data['data']['command'];
                                     $params = $data['data']['params'];
@@ -133,12 +132,16 @@ class SubProcess {
                                             }
                                             break;
                                         default:
-                                            Console::warning("【Server】Command '$command' is not supported", false);
+                                            Console::warning("【Heatbeat】Command '$command' is not supported", false);
                                     }
                                 } elseif ($event == 'slave_node_report_response') {
                                     $masterHost = Manager::instance()->getMasterHost();
-                                    Console::success('【Server】已和master[' . $masterHost . ']建立连接,客户端ID:' . $data['data'], false);
+                                    Console::success('【Heatbeat】已与master[' . $masterHost . ']建立连接,客户端ID:' . $data['data'], false);
+                                } else {
+                                    Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
                                 }
+                            } else {
+                                Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
                             }
                         } else {
                             // 无数据可读（非阻塞场景）
@@ -147,7 +150,7 @@ class SubProcess {
                         // 周期性检测主进程是否还在
                         static $tick = 0;
                         if ((++$tick % 10) === 0 && !Process::kill($server->manager_pid, 0)) {
-                            Console::warning('【Server】主进程退出，断开并退出');
+                            Console::warning('【Heatbeat】主进程退出，断开并退出');
                             $socket->close();
                             break 2; // 跳出两层循环
                         }
@@ -171,7 +174,7 @@ class SubProcess {
                 Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
                 $logger = Log::instance();
                 Timer::tick(5000, function ($tid) use ($logger, $server, $process) {
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         Console::warning("【LogBackup】Manager process {$server->manager_pid} is dead");
                         Timer::clear($tid);
                         return;
@@ -212,7 +215,7 @@ class SubProcess {
                     ];
                 }
                 while (true) {
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverRunning()) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         Console::warning("【FileWatcher】Manager process {$server->manager_pid} is dead");
                         break;
                     }
