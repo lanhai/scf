@@ -1,0 +1,111 @@
+/*!  build: Vue Shop Vite
+     copyright: https://vuejs-core.cn/shop-vite
+ */
+figure {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 6.25em;
+  height: 6.25em;
+  margin: auto;
+  animation: rotate 2.4s linear infinite;
+}
+
+.white {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: white;
+  opacity: 0;
+  animation: flash 2.4s linear infinite;
+}
+
+.dot {
+  position: absolute;
+  width: 1.8em;
+  height: 1.8em;
+  margin: auto;
+  border-radius: 100%;
+  transition: all 1s ease;
+}
+
+.dot:nth-child(2) {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: #f56c6c;
+  animation: dotsY 2.4s linear infinite;
+}
+
+.dot:nth-child(3) {
+  top: 0;
+  right: 0;
+  left: 0;
+  background: #e6a23c;
+  animation: dotsX 2.4s linear infinite;
+}
+
+.dot:nth-child(4) {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background: #67c23a;
+  animation: dotsY 2.4s linear infinite;
+}
+
+.dot:nth-child(5) {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: #4e88f3;
+  animation: dotsX 2.4s linear infinite;
+}
+
+@keyframes rotate {
+  0% {
+    transform: rotate(0);
+  }
+  10% {
+    width: 6.25em;
+    height: 6.25em;
+  }
+  66% {
+    width: 1.8em;
+    height: 1.8em;
+  }
+  100% {
+    width: 6.25em;
+    height: 6.25em;
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes dotsY {
+  66% {
+    width: 1.8em;
+  }
+  77% {
+    width: 0;
+  }
+}
+
+@keyframes dotsX {
+  66% {
+    height: 1.8em;
+  }
+  77% {
+    height: 0;
+  }
+}
+
+@keyframes flash {
+  33% {
+    border-radius: 0;
+  }
+  55% {
+    border-radius: 100%;
+  }
+}
