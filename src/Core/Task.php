@@ -52,10 +52,10 @@ abstract class Task {
     }
 
     /**
-     * @return Server
+     * @return ?Server
      */
-    protected function server(): Server {
-        return Http::master();
+    protected function server(): ?Server {
+        return Http::server();
     }
 
 }

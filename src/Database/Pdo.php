@@ -73,7 +73,7 @@ class Pdo {
      * @return Pdo
      */
     private static function getInstance($name, $actor, bool $enablePool = true): Pdo {
-        $ovrerride = SERVER_MODE == MODE_CGI ? Overrider::get() : null;
+        $ovrerride = ENV_MODE == MODE_CGI ? Overrider::get() : null;
         $config = null;
         if ($ovrerride && isset($ovrerride[$name])) {
             $instanceKey = $ovrerride['__KEY__'] . $name . '_' . $actor;
@@ -185,8 +185,7 @@ class Pdo {
         $host = $hosts[rand(0, count($hosts) - 1)];
         $this->database = new DB("mysql:host={$host};port={$this->serverConfig['port']};charset={$this->serverConfig['charset']};dbname={$this->serverConfig['name']}", $this->serverConfig['username'], $this->serverConfig['password'], [\PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC], $this->actor);//, \PDO::ATTR_PERSISTENT => true, \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true
         $this->database->setConfig($this->serverConfig);
-        $server = Http::master();
-        $isTaskWorker = !is_null($server) && $server->taskworker;
+        $isTaskWorker = RUNNING_SERVER && Http::server()->taskworker;
         if ($isTaskWorker) {
             $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? false;
         }

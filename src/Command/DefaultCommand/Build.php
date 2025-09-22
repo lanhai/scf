@@ -5,18 +5,17 @@ namespace Scf\Command\DefaultCommand;
 use Phar;
 use PhpZip\ZipFile;
 use Scf\Cloud\Ali\Oss;
-use Scf\Core\App;
-use Scf\Core\Config;
-use Scf\Core\Console;
-use Scf\Helper\ArrayHelper;
-use Scf\Helper\JsonHelper;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
+use Scf\Core\App;
+use Scf\Core\Console;
+use Scf\Core\Env;
+use Scf\Helper\ArrayHelper;
+use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Root;
-use Scf\Server\Core;
 use Scf\Util\Auth;
 use Scf\Util\Dir;
 use Scf\Util\File;
@@ -51,13 +50,10 @@ class Build implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
-            !defined('APP_RUN_MODE') and define('APP_RUN_MODE', 'src');
-            define("Scf\Command\DefaultCommand\APP_RUN_MODE", 'DIR');
-            define("Scf\Command\DefaultCommand\BUILD_PATH", dirname(SCF_ROOT) . '/build/');
+            define("BUILD_PATH", dirname(SCF_ROOT) . '/build/');
             if ($action !== 'framework') {
-                Core::initialize();
-                Config::init();
-                define("Scf\Command\DefaultCommand\VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');
+                Env::initialize();
+                define("VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');
             }
             return $this->$action();
         }
@@ -162,6 +158,12 @@ class Build implements CommandInterface {
      * @return void
      */
     public function release(string $rollbackVersion = null): void {
+        try {
+            Oss::instance();
+        } catch (\Exception $e) {
+            Console::warning('请配置OSS服务器后进行打包');
+            exit();
+        }
         $manager = Manager::instance();
         $options = $manager->getOpts();
         $buildFile = $options['file'] ?? null;

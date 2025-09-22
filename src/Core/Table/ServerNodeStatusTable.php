@@ -13,7 +13,7 @@ class ServerNodeStatusTable extends ATable {
     protected array $_config = [
         'size' => 300,
         'colums' => [
-            '_value' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 1024]
+            '_value' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 1024 * 2]
         ]
     ];
 }

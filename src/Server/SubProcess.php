@@ -2,7 +2,9 @@
 
 namespace Scf\Server;
 
+use Scf\Command\Color;
 use Scf\Core\App;
+use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Log;
@@ -13,8 +15,10 @@ use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Helper\JsonHelper;
 use Scf\Root;
 use Scf\Server\Struct\Node;
+use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\Dir;
+use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
@@ -31,13 +35,12 @@ class SubProcess {
             run(function () use ($server) {
                 $node = Node::factory();
                 $node->appid = APP_ID;
-                $node->id = SERVER_NODE_ID;
-                $node->name = SERVER_NAME;
+                $node->id = APP_NODE_ID;
+                $node->name = APP_DIR_NAME;
                 $node->ip = SERVER_HOST;
                 $node->fingerprint = APP_FINGERPRINT;
                 $node->port = Runtime::instance()->httpPort();
                 $node->socketPort = Runtime::instance()->httpPort();
-                $node->role = SERVER_ROLE;
                 $node->started = time();
                 $node->restart_times = 0;
                 $node->master_pid = $server->master_pid;
@@ -46,7 +49,7 @@ class SubProcess {
                 $node->cpu_num = swoole_cpu_num();
                 $node->stack_useage = Coroutine::getStackUsage();
                 $node->scf_version = SCF_VERSION;
-                $node->server_run_mode = APP_RUN_MODE;
+                $node->server_run_mode = APP_SRC_TYPE;
                 while (true) {
                     // 主进程存活检测
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
@@ -61,9 +64,10 @@ class SubProcess {
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, $server, &$node) {
                         $profile = App::profile();
-                        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
+                        $node->role = $profile->role;
                         $node->app_version = $profile->version;
                         $node->public_version = $profile->public_version ?: '--';
+                        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                         $node->heart_beat = time();
                         $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
                         $node->tables = ATable::list();
@@ -78,9 +82,10 @@ class SubProcess {
                         $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
                         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
                         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-                        //$node->tasks = CrontabManager::allStatus();
+                        $node->memory_usage = MemoryMonitor::sum();
+                        $node->tasks = CrontabManager::allStatus();
                         if ($node->role == NODE_ROLE_MASTER) {
-                            ServerNodeStatusTable::instance()->set(SERVER_HOST, $node->asArray());
+                            ServerNodeStatusTable::instance()->set('localhost', $node->asArray());
                             $socket->push('::ping');
                         } else {
                             $socket->push(JsonHelper::toJson(['event' => 'node_heart_beat', 'data' => [
@@ -120,6 +125,10 @@ class SubProcess {
                                     $command = $data['data']['command'];
                                     $params = $data['data']['params'];
                                     switch ($command) {
+                                        case 'shutdown':
+                                            $socket->push("【" . SERVER_HOST . "】start shutdown");
+                                            Http::instance()->shutdown();
+                                            break;
                                         case 'restart':
                                             $socket->push("【" . SERVER_HOST . "】start reload");
                                             Http::instance()->reload();
@@ -171,9 +180,22 @@ class SubProcess {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
                 App::mount();
-                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+                $serverConfig = Config::server();
                 $logger = Log::instance();
-                Timer::tick(5000, function ($tid) use ($logger, $server, $process) {
+                $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
+                //清理过期日志
+                $clearCount = $logger->clear($logExpireDays);
+                if ($clearCount) {
+                    Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+                }
+                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+                Timer::tick(5000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
+                    if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
+                        $clearCount = $logger->clear($logExpireDays);
+                        if ($clearCount) {
+                            Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+                        }
+                    }
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         Console::warning("【LogBackup】Manager process {$server->manager_pid} is dead");
                         Timer::clear($tid);
@@ -199,7 +221,7 @@ class SubProcess {
                 App::mount();
                 Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
                 $scanDirectories = function () {
-                    if (APP_RUN_MODE == 'src') {
+                    if (APP_SRC_TYPE == 'dir') {
                         $appFiles = Dir::scan(APP_PATH . '/src');
                     } else {
                         $appFiles = [];

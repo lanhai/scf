@@ -214,12 +214,12 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && defined('SERVER_MODE') && !in_array(SERVER_MODE, [MODE_CLI, MODE_NATIVE]) && $push && Coroutine::getCid() !== -1 && defined('APP_ID')) {
+        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && ENV_MODE == MODE_CGI && $push && Coroutine::getCid() !== -1 && defined('APP_ID')) {
             Timer::after(100, function () use ($str) {
                 Manager::instance()->pushConsoleLog(Log::filter($str));
             });
         }
-        if (defined('SERVER_MODE') && SERVER_MODE == MODE_NATIVE) {
+        if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
         } else {
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";

@@ -2,14 +2,14 @@
 
 namespace Scf\Command\DefaultCommand;
 
-use Scf\Core\App;
-use Scf\Core\Console;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Command\Util;
-use Scf\Server\Core;
+use Scf\Core\App;
+use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Server\Http;
 use Swoole\Process;
 
@@ -55,7 +55,7 @@ class Server implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
-            Core::initialize(MODE_CGI);
+            Env::initialize(MODE_CGI);
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());
@@ -140,7 +140,7 @@ class Server implements CommandInterface {
         return $msg;
     }
 
-    protected function status() {
+    protected function status(): void {
         //TODO 查询心跳
         Console::write(Color::green('TODO...'));
     }

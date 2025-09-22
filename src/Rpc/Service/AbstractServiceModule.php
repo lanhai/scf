@@ -2,11 +2,10 @@
 
 namespace Scf\Rpc\Service;
 
+use Scf\Core\Env;
 use Scf\Core\Result;
-use Scf\Mode\Web\Log;
 use Scf\Rpc\Protocol\Request;
 use Scf\Rpc\Protocol\Response;
-use Scf\Server\Env;
 use Scf\Server\Worker\ProcessLife;
 use Throwable;
 

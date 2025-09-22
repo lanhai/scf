@@ -65,7 +65,7 @@ class ProcessLife {
      * @return void
      */
     public function addRedis($cmd): void {
-        if (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI) {
+        if (ENV_MODE !== MODE_CGI) {
             return;
         }
         $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $cmd;
@@ -96,7 +96,7 @@ class ProcessLife {
      * @return void
      */
     public function addSql($sql): void {
-        if (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI) {
+        if (ENV_MODE !== MODE_CGI) {
             return;
         }
         $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $sql;

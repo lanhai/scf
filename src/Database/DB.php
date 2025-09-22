@@ -170,8 +170,8 @@ class DB {
         $this->pool->setPingInterval($autoPing);
         $this->pool->setIdleTimeout($idleTimeout);
         $this->pool->setId($this->poolId);
-//        $server = Http::master();
-//        if ($autoPing && (is_null($server) || $server->taskworker === false) && !IS_TOOLBOX && !defined('IS_CRONTAB_PROCESS')) {
+//        $server = Http::server();
+//        if ($autoPing && (is_null($server) || $server->taskworker === false) && !RUNNING_TOOLBOX && !defined('IS_CRONTAB_PROCESS')) {
 //            $table = PdoPoolTable::instance();
 //            $idleCheckTimerId = $this->pool->idleCheck();
 //            $table->set($this->poolId, [

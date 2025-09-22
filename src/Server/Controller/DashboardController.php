@@ -6,12 +6,11 @@ use Scf\App\Updater;
 use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Command\Handler\NodeManager;
-use Scf\Component\Coroutine\Session;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Core\Result;
-use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Dao;
 use Scf\Helper\ArrayHelper;
@@ -21,12 +20,12 @@ use Scf\Mode\Web\Controller;
 use Scf\Mode\Web\Document as DocumentComponent;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
-use Scf\Server\Env;
 use Scf\Server\Manager;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
 use Scf\Util\Date;
+use Scf\Util\MemoryMonitor;
 use Throwable;
 
 class DashboardController extends Controller {
@@ -34,6 +33,7 @@ class DashboardController extends Controller {
     public static array $protectedActions = [
         '/nodes', '/memory'
     ];
+    protected string $token;
 
     public function init($path): void {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
@@ -41,9 +41,21 @@ class DashboardController extends Controller {
         }
         $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes'];
         if (!in_array($path, $publisPaths) && !$this->isLogin()) {
-            Response::interrupt("未授权的访问: " . $path, status: 200);
+            Response::interrupt("未授权的访问: " . $path, 'NOT_LOGIN', status: 200);
         }
+    }
 
+    /**
+     * 向节点发送指令
+     * @return Result
+     */
+    public function actionCommand(): Result {
+        Request::post([
+            'command' => Request\Validator::required('命令不能为空'),
+            'host' => Request\Validator::required('节点不能为空'),
+            'params'
+        ])->assign($command, $host, $params);
+        return Manager::instance()->sendCommandToNode($command, $host, $params ?: [], 'dashboard');
     }
 
     /**
@@ -64,122 +76,8 @@ class DashboardController extends Controller {
         Request::get([
             'filter'
         ])->assign($filter);
-        // 一次性拉取数据 -> 组装行
-        $buildRows = function () use ($filter) {
-            $rows = [];
-            $online = 0;
-            $offline = 0;
-            $realTotal = 0.0; // 累计实际内存占用（MB）
-            $usageTotal = 0.0; // 累计分配（MB）
-            $peakTotal = 0.0; // 累计峰值（MB）
-            $rssTotal = 0.0; // 累计RSS（MB）
-            $pssTotal = 0.0; // 累计PSS（MB'])
-            //$globalSetKey = 'MEMORY_MONITOR_KEYS_' . SERVER_NODE_ID;
-            //$keys = Redis::pool()->sMembers($globalSetKey) ?: [];
-            $keys = Runtime::instance()->get('MEMORY_MONITOR_KEYS') ?: [];
-            //根据id排序
-            usort($keys, function ($a, $b) {
-                // 取中间部分
-                $aParts = explode(':', $a);
-                $bParts = explode(':', $b);
-                $aMid = $aParts[1] ?? $a;
-                $bMid = $bParts[1] ?? $b;
-                // 提取数字
-                preg_match('/\d+$/', $aMid, $ma);
-                preg_match('/\d+$/', $bMid, $mb);
-                if ($ma && $mb) {
-                    return intval($ma[0]) <=> intval($mb[0]);
-                }
-                // 没数字时走自然排序
-                return strnatcmp($aMid, $bMid);
-            });
-            foreach ($keys as $key) {
-                if ($filter && !str_contains($key, $filter)) {
-                    continue;
-                }
-                // 解析进程标识：MEMORY_MONITOR:{process}:{pid}
-                //$parts = explode(':', (string)$key);
-                //$data = Redis::pool()->get($key);
-                $data = MemoryMonitorTable::instance()->get($key);
-                if (!$data) {
-                    // 认为离线
-                    $offline++;
-                    $rows[] = [
-                        $key,
-                        '--',
-                        '-',
-                        '-',
-                        '-',
-                        '-', // rss
-                        '-', // pss
-                        '-',
-                        Color::red('离线')
-                    ];
-                    continue;
-                }
-                $process = $data['process'] ?? '--';
-                $pid = $data['pid'] ?? '--';
-                $usage = (float)($data['usage_mb'] ?? 0);
-                $real = (float)($data['real_mb'] ?? 0);
-                $peak = (float)($data['peak_mb'] ?? 0);
-                $usageTotal += $usage;
-                $realTotal += $real; // 统计累计实际内存
-                $peakTotal += $peak;
 
-                $rssMb = null;
-                $pssMb = null;
-                if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
-                    $rssMb = (float)$data['rss_mb'];
-                }
-                if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
-                    $pssMb = (float)$data['pss_mb'];
-                }
-
-                if ($rssMb !== null) {
-                    $rssTotal += $rssMb;
-                }
-                if ($pssMb !== null) {
-                    $pssTotal += $pssMb;
-                }
-
-                $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
-                $status = Color::green('正常');
-                $online++;
-                $rows[] = [
-                    'name' => $process,
-                    'pid' => $pid,
-                    'useage' => number_format($usage, 2) . ' MB',
-                    'real' => number_format($real, 2) . ' MB',
-                    'peak' => number_format($peak, 2) . ' MB',
-                    'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
-                    'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
-                    'updated' => $time,
-                    'status' => $status,
-                    'rss_num' => $rssMb
-                ];
-            }
-            ArrayHelper::multisort($rows, 'rss_num', SORT_DESC);
-            // 排序完成后移除临时字段 rss_num，避免对外输出
-            foreach ($rows as &$__row) {
-                if (array_key_exists('rss_num', $__row)) {
-                    unset($__row['rss_num']);
-                }
-            }
-            unset($__row);
-            return [
-                'rows' => $rows,
-                'online' => $online,
-                'offline' => $offline,
-                'total' => count($keys),
-                'usage_total_mb' => round($usageTotal, 2),
-                'real_total_mb' => round($realTotal, 2), // 累计实际内存占用（MB）
-                'peak_total_mb' => round($peakTotal, 2),
-                'rss_total_mb' => round($rssTotal, 2),
-                'pss_total_mb' => round($pssTotal, 2),
-            ];
-        };
-        $data = $buildRows();
-        return Result::success($data);
+        return Result::success(MemoryMonitor::sum($filter));
     }
 
     /**
@@ -237,8 +135,8 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabRun(): Result {
-        Request::post(['name'])->assign($name);
-        return Result::success(CrontabManager::runRightNow($name));
+        Request::post(['name', 'host'])->assign($name, $host);
+        return Result::success(CrontabManager::runRightNow($name, $host));
     }
 
     /**
@@ -286,7 +184,10 @@ class DashboardController extends Controller {
         $sysLogs = ['error', 'info', 'slow'];
         $subDir = null;
         if (!in_array($logType, $sysLogs)) {
-            $subDir = str_replace("AppCrontab", "", str_replace("\\", "", $logType));
+            $subDir = CrontabManager::formatTaskName($logType);
+        }
+        if (is_numeric($day)) {
+            $day = date('Y-m-d', $day);
         }
         $total = Manager::instance()->countLog(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $subDir);
         $totalPage = $total ? ceil($total / $size) : 0;
@@ -382,7 +283,6 @@ class DashboardController extends Controller {
         ])->assign($key, $role);
         $secret = substr($key, 0, 32);
         $installKey = substr($key, 32);
-
         $app = App::installer();
         $app->public_path = 'public';
         $app->app_path = APP_DIR_NAME;
@@ -427,7 +327,7 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionInstallCheck(): Result {
-        return Result::success(App::isReady());
+        return Result::success((int)App::isReady() ? 1 : 0);
     }
 
     /**
@@ -439,7 +339,7 @@ class DashboardController extends Controller {
             'host' => Request\Validator::required("主机不能为空"),
             'port' => Request\Validator::required("端口不能为空"),
         ])->assign($host, $port);
-        $client = Http::create($host . '/install_check', $port);
+        $client = Http::create($host . '/~/install_check', $port);
         $requestResult = $client->get();
         if ($requestResult->hasError()) {
             return Result::error($requestResult->getMessage());
@@ -458,9 +358,12 @@ class DashboardController extends Controller {
     public function actionInstallSlaveNode(): Result {
         Request::post([
             'host' => Request\Validator::required("主机名称不能为空"),
-            'port' => Request\Validator::required("端口号不能为空"),
+            'port'
         ])->assign($host, $port);
-        $client = Http::create($host . '/install', $port);
+        if ($port) {
+            $host .= ':' . $port;
+        }
+        $client = Http::create($host . '/~/install');
         $app = App::info();
         $installData = [
             str_shuffle(time()) => time(),
@@ -476,7 +379,7 @@ class DashboardController extends Controller {
             'key' => $installCode
         ]);
         if ($requestResult->hasError()) {
-            return Result::error($requestResult->getMessage());
+            return Result::error($requestResult->getMessage(), data: $requestResult->getData());
         }
         $result = Result::factory($requestResult->getData());
         if ($result->hasError()) {
@@ -496,25 +399,28 @@ class DashboardController extends Controller {
         if (is_null($host)) {
             return Result::error('访问域名获取失败');
         }
-        //$socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
             $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
         } else {
             $socketHost = $protocol . 'localhost:' . Runtime::instance()->httpPort();
         }
         $status = Manager::instance()->getStatus();
-        $status['socket_host'] = $socketHost . '?token=' . Session::instance()->get('LOGIN_UID');
-        $status['latest_version'] = App::latestVersion();
-
-        $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
-        $remoteVersionResponse = $client->get();
+        $status['socket_host'] = $socketHost . '?token=' . $this->token;
         $remoteVersion = [
             'version' => FRAMEWORK_BUILD_VERSION,
             'build' => FRAMEWORK_BUILD_TIME,
         ];
+        $status['latest_version'] = [];
+        if (APP_SRC_TYPE == 'phar') {
+            $status['latest_version'] = App::latestVersion();
+        }
+        //if (FRAMEWORK_IS_PHAR) {
+        $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
+        $remoteVersionResponse = $client->get();
         if (!$remoteVersionResponse->hasError()) {
             $remoteVersion = $remoteVersionResponse->getData();
         }
+        //}
         $status['framework'] = [
             'is_phar' => FRAMEWORK_IS_PHAR,
             'version' => FRAMEWORK_BUILD_VERSION,
@@ -618,12 +524,72 @@ class DashboardController extends Controller {
         }
     }
 
+
+    public function actionNotices(): Result {
+        return Result::success([]);
+    }
+
+    public function actionRoutes(): Result {
+        $baseRoutes = [
+            [
+                'path' => '/',
+                'name' => 'Root',
+                'component' => 'Layout',
+                'meta' => [
+                    'title' => '节点',
+                    'icon' => 'computer-line',
+                    'levelHidden' => true,
+                    'breadcrumbHidden' => true
+                ],
+                'children' => [
+                    [
+                        'path' => '/index',
+                        'name' => 'Index',
+                        'component' => '/@/views/nodes/index.vue',
+                        'meta' => [
+                            'title' => '服务器节点',
+                            'icon' => 'computer-line',
+                            'noColumn' => true,
+                            'noClosable' => true
+                        ],
+                    ]
+                ]
+            ],
+            [
+                'path' => '/',
+                'name' => 'System',
+                'component' => 'Layout',
+                'meta' => [
+                    'title' => '备用',
+                    'icon' => 'computer-line',
+                    'levelHidden' => true,
+                    'breadcrumbHidden' => true
+                ],
+                'children' => [
+                    [
+                        'path' => '/platform/setting',
+                        'name' => 'PlatformSetting',
+                        'component' => '/@/views/nodes/index.vue',
+                        'meta' => [
+                            'title' => '平台配置',
+                            'icon' => 'global-line',
+                            'noColumn' => true,
+                            'noClosable' => true
+                        ],
+                    ]
+                ]
+            ]
+        ];
+        return Result::success(['list' => $baseRoutes]);
+    }
+
     /**
      * 登陆检查
      * @return Result
      */
     public function actionCheck(): Result {
-        return Result::success(Session::instance()->get('LOGIN_UID'));
+        $this->loginUser['token'] = $this->genterateToken();
+        return Result::success($this->loginUser);
     }
 
     /**
@@ -634,34 +600,84 @@ class DashboardController extends Controller {
         Request::post([
             'password' => Request\Validator::required("密码不能为空")
         ])->assign($password);
-        $serverConfig = Config::server();
-        $superPassword = $serverConfig['dashboard_password'] ?? null;
-        if (App::info()->dashboard_password !== $password && App::info()->app_auth_key !== $password && $superPassword !== $password) {
+
+        if (!$this->verifyPassword($password)) {
             return Result::error('密码错误');
         } else {
-            $token = Auth::encode(time());
-            Session::instance()->set('LOGIN_UID', $token);
-            return Result::success($token);
+            $this->loginUser['token'] = $this->genterateToken();
+            return Result::success($this->loginUser);
         }
     }
+
 
     /**
      * 退出登录
      * @return Result
      */
     public function actionLogout(): Result {
-        return Result::success(Session::instance()->del('LOGIN_UID'));
+        return Result::success();
     }
+
 
     /**
      * 获取登陆用户
      * @return bool
      */
     protected function isLogin(): bool {
-        $loginUid = Session::instance()->get('LOGIN_UID');
-        if (!$loginUid) {
+        $authorization = Request::header('authorization');
+        if (empty($authorization) || !str_starts_with($authorization, "Bearer")) {
             return false;
         }
+        $token = substr($authorization, 7);
+        $this->token = $token;
+        //判断是否超管
+        $decodeToken = Auth::decode($token);
+        if (!$decodeToken || !JsonHelper::is($decodeToken)) {
+            return false;
+        }
+        $decodeData = JsonHelper::recover($decodeToken);
+        $password = $decodeData['password'] ?? null;
+        $this->password = $password;
+        $expired = $decodeData['expired'] ?? 0;
+        if (time() > $expired) {
+            Response::interrupt("登录已过期", 'LOGIN_EXPIRED', status: 200);
+        }
+        return true;
+    }
+
+    protected array $loginUser = [
+        'username' => '系统管理员',
+        'avatar' => 'http://ascript.oss-cn-chengdu.aliyuncs.com/upload/20240513/04c3eeac-f118-4ea7-8665-c9bd4d20a05d.png',
+        'token' => null
+    ];
+    protected string $password = '';
+
+    /**
+     * 生成token
+     * @return string
+     */
+    protected function genterateToken(): string {
+        $tokenData = [
+            'password' => $this->password,
+            'expired' => time() + 3600 * 24 * 7,
+            'login_time' => time(),
+            'user' => 'system'
+        ];
+        return Auth::encode(JsonHelper::toJson($tokenData));
+    }
+
+    /**
+     * 密码验证
+     * @param $password
+     * @return bool
+     */
+    protected function verifyPassword($password): bool {
+        $serverConfig = Config::server();
+        $superPassword = $serverConfig['dashboard_password'] ?? null;
+        if (App::info()->dashboard_password !== $password && App::info()->app_auth_key !== $password && $superPassword !== $password) {
+            return false;
+        }
+        $this->password = $password;
         return true;
     }
 }

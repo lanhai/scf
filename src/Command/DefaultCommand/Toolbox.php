@@ -3,24 +3,23 @@
 namespace Scf\Command\DefaultCommand;
 
 use ErrorException;
-use Scf\Core\Console;
-use Scf\Core\Log;
 use Scf\Cache\Redis;
-use Scf\Mode\Cli\App;
-use Scf\Rpc\Updater;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
 use Scf\Command\Handler\ArCreater;
 use Scf\Command\Handler\NodeManager;
 use Scf\Command\Help;
 use Scf\Command\Manager;
-use Scf\Server\Core;
+use Scf\Core\Console;
+use Scf\Core\Env;
+use Scf\Core\Log;
+use Scf\Mode\Cli\App;
+use Scf\Rpc\Updater;
 use Scf\Util\Auth;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Swoole\Event;
 use Swoole\ExitException;
-use Swoole\Timer;
 use Symfony\Component\Yaml\Yaml;
 use function Swoole\Coroutine\run;
 
@@ -55,7 +54,7 @@ class Toolbox implements CommandInterface {
     }
 
     public function rpc(): void {
-        if (APP_RUN_ENV !== 'dev') {
+        if (SERVER_RUN_ENV !== 'dev') {
             Console::error('此功能只能在测试环境使用');
             exit();
         }
@@ -82,12 +81,12 @@ class Toolbox implements CommandInterface {
             unlink($configFile . '.php');
             Console::success("app.php 已转换");
         }
-        $envConfig = \Scf\Core\App::src() . '/config/app_' . strtolower(APP_RUN_ENV);
+        $envConfig = \Scf\Core\App::src() . '/config/app_' . strtolower(SERVER_RUN_ENV);
         if (file_exists($envConfig . '.php')) {
             $content = require $envConfig . '.php';
             File::write($envConfig . '.yml', Yaml::dump($content, 10));
             unlink($envConfig . '.php');
-            Console::success("app_" . strtolower(APP_RUN_ENV) . ".php 已转换");
+            Console::success("app_" . strtolower(SERVER_RUN_ENV) . ".php 已转换");
         }
     }
 
@@ -109,8 +108,7 @@ class Toolbox implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
-            $action == 'ar' and define('APP_RUN_ENV', 'dev');
-            Core::initialize();
+            Env::initialize();
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());

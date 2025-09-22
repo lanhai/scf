@@ -13,7 +13,6 @@ use Scf\Core\Table\LogTable;
 use Scf\Database\Dao;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Log;
-use Scf\Server\Env;
 use Scf\Util\Dir;
 use Scf\Util\File;
 use Swoole\Coroutine;
@@ -52,12 +51,12 @@ class App {
         try {
             $httpServer = \Scf\Server\Http::instance();
             if (Updater::instance()->appointUpdateTo($type, $version)) {
-                if ($type == 'app') {
-                    $httpServer->reload();
-                } else {
+                if ($type == 'framework') {
                     Timer::after(1000, function () use ($httpServer) {
                         $httpServer->shutdown();
                     });
+                } else {
+                    $httpServer->reload();
                 }
                 return true;
             }
@@ -129,7 +128,7 @@ class App {
      * @throws Exception
      */
     public static function checkVersion(): void {
-        if (APP_RUN_MODE != 'phar') {
+        if (APP_SRC_TYPE != 'phar') {
             return;
         }
         $httpServer = \Scf\Server\Http::instance();
@@ -174,7 +173,7 @@ class App {
      * @return Installer
      */
     public static function installer(): Installer {
-        return Installer::mount(defined('APP_DIR_NAME') ? APP_DIR_NAME : 'app');
+        return Installer::mount(APP_DIR_NAME);
     }
 
     /**
@@ -276,7 +275,7 @@ class App {
      */
     public static function mount(string $mode = MODE_CGI): void {
         if (!self::installer()->isInstalled() && self::isDevEnv()) {
-            Console::error("[LOAD]无法挂载至:" . SCF_APPS_ROOT . '/' . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
+            Console::error("无法挂载至:" . SCF_APPS_ROOT . '/' . self::installer()->app_path . ",请先使用'./install'命令安装(创建)应用");
             exit();
         }
         //应用ID
@@ -458,7 +457,7 @@ class App {
      * @return bool
      */
     public static function update(): bool {
-        if (APP_RUN_MODE != 'phar') {
+        if (APP_SRC_TYPE != 'phar') {
             return true;
         }
         run(function () {

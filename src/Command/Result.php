@@ -3,14 +3,14 @@
 namespace Scf\Command;
 
 class Result {
-    private $result;
-    private $msg;
+    private mixed $result;
+    private ?string $msg;
 
     function getMsg(): ?string {
         return $this->msg;
     }
 
-    function setResult($result) {
+    function setResult($result): void {
         $this->result = $result;
     }
 
@@ -18,7 +18,7 @@ class Result {
         return $this->result;
     }
 
-    function setMsg(?string $msg) {
+    function setMsg(?string $msg): void {
         $this->msg = $msg;
     }
 }

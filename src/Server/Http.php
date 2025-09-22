@@ -7,10 +7,11 @@ use Scf\Command\Manager;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Core\Key;
+use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
-use Scf\Core\Table\ATable;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Root;
@@ -66,32 +67,27 @@ class Http extends \Scf\Core\Server {
     protected int $started = 0;
 
     /**
-     * @param $role
+     * @param string $role
      * @param string $host
      * @param int $port
      */
-    public function __construct($role, string $host = '0.0.0.0', int $port = 0) {
+    public function __construct(string $role, string $host = '0.0.0.0', int $port = 0) {
         $this->bindHost = $host;
         $this->bindPort = $port;
         $this->role = $role;
         $this->started = time();
-        $this->name = SERVER_NAME;
-        $this->id = SERVER_NODE_ID;
+        $this->id = APP_NODE_ID;
         $this->ip = SERVER_HOST;
-    }
-
-    public static function debug(): string {
-        return 'v10';
     }
 
     /**
      * 创建一个服务器对象
-     * @param $role
+     * @param string $role
      * @param string $host
      * @param int $port
      * @return Http
      */
-    public static function create($role, string $host = '0.0.0.0', int $port = 0): static {
+    public static function create(string $role, string $host = '0.0.0.0', int $port = 0): static {
         $class = static::class;
         if (!isset(self::$_instances[$class])) {
             self::$_instances[$class] = new $class($role, $host, $port);
@@ -99,23 +95,12 @@ class Http extends \Scf\Core\Server {
         return self::$_instances[$class];
     }
 
-    public static function allowCrossOrigin(): bool {
-        return defined('ALLOW_CROSS_ORIGIN') && ALLOW_CROSS_ORIGIN;
-    }
-
     public static function server(): ?Server {
         try {
-            return self::instance()->_master();
+            return self::instance()->server;
         } catch (Throwable) {
             return null;
         }
-    }
-
-    /**
-     * @return ?Server
-     */
-    public static function master(): ?Server {
-        return self::server();
     }
 
     /**
@@ -187,7 +172,7 @@ class Http extends \Scf\Core\Server {
             'max_concurrency' => $serverConfig['max_concurrency'] ?? 2048,//最高并发
             'package_max_length' => $serverConfig['package_max_length'] ?? 10 * 1024 * 1024
         ];
-        if (SERVER_ENABLE_STATIC_HANDER || Env::isDev()) {
+        if (!empty($serverConfig['static_handler_locations']) || Env::isDev()) {
             $setting['document_root'] = APP_PATH . '/public';
             $setting['enable_static_handler'] = true;
             $setting['http_autoindex'] = true;
@@ -195,7 +180,7 @@ class Http extends \Scf\Core\Server {
             $setting['static_handler_locations'] = $serverConfig['static_handler_locations'] ?? ['/cp', '/asset'];
         }
         //是否允许跨域请求
-        define('ALLOW_CROSS_ORIGIN', $serverConfig['allow_cross_origin'] ?? false);
+        define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
         $this->server->set($setting);
         //监听HTTP请求
         try {
@@ -223,20 +208,6 @@ class Http extends \Scf\Core\Server {
             usleep(500 * 1000);
             exit(1);
         }
-        //监听SOCKET请求
-//        $socketPort = self::getUseablePort($this->bindPort + 1);
-//        try {
-//            $socketServer = $this->server->listen($this->bindHost, $socketPort, SWOOLE_SOCK_TCP);
-//            $socketServer->set([
-//                'open_http_protocol' => false,
-//                'open_http2_protocol' => false,
-//                'open_websocket_protocol' => true
-//            ]);
-//            Runtime::instance()->socketPort($socketPort);
-//        } catch (Throwable $exception) {
-//            Console::log(Color::red('socket服务端口监听失败:' . $exception->getMessage()));
-//            exit(1);
-//        }
         //监听RPC服务(tcp)请求
         $rport = RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0);
         if ($rport) {
@@ -317,12 +288,13 @@ class Http extends \Scf\Core\Server {
             File::write(SERVER_MANAGER_PID_FILE, $managerPid);
             File::write(SERVER_PORT_FILE, Runtime::instance()->dashboardPort());
             $scfVersion = SCF_VERSION;
+
             $role = SERVER_ROLE;
-            $env = APP_RUN_ENV;
-            $mode = APP_RUN_MODE;
-            $alias = SERVER_ALIAS;
+            $env = SERVER_RUN_ENV;
+            $src = APP_SRC_TYPE;
+            $dirName = APP_DIR_NAME;
             $files = count(get_included_files());
-            $os = SERVER_ENV;
+            $os = OS_ENV;
             $host = SERVER_HOST;
             $version = swoole_version();
             $fingerprint = APP_FINGERPRINT;
@@ -334,8 +306,8 @@ class Http extends \Scf\Core\Server {
 应用指纹：{$fingerprint}
 运行系统：{$os}
 运行环境：{$env}
-运行模式：{$mode}
-节点名称：{$alias}
+应用目录：{$dirName}
+源码类型：{$src}
 节点角色：{$role}
 文件加载：{$files}
 环境版本：{$version}
@@ -374,7 +346,7 @@ INFO;
             //连接主节点
             $this->server->addProcess(SubProcess::createHeartbeatProcess($this->server));
             //启动文件监听进程
-            if ((Env::isDev() && APP_RUN_MODE == 'src') || Manager::instance()->issetOpt('watch')) {
+            if ((Env::isDev() && APP_SRC_TYPE == 'dir') || Manager::instance()->issetOpt('watch')) {
                 $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
             }
             $this->server->start();
@@ -459,6 +431,10 @@ INFO;
                     Runtime::instance()->crontabProcessStatus(false);
                 } else {
                     foreach ($tasks as $processTask) {
+                        if (!isset($processTask['id'])) {
+                            Console::warning("【Crontab】任务ID为空:" . JsonHelper::toJson($processTask));
+                            continue;
+                        }
                         if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
                             CrontabManager::errorReport($processTask);
                         }
@@ -608,15 +584,11 @@ INFO;
     }
 
     public function getPort(): int {
-        return $this->bindPort;
+        return Runtime::instance()->httpPort();
     }
 
     public function stats(): array {
         return $this->server->stats();
-    }
-
-    protected function _master(): Server {
-        return $this->server;
     }
 
 }

@@ -2,11 +2,11 @@
 
 namespace Scf\Command\DefaultCommand;
 
-use Scf\Core\App;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
-use Scf\Server\Core;
+use Scf\Core\App;
+use Scf\Core\Env;
 use Scf\Server\Native as Server;
 
 class Native implements CommandInterface {
@@ -34,7 +34,7 @@ class Native implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
-            Core::initialize(MODE_NATIVE);
+            Env::initialize(MODE_NATIVE);
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());

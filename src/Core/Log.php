@@ -2,21 +2,23 @@
 
 namespace Scf\Core;
 
-use JetBrains\PhpStorm\ArrayShape;
 use Monolog\Logger;
 use Scf\Cache\Redis;
+use Scf\Command\Color;
 use Scf\Component\SocketMessager;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\LogTable;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Server\Manager;
+use Scf\Util\Date;
+use Scf\Util\Dir;
 use Scf\Util\File;
 use Scf\Util\Time;
-use Swoole\Redis\Server;
 use Throwable;
 
 
@@ -106,12 +108,18 @@ class Log {
             $error['line'] = $line ?: $msg->getLine();
         }
         $error['time'] = date('Y-m-d H:i:s');
-        $error['ip'] = App::id() . '@' . SERVER_HOST;
+        $error['ip'] = SERVER_HOST;
         //推送到控制台
-        $log = ['message' => $error['error'], 'file' => $error['file'] . ':' . $error['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'backtrace' => $this->formatBackTrace($backTrace), 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
+        $log = [
+            'message' => $error['error'],
+            'file' => $error['file'] . ':' . $error['line'],
+            'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
+            'module' => $this->_module,
+            'backtrace' => $this->formatBackTrace($backTrace)
+        ];
         //存到节点内存等待转存
         $logId = Counter::instance()->incr($this->idCounterKey);
-        if (IS_HTTP_SERVER) {
+        if (RUNNING_SERVER) {
             $table = LogTable::instance();
             $table->set($logId, ['type' => 'error', 'log' => $log]);
         } else {
@@ -138,10 +146,15 @@ class Log {
             'file' => !empty($backTrace[0]['file']) ? $backTrace[0]['file'] : '--',
             'line' => !empty($backTrace[0]['line']) ? $backTrace[0]['line'] : '--',
         ];
-        $log = ['message' => $msg, 'file' => $m['file'] . ':' . $m['line'], 'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)), 'module' => $this->_module, 'host' => SERVER_HOST, 'node_id' => SERVER_NODE_ID];
+        $log = [
+            'message' => $msg,
+            'file' => $m['file'] . ':' . $m['line'],
+            'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
+            'module' => $this->_module
+        ];
         //存到节点内存等待转存
         $logId = Counter::instance()->incr($this->idCounterKey);
-        if (IS_HTTP_SERVER) {
+        if (RUNNING_SERVER) {
             $table = LogTable::instance();
             $table->set($logId, ['type' => 'info', 'log' => $log]);
         } else {
@@ -152,7 +165,7 @@ class Log {
         //通知机器人
         try {
             $m['time'] = date('Y-m-d H:i:s');
-            $m['ip'] = App::id() . '@' . SERVER_HOST;
+            $m['ip'] = SERVER_HOST;
             $m['message'] = $msg;
             SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
         } catch (\Exception $exception) {
@@ -167,23 +180,30 @@ class Log {
      */
     public function slow($message): void {
         $log['host'] = SERVER_HOST;
-        $log['node_id'] = SERVER_NODE_ID;
         $log = [
             'message' => $message,
             'file' => $message['path'],
-            'date' => (date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3)),
-            'module' => 'Request',
-            'host' => SERVER_HOST,
-            'node_id' => SERVER_NODE_ID
+            'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
+            'module' => 'Request'
         ];
         //存到节点内存等待转存
-        if (IS_HTTP_SERVER) {
-            $table = LogTable::instance();
+        if (RUNNING_SERVER) {
             $logId = Counter::instance()->incr($this->idCounterKey);
-            $table->set($logId, ['type' => 'slow', 'log' => $log]);
+            LogTable::instance()->set($logId, ['type' => 'slow', 'log' => $log]);
         } else {
             Manager::instance()->addLog('slow', $log);
         }
+    }
+
+    /**
+     * 排程日志
+     * @param array $log
+     * @return void
+     */
+    public function crontab(array $log): void {
+        $log['time'] = date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3);
+        $logId = Counter::instance()->incr($this->idCounterKey);
+        LogTable::instance()->set($logId, ['type' => 'crontab', 'log' => $log]);
     }
 
     /**
@@ -199,24 +219,25 @@ class Log {
             }
             $types = ['info', 'error', 'slow', 'crontab'];
             foreach ($types as $type) {
-                $logLength = min(20, $masterDB->lLength('_LOGS_' . $type));
+                $logLength = min(50, $masterDB->lLength('_LOGS_' . $type));
                 if (!$logLength) {
                     continue;
                 }
                 for ($i = 0; $i < $logLength; $i++) {
-                    $log = $masterDB->rPop('_LOGS_' . $type);
+                    $log = $masterDB->rPop('_LOGS_' . strtolower($type));
                     if ($log) {
+                        $message = $log['log'] ?? $log['message'];
                         //本地化
                         if ($type == 'crontab') {
-                            $dir = APP_LOG_PATH . '/' . $type . '/' . $log['message']['task'] . '/';
+                            $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
                         } else {
                             $dir = APP_LOG_PATH . '/' . $type . '/';
                         }
-                        $message = $log['message'];
                         if (!is_dir($dir)) {
                             mkdir($dir, 0775, true);
                         }
                         $fileName = $dir . date('Y-m-d', strtotime($log['day'])) . '.log';
+                        $message['host'] = $log['host'] ?? SERVER_HOST;
                         File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
                     }
                 }
@@ -225,6 +246,7 @@ class Log {
         if (!$this->tableCount()) {
             return 0;
         }
+        //将内存表的日志转存到redis/推送到master节点
         $start = Counter::instance()->get($this->backupCounterKey);
         $maxLogId = Counter::instance()->get($this->idCounterKey);
         $table = LogTable::instance();
@@ -263,13 +285,46 @@ class Log {
         return LogTable::instance()->count();
     }
 
+    /**
+     * 清理过期日志
+     * @param int $expireDays
+     * @return int
+     */
+    public function clear(int $expireDays = 15): int {
+        //清理过期日志
+        $logPath = APP_LOG_PATH;
+        $logs = Dir::scan($logPath);
+        $clearCount = 0;
+        if ($logs) {
+            foreach ($logs as $log) {
+                //只保留文件名称
+                $file = basename($log);
+                //判断日志是否 Y-m-d.log 格式 并获取日期
+                if (!preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}\.log$/', $file)) {
+                    continue;
+                }
+                $date = preg_replace('/^([0-9]{4}-[0-9]{2}-[0-9]{2})\.log$/', '$1', $file);
+                // 把日志文件名中的日期转为时间戳
+                $timestamp = strtotime($date);
+                // 当前时间戳
+                $now = time();
+                // 计算相差的天数
+                $diffDays = floor(($now - $timestamp) / 86400);
+                // 判断是否超过过期天数
+                if ($diffDays > $expireDays && unlink($log)) {
+                    $clearCount++;
+                }
+            }
+        }
+        Runtime::instance()->set('_LOG_CLEAR_DAY_', Date::today());
+        return $clearCount;
+    }
 
     /**
      * 统计REDIS日志数量
      * @param null $day
      * @return array
      */
-    #[ArrayShape(['error' => "int", 'info' => "int"])]
     public function count($day = null): array {
         $day = $day ?: date('Y-m-d');
         return [

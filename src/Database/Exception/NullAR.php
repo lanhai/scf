@@ -3,8 +3,8 @@
 namespace Scf\Database\Exception;
 
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Mode\Web\Exception\AppError;
-use Scf\Server\Env;
 
 class NullAR {
     protected mixed $sql;
@@ -34,7 +34,7 @@ class NullAR {
      * @throws AppError
      */
     protected function throwError(): void {
-        if (defined('IS_CRONTAB_PROCESS') || (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI)) {
+        if (defined('IS_CRONTAB_PROCESS') || ENV_MODE == MODE_CLI) {
             Console::error('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
         } else {
             if (Env::isDev()) {

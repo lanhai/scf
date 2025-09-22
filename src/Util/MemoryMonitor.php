@@ -9,6 +9,7 @@ use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
+use Scf\Helper\ArrayHelper;
 use Scf\Server\Dashboard;
 use Swoole\Coroutine;
 use Swoole\Event;
@@ -18,6 +19,128 @@ use Symfony\Component\Console\Output\ConsoleOutput;
 
 class MemoryMonitor {
     protected static int $timerId = 0;
+
+    /**
+     * 占用统计
+     * @param $filter
+     * @return array
+     * @throws \Exception
+     */
+    public static function sum($filter = null): array {
+        // 一次性拉取数据 -> 组装行
+        $buildRows = function () use ($filter) {
+            $rows = [];
+            $online = 0;
+            $offline = 0;
+            $realTotal = 0.0; // 累计实际内存占用（MB）
+            $usageTotal = 0.0; // 累计分配（MB）
+            $peakTotal = 0.0; // 累计峰值（MB）
+            $rssTotal = 0.0; // 累计RSS（MB）
+            $pssTotal = 0.0; // 累计PSS（MB'])
+            //$globalSetKey = 'MEMORY_MONITOR_KEYS_' . APP_NODE_ID;
+            //$keys = Redis::pool()->sMembers($globalSetKey) ?: [];
+            $keys = Runtime::instance()->get('MEMORY_MONITOR_KEYS') ?: [];
+            //根据id排序
+            usort($keys, function ($a, $b) {
+                // 取中间部分
+                $aParts = explode(':', $a);
+                $bParts = explode(':', $b);
+                $aMid = $aParts[1] ?? $a;
+                $bMid = $bParts[1] ?? $b;
+                // 提取数字
+                preg_match('/\d+$/', $aMid, $ma);
+                preg_match('/\d+$/', $bMid, $mb);
+                if ($ma && $mb) {
+                    return intval($ma[0]) <=> intval($mb[0]);
+                }
+                // 没数字时走自然排序
+                return strnatcmp($aMid, $bMid);
+            });
+            foreach ($keys as $key) {
+                if ($filter && !str_contains($key, $filter)) {
+                    continue;
+                }
+                $data = MemoryMonitorTable::instance()->get($key);
+                if (!$data) {
+                    // 认为离线
+                    $offline++;
+                    $rows[] = [
+                        'name' => $key,
+                        'pid' => '--',
+                        'useage' => '--',
+                        'real' => '--',
+                        'peak' => '--',
+                        'rss' => '--',
+                        'pss' => '--',
+                        'updated' => '--',
+                        'status' => '离线',
+                        'rss_num' => '--',
+                    ];
+                    continue;
+                }
+                $process = $data['process'] ?? '--';
+                $pid = $data['pid'] ?? '--';
+                $usage = (float)($data['usage_mb'] ?? 0);
+                $real = (float)($data['real_mb'] ?? 0);
+                $peak = (float)($data['peak_mb'] ?? 0);
+                $usageTotal += $usage;
+                $realTotal += $real; // 统计累计实际内存
+                $peakTotal += $peak;
+
+                $rssMb = null;
+                $pssMb = null;
+                if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
+                    $rssMb = (float)$data['rss_mb'];
+                }
+                if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
+                    $pssMb = (float)$data['pss_mb'];
+                }
+
+                if ($rssMb !== null) {
+                    $rssTotal += $rssMb;
+                }
+                if ($pssMb !== null) {
+                    $pssTotal += $pssMb;
+                }
+
+                $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
+                $status = Color::green('正常');
+                $online++;
+                $rows[] = [
+                    'name' => $process,
+                    'pid' => $pid,
+                    'useage' => number_format($usage, 2) . ' MB',
+                    'real' => number_format($real, 2) . ' MB',
+                    'peak' => number_format($peak, 2) . ' MB',
+                    'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
+                    'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
+                    'updated' => $time,
+                    'status' => $status,
+                    'rss_num' => $rssMb
+                ];
+            }
+            ArrayHelper::multisort($rows, 'rss_num', SORT_DESC);
+            // 排序完成后移除临时字段 rss_num，避免对外输出
+            foreach ($rows as &$__row) {
+                if (array_key_exists('rss_num', $__row)) {
+                    unset($__row['rss_num']);
+                }
+            }
+            unset($__row);
+            return [
+                'rows' => $rows,
+                'online' => $online,
+                'offline' => $offline,
+                'total' => count($keys),
+                'usage_total_mb' => round($usageTotal, 2),
+                'real_total_mb' => round($realTotal, 2), // 累计实际内存占用（MB）
+                'peak_total_mb' => round($peakTotal, 2),
+                'rss_total_mb' => round($rssTotal, 2),
+                'pss_total_mb' => round($pssTotal, 2),
+            ];
+        };
+        return $buildRows();
+    }
 
     /**
      * @param $filter

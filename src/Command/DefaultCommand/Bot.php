@@ -5,6 +5,7 @@ namespace Scf\Command\DefaultCommand;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
+use Scf\Core\Env;
 
 class Bot implements CommandInterface {
 
@@ -31,6 +32,7 @@ class Bot implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
+            Env::initialize();
             return $this->run();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());

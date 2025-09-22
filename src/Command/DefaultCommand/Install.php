@@ -6,6 +6,7 @@ use Scf\App\Installer;
 use Scf\Client\Http;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Helper\JsonHelper;
 use Scf\Command\Color;
 use Scf\Command\CommandInterface;
@@ -41,6 +42,7 @@ class Install implements CommandInterface {
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
+            Env::initialize();
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());
@@ -53,14 +55,19 @@ class Install implements CommandInterface {
     public function create(): void {
         $manager = Manager::instance();
         $options = $manager->getOpts();
-        $path = $options['path'] ?? Console::input('请输入应用路径(位于apps下的相对路径),缺省值:app');
-        $installer = Installer::mount($path, create: true);
-        $installer->app_path = $path ?: 'app';
-        $defaultAppid = 'SCF' . Random::character();
-        $installer->appid = $options['appid'] ?? Console::input('请输入appid', default: $defaultAppid);
-        if (is_dir(SCF_APPS_ROOT . '/' . $installer->app_path)) {
-            Console::log(Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作:' . SCF_APPS_ROOT . '/' . $installer->app_path));
+        $path = $options['path'] ?? Console::input('请输入应用文件夹名称(位于apps下的相对路径)');
+        if (is_dir(SCF_APPS_ROOT . '/' . $path)) {
+            //Console::log(Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作:' . SCF_APPS_ROOT . '/' . $path));
+            $goon = Console::select(['继续创建', '退出'], label: Color::yellow('应用文件夹已存在,此操作将覆盖已存在文件,请谨慎操作'));
+            if ($goon == 2) {
+                exit(1);
+            }
         }
+        $installer = Installer::mount($path);
+        $installer->app_path = $path;
+        $defaultAppid = 'SCF-' . Random::character();
+        $installer->appid = $options['appid'] ?? Console::input('请输入appid', default: $defaultAppid);
+
         $defaultKey = Random::character(32);
         $installer->app_auth_key = $options['key'] ?? Console::input('请输入应用秘钥', default: $defaultKey);
         $installer->public_path = 'public';

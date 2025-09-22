@@ -29,6 +29,23 @@ class SocketListener extends Listener {
         if (JsonHelper::is($frame->data)) {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
+                case 'send_command_to_node':
+                    $command = $data['data']['command'];
+                    $host = $data['data']['host'];
+                    $params = $data['data']['params'] ?? [];
+                    $sendResult = Manager::instance()->sendCommandToNode($command, $host, $params);
+                    if ($sendResult->hasError()) {
+                        $server->push($frame->fd, JsonHelper::toJson([
+                            'success' => false,
+                            'message' => $sendResult->getMessage()
+                        ]));
+                    } else {
+                        $server->push($frame->fd, JsonHelper::toJson([
+                            'success' => true,
+                            'message' => '发送成功'
+                        ]));
+                    }
+                    break;
                 case 'appoint_update':
                     $finishCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
                         'type' => $data['data']['type'],
@@ -50,7 +67,12 @@ class SocketListener extends Listener {
                                         continue;
                                     }
                                     $updateType = $data['data']['type'];
-                                    $current = (int)str_replace('.', '', $updateType == 'app' ? $node['app_version'] : $node['framework_build_version']);
+                                    $versionFields = [
+                                        'app' => 'app_version',
+                                        'public' => 'public_version',
+                                        'framework' => 'framework_build_version'
+                                    ];
+                                    $current = (int)str_replace('.', '', $node[$versionFields[$updateType] ?? 'app_version']);
                                     $target = (int)str_replace('.', '', $data['data']['version']);
                                     if ($current !== $target) {
                                         $finish = false;
@@ -79,6 +101,14 @@ class SocketListener extends Listener {
                     App::appointUpdateTo($data['data']['type'], $data['data']['version']);
                     break;
                 case 'restartAll':
+                    Manager::instance()->sendCommandToAllNodeClients('shutdown');
+                    try {
+                        Http::instance()->shutdown();
+                    } catch (Throwable $e) {
+                        Console::warning($e->getMessage());
+                    }
+                    break;
+                case 'reloadAll':
                     Manager::instance()->sendCommandToAllNodeClients('restart');
                     try {
                         Http::instance()->reload();
@@ -88,26 +118,7 @@ class SocketListener extends Listener {
                     break;
                 //推送服务器运行状态数据到控制面板
                 case 'server_status':
-                    Manager::instance()->addDashboardClient($frame->fd);
-                    Timer::tick(1000, function ($id) use ($server, $frame) {
-                        if (!Runtime::instance()->serverIsAlive()) {
-                            $server->close($frame->fd);
-                            Timer::clear($id);
-                            return;
-                        }
-                        $status = Manager::instance()->getStatus();
-                        if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
-                            try {
-                                $server->push($frame->fd, JsonHelper::toJson($status));
-                            } catch (Throwable) {
-                                $server->close($frame->fd);
-                                Timer::clear($id);
-                            }
-                        } else {
-                            Manager::instance()->removeDashboardClient($frame->fd);
-                            Timer::clear($id);
-                        }
-                    });
+                    $this->subscribeServerStatus($frame->fd, $server);
                     break;
                 //节点报道
                 case 'slave_node_report':
@@ -137,6 +148,7 @@ class SocketListener extends Listener {
                     $version = Updater::instance()->getVersion();
                     $server->push($frame->fd, JsonHelper::toJson($version));
                     break;
+                case 'ping':
                 case '::ping':
                     $server->push($frame->fd, "::pong");
                     break;
@@ -149,6 +161,29 @@ class SocketListener extends Listener {
     }
 
 
+    protected function subscribeServerStatus($fd, Server $server): void {
+        Manager::instance()->addDashboardClient($fd);
+        Timer::tick(1000, function ($id) use ($server, $fd) {
+            if (!Runtime::instance()->serverIsAlive()) {
+                $server->close($fd);
+                Timer::clear($id);
+                return;
+            }
+            $status = Manager::instance()->getStatus();
+            if ($server->exist($fd) && $server->isEstablished($fd)) {
+                try {
+                    $server->push($fd, JsonHelper::toJson($status));
+                } catch (Throwable) {
+                    $server->close($fd);
+                    Timer::clear($id);
+                }
+            } else {
+                Manager::instance()->removeDashboardClient($fd);
+                Timer::clear($id);
+            }
+        });
+    }
+
     /**
      * 握手
      * @param Request $request
@@ -158,9 +193,22 @@ class SocketListener extends Listener {
     protected function onHandshake(Request $request, Response $response) {
         $password = $request->get['password'] ?? '';
         $token = $request->get['token'] ?? '';
-        if ((!$password || $password != md5(App::authKey())) && (!$token || strlen(Auth::decode($token)) != 10)) {
+        if ((!$password || $password != md5(App::authKey())) && !$token) {
             $response->status(403);
         } else {
+            if ($token) {
+                $tokenDecode = Auth::decode($token);
+                if (!JsonHelper::is($tokenDecode)) {
+                    $response->status(403);
+                    goto end;
+                }
+                $tokenData = JsonHelper::recover($tokenDecode);
+                $expired = $tokenData['expired'] ?? 0;
+                if (time() > $expired) {
+                    $response->status(403);
+                    goto end;
+                }
+            }
             //websocket握手连接算法验证
             $secWebSocketKey = $request->header['sec-websocket-key'];
             $patten = '#^[+/0-9A-Za-z]{21}[AQgw]==$#';
@@ -190,7 +238,6 @@ class SocketListener extends Listener {
                 $response->header($key, $val);
             }
             $response->status(101);
-            //            $fd = $request->fd;
 //            Event::defer(function () use ($fd) {
 //                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
 //                    'time' => date('Y-m-d H:i:s'),
@@ -198,6 +245,7 @@ class SocketListener extends Listener {
 //                ]]));
 //            });
         }
+        end:
         $response->end();
     }
 

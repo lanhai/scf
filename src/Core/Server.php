@@ -10,7 +10,7 @@ abstract class Server {
     protected static Server $_SERVER;
     protected static array $_instances = [];
 
-    abstract public static function create($role, string $host = '0.0.0.0', int $port = 9580);
+    abstract public static function create(string $role, string $host = '0.0.0.0', int $port = 0);
 
     /**
      * 获取单例
@@ -20,7 +20,7 @@ abstract class Server {
     public static function instance(): static {
         $class = static::class;
         if (!isset(self::$_instances[$class])) {
-            throw new Exception('尚未创建服务器对象');
+            throw new Exception('当前不在Server运行环境中');
         }
         return self::$_instances[$class];
     }

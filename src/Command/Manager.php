@@ -76,9 +76,6 @@ class Manager {
         }
         /** @var CommandInterface $handler */
         $handler = $this->commands[$command];
-        //定义应用路径
-        $options = $this->getOpts();
-        !defined('SCF_APPS_ROOT') and define("SCF_APPS_ROOT", ($options['apps'] ?? dirname(SCF_ROOT)) . '/apps');
         return $handler->exec();
     }
 

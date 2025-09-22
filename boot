@@ -1,18 +1,50 @@
 <?php
 declare(strict_types=1);
+
+use Swoole\Coroutine\System;
+use Swoole\Event;
+use Swoole\Process;
+use function Co\run;
+
 version_compare(PHP_VERSION, '8.1.0', '<') and die('运行此应用需PHP8.1(含)以上版本, 当前环境版本: ' . PHP_VERSION);
 //系统路径
 const SCF_ROOT = __DIR__;
-//读取运行参数
-define('IS_DEV', in_array('-dev', $argv));//开发模式
-define('IS_PHAR', in_array('-phar', $argv));//打包源码模式
-define('IS_SRC', in_array('-src', $argv));//非打包源码模式
-define('IS_BUILD', in_array('build', $argv));//源码构建
-define('IS_PUBLISH', in_array('publish', $argv));//发布
-define('IS_TOOLBOX', in_array('toolbox', $argv));//cli工具
-define('IS_HTTP_SERVER', in_array('server', $argv));//启动服务器
-define('IS_PACKAGE', in_array('package', $argv));//包发布
-const FRAMEWORK_IS_PHAR = IS_PHAR || (!IS_DEV && !IS_SRC && !IS_BUILD && !IS_PACKAGE);//框架源码是否打包
+//读取系统环境参数
+$envVariables = [];
+run(function () use (&$envVariables) {
+    $appEnv = trim(System::exec('echo ${APP_ENV}')['output']);
+    $appDir = trim(System::exec('echo ${APP_DIR}')['output']);
+    $appSrc = trim(System::exec('echo ${APP_SRC}')['output']);
+    $serverRole = trim(System::exec('echo ${SERVER_ROLE}')['output']);
+    $staticHandler = trim(System::exec('echo ${STATIC_HANDLER}')['output']);
+    $hostIp = trim(System::exec('echo ${HOST_IP}')['output']);
+    $osName = trim(System::exec('echo ${OS_NAME}')['output']);
+    $netWorkMode = trim(System::exec('echo ${NETWORK_MODE}')['output']);
+    $envVariables = compact('appEnv', 'appDir', 'appSrc', 'serverRole', 'staticHandler', 'hostIp', 'osName', 'netWorkMode');
+    $envVariables = array_combine(
+        array_map(function ($key) {
+            return strtolower(preg_replace('/[A-Z]/', '_$0', $key));
+        }, array_keys($envVariables)),
+        $envVariables
+    );
+});
+Event::wait();
+define("ENV_VARIABLES", $envVariables);
+define('IS_DEV', (ENV_VARIABLES['app_env'] === 'dev') || in_array('-dev', $argv));//开发模式
+define('IS_PACK', in_array('-pack', $argv));//打包源码模式
+define('NO_PACK', in_array('-nopack', $argv));//非打包源码模式
+
+define('IS_HTTP_SERVER', in_array('server', $argv));
+define('RUNNING_SERVER', in_array('server', $argv));//启动HTTP/SOCKET服务器
+define('RUNNING_BUILD', in_array('build', $argv));//源码构建
+define('RUNNING_INSTALL', in_array('install', $argv));//创建应用
+define('RUNNING_TOOLBOX', in_array('toolbox', $argv));//cli工具
+define('RUNNING_PACKAGE', in_array('package', $argv));//包发布到github
+define('RUNNING_CREATE_AR', RUNNING_TOOLBOX && in_array('ar', $argv));//构建数据AR文件
+define('RUNNING_BUILD_FRAMEWORK', RUNNING_BUILD && in_array('framework', $argv));//框架源码构建
+
+const FRAMEWORK_IS_PHAR = IS_PACK || (!IS_DEV && !NO_PACK && !RUNNING_BUILD && !RUNNING_PACKAGE && !RUNNING_INSTALL);//框架源码是否打包
+
 function _UpdateFramework_($boot = false): string {
     clearstatcache();
     $srcPack = __DIR__ . '/build/src.pack';
@@ -104,7 +136,7 @@ spl_autoload_register(function ($class) use ($srcPack) {
         $classPath = str_replace('Scf\\', '', $class);
         $relative = str_replace('\\', '/', $classPath) . '.php';
         if (FRAMEWORK_IS_PHAR) {
-            if ($class === 'Scf\\Command\\Caller' || $class === 'Scf\\Command\\Runner' || $class === 'Scf\\Root') {
+            if ($class === 'Scf\\Command\\Caller' || $class === 'Scf\\Command\\Runner') {// || $class === 'Scf\\Root'
                 // 这两个类强制使用非打包源码，避免在 PHAR 中被固定导致热更新受限
                 if (IS_DEV || is_dir(__DIR__ . '/src/')) {
                     $filePath = __DIR__ . '/src/' . $relative;
@@ -136,34 +168,27 @@ ini_set('date.timezone', 'Asia/Shanghai');
 // 自动加载第三方库
 require __DIR__ . '/vendor/autoload.php';
 
-// 优先引入root，因为含系统常量
-use Scf\Root;
-
-require_once Root::dir() . '/Const.php';
-
-use Scf\Command\Caller;
-use Scf\Command\Runner;
-
-use Swoole\Process;
-use function Co\run;
-
 function start($argv): void {
-    $caller = new Caller();
+    $caller = new Scf\Command\Caller();
     $caller->setScript(current($argv));
     $caller->setCommand(next($argv));
     $caller->setParams($argv);
-    $ret = Runner::instance()->run($caller);
+    $ret = Scf\Command\Runner::instance()->run($caller);
     if (!empty($ret->getMsg())) {
         echo $ret->getMsg() . "\n";
     }
 }
 
-if (!IS_HTTP_SERVER) {
-    start($argv);
+if (!RUNNING_SERVER) {
+    $managerProcess = new Process(function () use ($argv) {
+        start($argv);
+    });
+    $managerProcess->start();
+    Process::wait();
 } else {
     while (true) {
         $managerProcess = new Process(function () use ($argv) {
-            $serverBuildVersion = require Root::dir() . '/version.php';
+            $serverBuildVersion = require Scf\Root::dir() . '/version.php';
             define("FRAMEWORK_REMOTE_VERSION_SERVER", 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
             define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
             define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);

@@ -9,6 +9,7 @@ use Scf\Core\App;
 use Scf\Core\Component;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Result;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
@@ -65,7 +66,7 @@ class Manager extends Component {
             $socketHost .= '/dashboard.socket';
         }
         try {
-            $socket = SaberGM::websocket('ws://' . $socketHost . '?username=node-' . SERVER_NODE_ID . '&password=' . md5(App::authKey()));
+            $socket = SaberGM::websocket('ws://' . $socketHost . '?username=node-' . APP_NODE_ID . '&password=' . md5(App::authKey()));
             if (!$this->wsConnected($socket)) {
                 $cli = $this->getWsClient($socket);
                 $status = $cli->statusCode ?? 'null';
@@ -89,12 +90,57 @@ class Manager extends Component {
      */
     public function pushConsoleLog($log): void {
         $socketHost = $this->getMasterHost();
-        $client = \Scf\Client\Http::create("http://{$socketHost}/console.socket");
+        $client = Http::create("http://{$socketHost}/console.socket");
         $client->post([
             'message' => $log,
             'host' => App::isMaster() ? 'master' : SERVER_HOST
         ]);
         $client->close();
+    }
+
+    /**
+     * 向单一节点发送指令
+     * @param string $command
+     * @param string $host
+     * @param array $params
+     * @param string $commander
+     * @return Result
+     */
+    public function sendCommandToNode(string $command, string $host, array $params = [], string $commander = 'main'): Result {
+        if ($commander !== 'main') {
+            $socket = $this->getMasterSocketConnection();
+            $socket->push(JsonHelper::toJson(['event' => 'send_command_to_node', 'data' => ['command' => $command, 'host' => $host, 'params' => $params]]));
+            $reply = $socket->recv(30);
+            if ($reply === false || $reply->data == '') {
+                $socket->close();
+                return Result::error('指令发送超时');
+            }
+            $result = JsonHelper::recover($reply->data);
+            $socket->close();
+            if (!$result['success']) {
+                return Result::error($result['message']);
+            }
+            return Result::success($result['message']);
+        }
+        if ($host == SERVER_HOST && App::isMaster()) {
+            $host = 'localhost';
+        }
+        $node = ServerNodeTable::instance()->get($host);
+        if (!$node) {
+            return Result::error('节点不存在:' . $host);
+        }
+        $server = \Scf\Server\Http::server();
+        if (!$server) {
+            return Result::error('服务器未初始化');
+        }
+        if (!$server->exist($node['socket_fd']) || !$server->isEstablished($node['socket_fd'])) {
+            return Result::error('节点不在线');
+        }
+        $server->push($node['socket_fd'], JsonHelper::toJson(['event' => 'command', 'data' => [
+            'command' => $command,
+            'params' => $params
+        ]]));
+        return Result::success();
     }
 
     /**
@@ -138,6 +184,9 @@ class Manager extends Component {
      * @return bool
      */
     public function addNodeClient($fd, string $host, string $role): bool {
+        if ($host == SERVER_HOST && App::isMaster()) {
+            $host = 'localhost';
+        }
         return ServerNodeTable::instance()->set($host, [
             'host' => $host,
             'socket_fd' => $fd,
@@ -363,22 +412,22 @@ class Manager extends Component {
     /**
      * 记录日志
      * @param string $type
-     * @param mixed $message
+     * @param mixed $log
      * @return bool|int
      */
-    public function addLog(string $type, mixed $message): bool|int {
+    public function addLog(string $type, mixed $log): bool|int {
         try {
             //TODO 日志推送到master节点
             $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
             if ($masterDB instanceof NullPool) {
-                if (!IS_HTTP_SERVER) {
-                    //日志本地化
+                if (!RUNNING_SERVER) {
+                    //非server 日志本地化
                     if ($type == 'crontab') {
-                        $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
-                        $content = $message['message'];
+                        $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
+                        $content = $log['message'];
                     } else {
                         $dir = APP_LOG_PATH . '/' . $type . '/';
-                        $content = $message;
+                        $content = $log;
                     }
                     $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
                     if (!is_dir($dir)) {
@@ -388,10 +437,11 @@ class Manager extends Component {
                 }
                 return false;
             }
-            $queueKey = "_LOGS_" . $type;
+            $queueKey = "_LOGS_" . strtolower($type);
             return $masterDB->lPush($queueKey, [
                 'day' => Date::today(),
-                'message' => $message
+                'host' => SERVER_HOST,
+                'log' => $log
             ]);
         } catch (Throwable) {
             return false;
@@ -428,7 +478,7 @@ class Manager extends Component {
     public function getServers(bool $onlineOnly = true): array {
         //$masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
         //$this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
-        if (SERVER_MODE == MODE_CGI) {
+        if (ENV_MODE == MODE_CGI) {
             $nodes = ServerNodeStatusTable::instance()->rows();
         } else {
             $client = Http::create(Dashboard::host() . '/nodes');

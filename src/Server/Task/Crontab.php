@@ -4,16 +4,13 @@ namespace Scf\Server\Task;
 
 use Generator;
 use JetBrains\PhpStorm\ArrayShape;
-use Scf\Cache\Redis;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Struct;
 use Scf\Core\Table\Counter;
-use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
-use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
@@ -146,11 +143,6 @@ class Crontab extends Struct {
     public function start(): void {
         //内存占用统计
         MemoryMonitor::start('crontab-' . $this->name);
-        $masterDB = Redis::pool($this->_config['server'] ?? 'main');
-        $setKey = CrontabManager::redisSetKey();
-        if (!$masterDB->sIsMember($setKey, $this->redisTaskKey())) {
-            $masterDB->sAdd($setKey, $this->redisTaskKey());
-        }
         //迭代检查计时器
         Timer::tick(5000, function () {
             if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
@@ -327,8 +319,8 @@ class Crontab extends Struct {
         $arr = explode("\\", $this->namespace);
         App::isDevEnv() and Console::log('【Crontab】[' . $this->name . '|' . array_pop($arr) . '|' . $this->manager_id . '-' . $this->running_version . ']' . $msg);
         //保存日志到Redis&日志文件
-        $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $this->namespace));
-        Manager::instance()->addLog('crontab', ['task' => $taskName, 'message' => Log::filter($msg), 'date' => date('Y-m-d H:i:s')]);
+        $taskName = CrontabManager::formatTaskName($this->namespace);
+        Log::instance()->crontab(['task' => $taskName, 'message' => Log::filter($msg)]);
     }
 
     /**
@@ -511,7 +503,7 @@ class Crontab extends Struct {
      * @return void
      */
     protected function processingStart(int $nextTime = 0): void {
-        $lastRun = date('m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
+        $lastRun = date('Y-m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
         $this->last_run = $lastRun;
         $this->run_count += 1;
         $this->is_busy = 1;
@@ -544,25 +536,10 @@ class Crontab extends Struct {
      * @return bool|array
      */
     public function update(array $datas): bool|array {
-        $pool = Redis::pool($this->_config['server'] ?? 'main');
-        if ($pool instanceof NullPool) {
+        if ($this->isOrphan()) {
             return false;
         }
-        foreach ($datas as $key => $value) {
-            if (property_exists($this, $key)) {
-                $pool->hset($this->redisTaskKey(), $key, $value);
-            }
-        }
-        return $pool->hgetAll($this->redisTaskKey());
-    }
-
-    /**
-     * Redis任务Key
-     * @param int|string|null $id
-     * @return string
-     */
-    protected function redisTaskKey(int|string $id = null): string {
-        return $id ?? $this->id;
+        return CrontabManager::updateTaskTable($this->id, $datas);
     }
 
     /**
@@ -570,7 +547,7 @@ class Crontab extends Struct {
      * @return void
      */
     protected function updateRunTime(): void {
-        $this->last_run = date('m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
+        $this->last_run = date('Y-m-d H:i:s') . "." . substr(\Scf\Util\Time::millisecond(), -3);
         $this->run_count += 1;
         $this->update([
             'last_run' => $this->last_run,
@@ -607,12 +584,7 @@ class Crontab extends Struct {
      * @return array
      */
     protected function sync(): array {
-        $pool = Redis::pool($this->_config['server'] ?? 'main');
-        if ($pool instanceof NullPool) {
-            return $this->asArray();
-        }
-        $key = $this->redisTaskKey();
-        $attributes = $pool->hgetAll($key);
+        $attributes = CrontabManager::getTaskTableById($this->id);
         if ($attributes) {
             $this->mode = $attributes['mode'] ?? $this->mode;
             $this->interval = $attributes['interval'] ?? $this->interval;
@@ -641,10 +613,6 @@ class Crontab extends Struct {
 
     public function getId(): int {
         return $this->id;
-    }
-
-    public function getManagerId(): int {
-        return $this->manager_id;
     }
 
     public function run() {

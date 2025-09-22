@@ -143,4 +143,9 @@ class Node extends Struct {
      */
     public ?array $server_stats;
 
+    /**
+     * @var array|null
+     */
+    public ?array $memory_usage;
+
 }

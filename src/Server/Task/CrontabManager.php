@@ -3,7 +3,6 @@
 namespace Scf\Server\Task;
 
 use Exception;
-use Scf\Cache\Redis;
 use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
@@ -20,7 +19,6 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Swoole\Event;
 use Swoole\Process;
-use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
@@ -28,59 +26,6 @@ use Throwable;
 class CrontabManager {
     protected static array $tasks = [];
     protected static array $_instances = [];
-
-    /**
-     * 加载定时任务
-     * @return bool
-     */
-    public static function load(): bool {
-        self::$tasks = [];
-        $serverConfig = Config::server();
-        $list = [];
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
-        if (App::isMaster() && $enableStatistics) {
-            $list[] = [
-                'id' => 'CRONTAB:' . md5(SERVER_NODE_ID . App::id() . '\Scf\Database\Statistics\StatisticCrontab'),
-                'status' => STATUS_ON,
-                'name' => '统计数据入库',
-                'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
-                'mode' => Crontab::RUN_MODE_LOOP,
-                'interval' => $serverConfig['db_statistics_interval'] ?? 3,
-                'timeout' => 3600,
-                'manager_id' => $managerId
-            ];
-        }
-        if (!$modules = App::getModules()) {
-            if ($list) {
-                goto init;
-            }
-            return false;
-        }
-        foreach ($modules as $module) {
-            $crontabs = $module['crontabs'] ?? $module['background_tasks'] ?? [];
-            if ($crontabs) {
-                $list = $list ? [...$list, ...$crontabs] : $crontabs;
-            }
-            if (App::isMaster() && $masterCrontabls = $module['master_crontabs'] ?? null) {
-                $list = $list ? [...$list, ...$masterCrontabls] : $masterCrontabls;
-            }
-            if (!App::isMaster() && $slaveCrontabls = $module['slave_crontabs'] ?? null) {
-                $list = $list ? [...$list, ...$slaveCrontabls] : $slaveCrontabls;
-            }
-        }
-        init:
-        if ($list) {
-            foreach ($list as $task) {
-                $task['id'] = 'CRONTAB:' . md5(SERVER_NODE_ID . App::id() . $task['namespace']);
-                $task['manager_id'] = $managerId;
-                $task['created'] = time();
-                $task['timeout'] = $task['timeout'] ?? 3600;
-                self::$tasks[substr($task['namespace'], 1)] = $task;
-            }
-        }
-        return self::hasTask();
-    }
 
     /**
      * @throws Exception
@@ -97,6 +42,59 @@ class CrontabManager {
     }
 
     /**
+     * 加载定时任务
+     * @return void
+     */
+    private static function load(): void {
+        self::$tasks = [];
+        $serverConfig = Config::server();
+        $list = [];
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
+        if (App::isMaster() && $enableStatistics) {
+            $list[] = [
+                'name' => '统计数据入库',
+                'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
+                'mode' => Crontab::RUN_MODE_LOOP,
+                'interval' => $serverConfig['db_statistics_interval'] ?? 3,
+                'timeout' => 3600,
+                'status' => STATUS_ON,
+            ];
+        }
+        if (!$modules = App::getModules()) {
+            if ($list) {
+                goto init;
+            }
+            return;
+        }
+
+        foreach ($modules as $module) {
+            $crontabs = $module['crontabs'] ?? $module['background_tasks'] ?? [];
+            if ($crontabs) {
+                $list = $list ? [...$list, ...$crontabs] : $crontabs;
+            }
+            if (App::isMaster() && $masterCrontabls = $module['master_crontabs'] ?? null) {
+                $list = $list ? [...$list, ...$masterCrontabls] : $masterCrontabls;
+            }
+            if (!App::isMaster() && $slaveCrontabls = $module['slave_crontabs'] ?? null) {
+                $list = $list ? [...$list, ...$slaveCrontabls] : $slaveCrontabls;
+            }
+        }
+        init:
+        if ($list) {
+            foreach ($list as $task) {
+                $task['id'] = 'CRONTAB:' . md5(App::id() . $task['namespace']);
+                $task['manager_id'] = $managerId;
+                $task['created'] = time();
+                $task['timeout'] = $task['timeout'] ?? 3600;
+                self::$tasks[substr($task['namespace'], 1)] = $task;
+            }
+        }
+        self::hasTask();
+    }
+
+
+    /**
      * 开启进程
      * @return array
      */
@@ -104,21 +102,12 @@ class CrontabManager {
         if (!App::isReady() || SERVER_CRONTAB_ENABLE != SWITCH_ON) {
             return [];
         }
-        $process = new Process(function ()  {
+        $process = new Process(function () {
             App::mount();
-            $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
-            $key = self::redisSetKey();
-            $members = $pool->sMembers($key);
-            if ($members) {
-                $pool->delete($key);
-                foreach ($members as $id) {
-                    $pool->delete($id);
-                }
-            }
             self::load();
             if (self::$tasks) {
                 foreach (self::$tasks as $task) {
-                    static::updateTaskTable($task['id'], $task);
+                    static::add($task['id'], $task);
                 }
             }
         });
@@ -127,13 +116,7 @@ class CrontabManager {
         sleep(1);
         $taskList = static::getTaskTable();
         if (!$taskList) {
-            //没有定时任务也启动一个计时器
-//            while (true) {
-//                if ($managerId !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-//                    break;
-//                }
-//                sleep(App::isDevEnv() ? 5 : 60);
-//            }
+            //没有任务返回空等待下一轮查询
             return [];
         }
         foreach ($taskList as &$task) {
@@ -217,9 +200,7 @@ class CrontabManager {
             // 注意：exit 后面的代码不会被执行
         });
         $pid = $process->start();
-
-        static::updateTaskTable($task['id'], [
-            'id' => $task['id'],
+        self::updateTaskTable($task['id'], [
             'namespace' => $task['namespace'],
             'pid' => $pid,
             'is_running' => STATUS_ON,
@@ -232,7 +213,12 @@ class CrontabManager {
         return CrontabTable::instance()->rows();
     }
 
-    public static function getTaskTableById($id) {
+    /**
+     * 根据ID获取任务
+     * @param string $id
+     * @return array
+     */
+    public static function getTaskTableById(string $id): array {
         return CrontabTable::instance()->get($id) ?: [];
     }
 
@@ -246,10 +232,10 @@ class CrontabManager {
 
     /**
      * 根据命名空间获取定时任务
-     * @param $namespace
+     * @param string $namespace
      * @return array
      */
-    public static function getTaskTableByNamespace($namespace): array {
+    public static function getTaskTableByNamespace(string $namespace): array {
         $tasks = CrontabTable::instance()->rows();
         $item = array_filter($tasks, function ($task) use ($namespace) {
             return $task['namespace'] == $namespace;
@@ -257,7 +243,13 @@ class CrontabManager {
         return $item ? array_values($item)[0] : [];
     }
 
-    public static function updateTaskTable($id, $data): array {
+    /**
+     * 更新任务数据
+     * @param string $id
+     * @param array $data
+     * @return array
+     */
+    public static function updateTaskTable(string $id, array $data): array {
         $task = CrontabTable::instance()->get($id);
         if ($task) {
             foreach ($data as $key => $value) {
@@ -267,11 +259,13 @@ class CrontabManager {
                     $task[$key] = $value;
                 }
             }
-        } else {
-            $task = $data;
+            CrontabTable::instance()->set($id, $task);
         }
-        CrontabTable::instance()->set($id, $task);
         return CrontabTable::instance()->rows();
+    }
+
+    private static function add(string $id, array $data): void {
+        CrontabTable::instance()->set($id, $data);
     }
 
     public static function removeTaskTable($id): array {
@@ -316,8 +310,9 @@ class CrontabManager {
     /**
      * 立即执行
      */
-    public static function runRightNow($namespace): bool|int {
+    public static function runRightNow($namespace, $host = null): bool|int {
         try {
+            //TODO 向子节点发送运行指令
             return self::copyInstance($namespace)->runRightNow();
         } catch (\Exception $e) {
             return false;
@@ -373,36 +368,34 @@ class CrontabManager {
      * @return array
      */
     public static function allStatus(): array {
-        $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
-        $ids = $pool->sMembers(self::redisSetKey()) ?: [];
-        $list = [];
-        if ($ids) {
-            foreach ($ids as $id) {
-                if (!$task = $pool->hgetAll($id)) {
-                    continue;
+        $tasks = CrontabTable::instance()->rows();
+        if (!$tasks) {
+            return [];
+        }
+        $list = array_values($tasks);
+        foreach ($list as &$task) {
+            if (!isset($task['id'])) {
+                continue;
+            }
+            foreach ($task as &$val) {
+                if (is_numeric($val)) {
+                    $val = (int)$val;
                 }
-                foreach ($task as &$val) {
-                    if (is_numeric($val)) {
-                        $val = (int)$val;
-                    }
-                }
-                $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
-                $task['logs'] = Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 20, $taskName);
-                $task['real_status'] = $task['status'];
-                if ($task['mode'] != Crontab::RUN_MODE_TIMING && isset($task['interval'])) {
-                    $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
-                }
-                $list[] = $task;
+            }
+            //$taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
+            $task['logs'] = []; //Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 5, $taskName);
+            $task['real_status'] = $task['status'];
+            if ($task['mode'] != Crontab::RUN_MODE_TIMING && isset($task['interval'])) {
+                $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
             }
         }
         return $list;
     }
 
-    public static function status($namespace) {
+    public static function status($namespace): array {
         try {
             $crontab = self::copyInstance($namespace);
-            $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
-            $task = $pool->hgetAll($crontab->id);
+            $task = self::getTaskTableById($crontab->id);
             if (!$task) {
                 return [];
             }
@@ -421,7 +414,22 @@ class CrontabManager {
         } catch (Throwable $e) {
             return [];
         }
+    }
 
+    /**
+     * 命名空间转换为任务名
+     * @param string $namespace
+     * @return array|string
+     */
+    public static function formatTaskName(string $namespace): array|string {
+        $name = str_replace("\\", "", $namespace);
+        if (str_starts_with($name, 'App')) {
+            $name = substr($name, 3);
+        }
+        if (str_starts_with($name, 'Crontab')) {
+            $name = substr($name, 7);
+        }
+        return $name;
     }
 
     /**
@@ -431,11 +439,4 @@ class CrontabManager {
         return self::$tasks;
     }
 
-    /**
-     * Redis集合Key
-     * @return string
-     */
-    public static function redisSetKey(): string {
-        return 'CRONTABS_' . md5(App::id() . '_' . SERVER_NODE_ID);
-    }
 }

@@ -6,6 +6,7 @@ use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Swoole\Coroutine;

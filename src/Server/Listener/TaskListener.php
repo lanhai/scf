@@ -3,9 +3,9 @@
 namespace Scf\Server\Listener;
 
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Core\Log;
 use Scf\Helper\JsonHelper;
-use Scf\Server\Env;
 use Swoole\Server\Task;
 use Swoole\WebSocket\Server;
 use Throwable;

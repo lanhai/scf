@@ -5,6 +5,7 @@ namespace Scf\App;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Struct;
+use Scf\Core\Table\Runtime;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Command\Color;
@@ -73,18 +74,10 @@ class Installer extends Struct {
      * @return bool
      */
     public function update(): bool {
-        $isNew = true;
-        foreach (self::$_apps as $index => $app) {
-            if ($app['app_path'] == $this->app_path) {
-                $isNew = false;
-                self::$_apps[$index] = $this->toArray();
-            }
-        }
-        if ($isNew) {
-            self::$_apps[] = $this->toArray();
-        }
-        $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(self::$_apps));
+        self::$_apps[$this->app_path] = $this->asArray();
+        $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(array_values(self::$_apps)));
         clearstatcache();
+        Runtime::instance()->set('_APP_PROFILE_', $this->asArray());
         return $result;
     }
 
@@ -93,43 +86,49 @@ class Installer extends Struct {
      * @return array
      */
     public function apps(): array {
-        return self::$_apps;
+        return self::$_apps ? array_values(self::$_apps) : [];
     }
 
     /**
      * 挂载目标目录应用
      * @param string $path
      * @param int $try
-     * @param bool $create
      * @return static
      */
-    public static function mount(string $path = 'app', int $try = 0, bool $create = false): static {
+    public static function mount(string $path = 'app', int $try = 0): static {
+        if ($appProfile = Runtime::instance()->get('_APP_PROFILE_')) {
+            return self::factory($appProfile);
+        }
         if (!file_exists(SCF_APPS_ROOT)) {
             mkdir(SCF_APPS_ROOT, 0775, true);
         }
         $jsonFile = SCF_APPS_ROOT . '/apps.json';
         $appPath = SCF_APPS_ROOT . '/' . $path;
-        if (!file_exists($appPath)) {
-            if (!$create && App::isDevEnv()) {
-                Console::error("无法挂载至:" . $appPath . ",请先使用'./install'命令安装(创建)应用");
+        $apps = [];
+        if (!file_exists($appPath) && !RUNNING_INSTALL) {
+            if (!RUNNING_SERVER) {
+                Console::error("应用目录不存在:" . $appPath);
                 exit();
             }
-            mkdir($appPath, 0775, true);
+            if (!mkdir($appPath, 0775, true)) {
+                Console::error("无法挂载至:" . $appPath . ",请先确保应用目录可写");
+                exit();
+            }
         }
         if (file_exists($jsonFile)) {
             $try++;
             $apps = File::readJson($jsonFile);
             if (!is_array($apps) && $try < 3) {
                 clearstatcache();
-                return self::mount($path, $try, $create);
+                return self::mount($path, $try);
             }
             if ($try >= 3) {
                 Console::error("应用配置文件内容非法");
                 exit();
             }
-            self::$_apps = $apps;
+            $apps = ArrayHelper::index($apps, 'app_path');
         }
-        $profile = self::match($path) ?: [
+        $profile = $apps[$path] ?? [
             'appid' => "",
             'app_path' => $path,
             'app_auth_key' => "",
@@ -141,9 +140,9 @@ class Installer extends Struct {
             'node_id' => Sn::create_guid(),
             'dashboard_password' => Auth::encode(time(), Sn::create_uuid())
         ];
-        !self::$_apps and self::$_apps[] = $profile;
-        $profile['version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $profile['version'] : 'development';
-        $profile['public_version'] = ((defined('APP_RUN_MODE') && APP_RUN_MODE == 'phar') || (defined('APP_RUN_ENV') && APP_RUN_ENV == 'production')) ? $profile['public_version'] : 'development';
+        $apps[$path] = $profile;
+        self::$_apps = $apps;
+        Runtime::instance()->set('_APP_PROFILE_', $profile);
         return self::factory($profile);
     }
 
@@ -151,8 +150,7 @@ class Installer extends Struct {
      * @return string
      */
     public function src(): string {
-        //$package = APP_BIN_DIR . '/v-' . $this->version . '.app';
-        return APP_RUN_MODE === 'phar' ? 'phar://' . App::core($this->version) : APP_PATH . '/src';
+        return APP_SRC_TYPE === 'phar' ? 'phar://' . App::core($this->version) : APP_PATH . '/src';
     }
 
     /**
@@ -160,7 +158,7 @@ class Installer extends Struct {
      * @return bool
      */
     public function isInstalled(): bool {
-        return file_exists($this->src());//(!empty($this->app_auth_key) && !empty($this->appid)) ||
+        return file_exists($this->src());
     }
 
     /**
@@ -179,7 +177,8 @@ class Installer extends Struct {
         if (!self::$_apps) {
             return null;
         }
-        return ArrayHelper::findColumn(self::$_apps, 'app_path', $path);
+        return self::$_apps[$path] ?? null;
+        //return ArrayHelper::findColumn(self::$_apps, 'app_path', $path);
     }
 
 

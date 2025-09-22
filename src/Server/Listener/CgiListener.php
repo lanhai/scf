@@ -3,6 +3,7 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
+use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
@@ -17,7 +18,6 @@ use Scf\Mode\Web\Log;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Server\Controller\DashboardController;
-use Scf\Server\Env;
 use Scf\Server\Http as Server;
 use Scf\Server\Manager;
 use Scf\Util\Date;
@@ -53,7 +53,7 @@ class CgiListener extends Listener {
             }
         });
         // 设置CORS响应头
-        if (Server::allowCrossOrigin()) {
+        if (defined('SERVER_ALLOW_CROSS_ORIGIN') && SERVER_ALLOW_CROSS_ORIGIN) {
             $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
             $response->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
             $response->header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -245,7 +245,7 @@ class CgiListener extends Listener {
             if ($result->hasError()) {
                 $response->end(JsonHelper::toJson([
                     'errCode' => $result->getErrCode(),
-                    'message' => "转发请求至控制面板失败:" . $result->getMessage(),
+                    'message' => $result->getData('message') ?? "转发请求至控制面板失败:" . $result->getMessage(),
                     'data' => [
                         'host' => $dashboardHost,
                         'url' => $url,

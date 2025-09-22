@@ -54,7 +54,7 @@ class Updater {
      * @param string|null $appoint
      * @return false
      */
-    public function changeAppVersion($version, bool $isInstall = false, ?string $appoint = null): bool {
+    public function changeAppVersion($version, bool $isInstall = false, ?string $appoint = 'all'): bool {
         $appFile = App::core($version);
         $versionInfo = null;
         $app = App::info();
@@ -197,7 +197,6 @@ class Updater {
             'remark' => $versionInfo['remark']
         ];
         File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
-        Log::instance()->info("【Server】{$appoint} 已更新至版本:" . $version);
         clearstatcache();
         return true;
     }
@@ -237,7 +236,6 @@ class Updater {
                 Console::warning('【updater】引导文件下载失败:' . $downloadResult->getMessage());
                 return false;
             }
-            Log::instance()->info("【Server】框架升级包下载成功:" . $version);
             return true;
         }
         $localVersion = $this->getLocalVersion();

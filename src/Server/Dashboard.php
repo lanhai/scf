@@ -68,8 +68,18 @@ class Dashboard {
         Runtime::instance()->set('DASHBOARD_PID', "Master:{$masterPid},Server:" . Runtime::instance()->get('DASHBOARD_SERVER_PID'));
         //应用未安装启动一个安装http服务器
         if (!App::isReady()) {
+            $serverPort = SERVER_PORT ?: 9580;
+            // 尝试杀掉占用端口的进程
+            if (\Scf\Core\Server::isPortInUse($serverPort)) {
+                Console::log(Color::yellow('HTTP服务端口[' . $serverPort . ']被占用,尝试结束进程'));
+                if (!\Scf\Core\Server::killProcessByPort($serverPort)) {
+                    Console::log(Color::red('HTTP服务端口[' . $serverPort . ']被占用,尝试结束进程失败'));
+                    exit();
+                }
+                sleep(1);
+            }
             try {
-                $installServer = new Server('0.0.0.0', SERVER_PORT ?: 9580);
+                $installServer = new Server('0.0.0.0', $serverPort);
                 $installServer->on('request', function (\Swoole\Http\Request $request, \Swoole\Http\Response $response) use ($installServer) {
                     if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
                         $response->end();
@@ -177,17 +187,13 @@ class Dashboard {
                                 $this->_SERVER->reload();
                                 return;
                             }
-                            //转发回cgi
-                            $httpPort = Runtime::instance()->httpPort() ?: 9580;
+                            //转发回cgi 用于api接口文档调试场景
+                            $httpPort = Runtime::instance()->httpPort();
                             $path = $request->server['path_info'];
                             if (isset($request->server['query_string'])) {
                                 $path .= '?' . $request->server['query_string'];
                             }
-                            if (SERVER_HOST_IS_IP) {
-                                $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $httpPort;
-                            } else {
-                                $dashboardHost = PROTOCOL_HTTP . $httpPort . '.' . SERVER_HOST;
-                            }
+                            $dashboardHost = PROTOCOL_HTTP . 'localhost:' . $httpPort;
                             $client = \Scf\Client\Http::create($dashboardHost . $path);
                             foreach ($request->header as $key => $value) {
                                 $client->setHeader($key, $value);
@@ -197,6 +203,8 @@ class Dashboard {
                             } else {
                                 $client->post(Request::post()->pack());
                             }
+                            $headers = $client->responseHeaders();
+                            $response->header('Content-Type', $headers['content-type']);
                             $response->status((int)$client->statusCode());
                             $response->end($client->body());
                         } else {

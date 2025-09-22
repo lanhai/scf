@@ -3,8 +3,8 @@
 namespace Scf\Database\Exception;
 
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Mode\Web\Exception\AppError;
-use Scf\Server\Env;
 
 class NullPool {
     protected string $msg = '未知错误';
@@ -19,7 +19,7 @@ class NullPool {
      * @throws AppError
      */
     public function __get($name) {
-        if (defined('IS_CRONTAB_PROCESS') || (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI)) {
+        if (defined('IS_CRONTAB_PROCESS') || ENV_MODE == MODE_CLI) {
             Console::error($this->msg);
         } else {
             if (Env::isDev()) {
@@ -35,7 +35,7 @@ class NullPool {
      * @throws AppError
      */
     public function __call($name, $args) {
-        if (defined('IS_CRONTAB_PROCESS') || (defined('SERVER_MODE') && SERVER_MODE == MODE_CLI)) {
+        if (defined('IS_CRONTAB_PROCESS') || ENV_MODE == MODE_CLI) {
             Console::error($this->msg);
         } else {
             if (Env::isDev()) {

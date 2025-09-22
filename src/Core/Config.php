@@ -58,11 +58,11 @@ class Config {
         } else {
             self::load(App::src() . '/config/app.php');
         }
-        if (is_file(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml') && file_get_contents(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml')) {
-            $arr = Yaml::parseFile(App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.yml');
+        if (is_file(App::src() . '/config/app_' . strtolower(SERVER_RUN_ENV) . '.yml') && file_get_contents(App::src() . '/config/app_' . strtolower(SERVER_RUN_ENV) . '.yml')) {
+            $arr = Yaml::parseFile(App::src() . '/config/app_' . strtolower(SERVER_RUN_ENV) . '.yml');
             self::load(is_array($arr) ? $arr : []);
         } else {
-            $file = App::src() . '/config/app_' . strtolower(APP_RUN_ENV) . '.php';
+            $file = App::src() . '/config/app_' . strtolower(SERVER_RUN_ENV) . '.php';
             is_file($file) and self::load($file);
         }
     }
