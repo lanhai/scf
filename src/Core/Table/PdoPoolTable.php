@@ -11,7 +11,7 @@ class PdoPoolTable extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 10240,
+        'size' => 5120,
         'colums' => [
             'id' => ['type' => Table::TYPE_INT, 'size' => 10],
             'hash' => ['type' => Table::TYPE_STRING, 'size' => 32],

@@ -65,7 +65,7 @@ INFO;
             Console::write(Color::green($info));
         }
         //监控内存使用
-        MemoryMonitor::start('worker-' . ($workerId + 1));
+        MemoryMonitor::start('worker:' . ($workerId + 1));
         Process::signal(SIGUSR2, function () use ($workerId) {
             try {
                 //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器");

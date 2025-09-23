@@ -18,6 +18,7 @@ use Scf\Mode\Web\Router;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Http\Server;
@@ -25,6 +26,7 @@ use Swoole\Process;
 use Swoole\Server\Task;
 use Swoole\Timer;
 use Throwable;
+use function Co\run;
 
 class Dashboard {
     use Singleton;
@@ -233,6 +235,7 @@ class Dashboard {
                 });
                 //服务器完成启动
                 $this->_SERVER->on('start', function (Server $server) {
+                    MemoryMonitor::start('Server:Dashboard');
                     Runtime::instance()->set('DASHBOARD_SERVER_PID', $server->master_pid);
                     if (!App::isReady()) {
                         Console::info("【Dashboard】等待安装配置文件就绪...");

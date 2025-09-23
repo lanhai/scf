@@ -95,10 +95,12 @@ class SocketListener extends Listener {
                         $waitCh->pop(305);
                         $finishCount and Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
                     }
+                    if (App::appointUpdateTo($data['data']['type'], $data['data']['version'])) {
+                        $finishCount++;
+                    }
                     if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
                         $server->push($frame->fd, $finishCount);
                     }
-                    App::appointUpdateTo($data['data']['type'], $data['data']['version']);
                     break;
                 case 'restartAll':
                     Manager::instance()->sendCommandToAllNodeClients('shutdown');

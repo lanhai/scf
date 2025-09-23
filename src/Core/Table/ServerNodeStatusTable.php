@@ -7,13 +7,13 @@ use Swoole\Table;
 class ServerNodeStatusTable extends ATable {
 
     /**
-     * 配置项
+     * 节点运行状态
      * @var array
      */
     protected array $_config = [
-        'size' => 300,
+        'size' => 1024,
         'colums' => [
-            '_value' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 1024 * 2]
+            '_value' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 100]
         ]
     ];
 }

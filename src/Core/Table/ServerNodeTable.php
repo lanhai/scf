@@ -11,7 +11,7 @@ class ServerNodeTable extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 300,
+        'size' => 1024,
         'colums' => [
             'host' => ['type' => Table::TYPE_STRING, 'size' => 128],
             'role' => ['type' => Table::TYPE_STRING, 'size' => 32],

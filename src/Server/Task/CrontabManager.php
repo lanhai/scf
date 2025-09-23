@@ -382,8 +382,7 @@ class CrontabManager {
                     $val = (int)$val;
                 }
             }
-            //$taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
-            $task['logs'] = []; //Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 5, $taskName);
+            $task['logs'] = [];
             $task['real_status'] = $task['status'];
             if ($task['mode'] != Crontab::RUN_MODE_TIMING && isset($task['interval'])) {
                 $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
@@ -406,7 +405,7 @@ class CrontabManager {
             }
             $taskName = str_replace("AppCrontab", "", str_replace("\\", "", $task['namespace']));
             $task['real_status'] = $task['status'];
-            $task['logs'] = Manager::instance()->getLog('crontab', date('Y-m-d'), 0, 20, $taskName);
+            $task['logs'] = Log::instance()->get('crontab', date('Y-m-d'), 0, 20, $taskName);
             if ($task['mode'] != Crontab::RUN_MODE_TIMING && isset($task['interval'])) {
                 $task['interval_humanize'] = Date::secondsHumanize($task['override']['interval'] ?? $task['interval']);
             }

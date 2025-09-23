@@ -10,6 +10,7 @@ use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Env;
+use Scf\Core\Log;
 use Scf\Core\Result;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Dao;
@@ -189,7 +190,7 @@ class DashboardController extends Controller {
         if (is_numeric($day)) {
             $day = date('Y-m-d', $day);
         }
-        $total = Manager::instance()->countLog(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $subDir);
+        $total = Log::instance()->count(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $subDir);
         $totalPage = $total ? ceil($total / $size) : 0;
         $page = min($page, $totalPage) ?: 1;
         if ($total) {
@@ -201,7 +202,7 @@ class DashboardController extends Controller {
         }
         $result = [
             'type' => $logType,
-            'list' => Manager::instance()->getLog(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $start, $size, $subDir),
+            'list' => Log::instance()->get(!in_array($logType, $sysLogs) ? 'crontab' : $logType, $day, $start, $size, $subDir),
             'pages' => (int)$totalPage,
             'pn' => (int)$page,
             'total' => $total,
@@ -588,6 +589,9 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCheck(): Result {
+        if (!$this->verifyPassword($this->password)) {
+            return Result::error('登陆已失效', 'LOGIN_EXPIRED');
+        }
         $this->loginUser['token'] = $this->genterateToken();
         return Result::success($this->loginUser);
     }
@@ -600,7 +604,6 @@ class DashboardController extends Controller {
         Request::post([
             'password' => Request\Validator::required("密码不能为空")
         ])->assign($password);
-
         if (!$this->verifyPassword($password)) {
             return Result::error('密码错误');
         } else {
@@ -626,14 +629,14 @@ class DashboardController extends Controller {
     protected function isLogin(): bool {
         $authorization = Request::header('authorization');
         if (empty($authorization) || !str_starts_with($authorization, "Bearer")) {
-            return false;
+            Response::interrupt("需登陆后访问", 'NOT_LOGIN', status: 200);
         }
         $token = substr($authorization, 7);
         $this->token = $token;
         //判断是否超管
         $decodeToken = Auth::decode($token);
         if (!$decodeToken || !JsonHelper::is($decodeToken)) {
-            return false;
+            Response::interrupt("登录已失效", 'TOKEN_NOT_VALID', status: 200);
         }
         $decodeData = JsonHelper::recover($decodeToken);
         $password = $decodeData['password'] ?? null;

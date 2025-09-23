@@ -142,7 +142,7 @@ class Crontab extends Struct {
      */
     public function start(): void {
         //内存占用统计
-        MemoryMonitor::start('crontab-' . $this->name);
+        MemoryMonitor::start('crontab:' . $this->name);
         //迭代检查计时器
         Timer::tick(5000, function () {
             if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {

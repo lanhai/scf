@@ -51,13 +51,15 @@ class App {
         try {
             $httpServer = \Scf\Server\Http::instance();
             if (Updater::instance()->appointUpdateTo($type, $version)) {
-                if ($type == 'framework') {
-                    Timer::after(1000, function () use ($httpServer) {
-                        $httpServer->shutdown();
-                    });
-                } else {
-                    $httpServer->reload();
-                }
+                Timer::after(App::isMaster() ? 3000 : 100, function () use ($httpServer, $type) {
+                    if ($type == 'framework') {
+                        Timer::after(1000, function () use ($httpServer) {
+                            $httpServer->shutdown();
+                        });
+                    } else {
+                        $httpServer->reload();
+                    }
+                });
                 return true;
             }
             return false;

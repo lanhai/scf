@@ -33,6 +33,7 @@ class SubProcess {
             Console::info("【Heatbeat】主节点连接PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
+                MemoryMonitor::start('Heatbeat');
                 $node = Node::factory();
                 $node->appid = APP_ID;
                 $node->id = APP_NODE_ID;
@@ -177,9 +178,9 @@ class SubProcess {
      */
     public static function createLogBackupProcess(Server $server): Process {
         return new Process(function ($process) use ($server) {
-            sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
                 App::mount();
+                MemoryMonitor::start('LogBackup');
                 $serverConfig = Config::server();
                 $logger = Log::instance();
                 $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
@@ -189,7 +190,7 @@ class SubProcess {
                     Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
                 }
                 Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
-                Timer::tick(5000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
+                Timer::tick(3000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
                     if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
                         $clearCount = $logger->clear($logExpireDays);
                         if ($clearCount) {
@@ -219,6 +220,7 @@ class SubProcess {
             sleep(1);
             if (Process::kill($server->manager_pid, 0)) {
                 App::mount();
+                MemoryMonitor::start('FileWatcher');
                 Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
                 $scanDirectories = function () {
                     if (APP_SRC_TYPE == 'dir') {

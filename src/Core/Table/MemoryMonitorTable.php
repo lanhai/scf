@@ -7,7 +7,7 @@ use Swoole\Table;
 class MemoryMonitorTable extends ATable {
 
     /**
-     *  临时日志
+     *  进程内存占用
      * @var array
      */
     protected array $_config = [

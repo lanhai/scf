@@ -9,6 +9,7 @@ use Scf\Core\App;
 use Scf\Core\Component;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Log;
 use Scf\Core\Result;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
@@ -323,6 +324,7 @@ class Manager extends Component {
             }
         }
         $appInfo = App::info()->toArray();
+        $logger = Log::instance();
         return [
             'event' => 'server_status',
             'info' => [...$appInfo,
@@ -332,120 +334,19 @@ class Manager extends Component {
             'servers' => $servers,
             'logs' => [
                 'error' => [
-                    'total' => $this->countLog('error', date('Y-m-d')),
+                    'total' => $logger->count('error', date('Y-m-d')),
                     'list' => []
                 ],
                 'info' => [
-                    'total' => $this->countLog('info', date('Y-m-d')),
+                    'total' => $logger->count('info', date('Y-m-d')),
                     'list' => []
                 ],
                 'slow' => [
-                    'total' => $this->countLog('slow', date('Y-m-d')),
+                    'total' => $logger->count('slow', date('Y-m-d')),
                     'list' => []
                 ]
             ]
         ];
-    }
-
-    /**
-     * 读取本地日志
-     * @param $type
-     * @param $day
-     * @param $start
-     * @param $size
-     * @param ?string $subDir
-     * @return ?array
-     */
-    public function getLog($type, $day, $start, $size, string $subDir = null): ?array {
-        if ($subDir) {
-            $dir = APP_LOG_PATH . '/' . $type . '/' . $subDir . '/';
-        } else {
-            $dir = APP_LOG_PATH . '/' . $type . '/';
-        }
-        $fileName = $dir . $day . '.log';
-        if (!file_exists($fileName)) {
-            return [];
-        }
-        if ($start < 0) {
-            $size = abs($start);
-            $start = 0;
-        }
-        clearstatcache();
-        $logs = [];
-        // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
-        $command = sprintf(
-            'tac %s | sed -n %d,%dp',
-            escapeshellarg($fileName),
-            $start + 1,
-            $start + $size
-        );
-        $result = System::exec($command);
-        if ($result === false) {
-            return [];
-        }
-        $lines = explode("\n", $result['output']);
-        foreach ($lines as $line) {
-            if (trim($line) && ($log = JsonHelper::is($line) ? JsonHelper::recover($line) : $line)) {
-                $logs[] = $log;
-            }
-        }
-        return $logs;
-    }
-
-    /**
-     * 统计日志
-     * @param string $type
-     * @param string $day
-     * @param string|null $subDir
-     * @return int
-     */
-    public function countLog(string $type, string $day, string $subDir = null): int {
-        if ($subDir) {
-            $dir = APP_LOG_PATH . '/' . $type . '/' . $subDir . '/';
-        } else {
-            $dir = APP_LOG_PATH . '/' . $type . '/';
-        }
-        $fileName = $dir . $day . '.log';
-        return $this->countFileLines($fileName);
-    }
-
-    /**
-     * 记录日志
-     * @param string $type
-     * @param mixed $log
-     * @return bool|int
-     */
-    public function addLog(string $type, mixed $log): bool|int {
-        try {
-            //TODO 日志推送到master节点
-            $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-            if ($masterDB instanceof NullPool) {
-                if (!RUNNING_SERVER) {
-                    //非server 日志本地化
-                    if ($type == 'crontab') {
-                        $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
-                        $content = $log['message'];
-                    } else {
-                        $dir = APP_LOG_PATH . '/' . $type . '/';
-                        $content = $log;
-                    }
-                    $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
-                    if (!is_dir($dir)) {
-                        mkdir($dir, 0775, true);
-                    }
-                    File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
-                }
-                return false;
-            }
-            $queueKey = "_LOGS_" . strtolower($type);
-            return $masterDB->lPush($queueKey, [
-                'day' => Date::today(),
-                'host' => SERVER_HOST,
-                'log' => $log
-            ]);
-        } catch (Throwable) {
-            return false;
-        }
     }
 
     /**
@@ -476,8 +377,6 @@ class Manager extends Component {
      * @return array
      */
     public function getServers(bool $onlineOnly = true): array {
-        //$masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
-        //$this->servers = $masterDB->sMembers(App::id() . ':nodes') ?: [];
         if (ENV_MODE == MODE_CGI) {
             $nodes = ServerNodeStatusTable::instance()->rows();
         } else {
@@ -492,10 +391,6 @@ class Manager extends Component {
         $list = [];
         if ($nodes) {
             foreach ($nodes as $node) {
-//                $key = App::id() . ':node:' . $id;
-//                if (!$node = $masterDB->get($key)) {
-//                    continue;
-//                }
                 $node['online'] = true;
                 if (time() - $node['heart_beat'] > 20) {
                     $node['online'] = false;
@@ -503,7 +398,6 @@ class Manager extends Component {
                         continue;
                     }
                 }
-                $node['tasks'] = CrontabManager::allStatus();
                 $list[] = $node;
             }
             try {
@@ -513,20 +407,5 @@ class Manager extends Component {
             }
         }
         return $list;
-    }
-
-    /**
-     * 统计日志文件行数
-     * @param $file
-     * @return int
-     */
-    protected function countFileLines($file): int {
-        $line = 0; //初始化行数
-        if (file_exists($file)) {
-            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
-            $arr = explode(' ', $output);
-            $line = (int)$arr[0];
-        }
-        return $line;
     }
 }

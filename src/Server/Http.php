@@ -19,6 +19,7 @@ use Scf\Server\Listener\Listener;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
@@ -278,9 +279,13 @@ class Http extends \Scf\Core\Server {
         $this->server->on("BeforeShutdown", function (Server $server) {
             $this->log(Color::red('服务器即将关闭'));
         });
+        $this->server->on("ManagerStart", function (Server $server) {
+            MemoryMonitor::start('Server:Manager');
+        });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             Runtime::instance()->serverUseable(true);
+            MemoryMonitor::start('Server:Master');
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);

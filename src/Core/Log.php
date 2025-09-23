@@ -4,7 +4,6 @@ namespace Scf\Core;
 
 use Monolog\Logger;
 use Scf\Cache\Redis;
-use Scf\Command\Color;
 use Scf\Component\SocketMessager;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\LogTable;
@@ -19,6 +18,7 @@ use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;
 use Scf\Util\Time;
+use Swoole\Coroutine\System;
 use Throwable;
 
 
@@ -36,6 +36,7 @@ class Log {
     ];
     protected string $backupCounterKey = 'log_backup_start';
     protected string $idCounterKey = 'log_id';
+    protected array $logTypes = ['info', 'error', 'slow', 'crontab'];
 
     /**
      * @var int 日志ID
@@ -65,20 +66,6 @@ class Log {
         return $msg;
     }
 
-    protected function formatBackTrace($backTrace): array {
-        $backTraceList = [];
-        foreach ($backTrace as $item) {
-            $backTraceList[] = [
-                'file' => $item['file'] ?? $item['class'] ?? '--',
-                'line' => $item['line'] ?? $item['function'],
-                'class' => $item['class'] ?? '--',
-                'function' => $item['function'] ?? '--',
-                'type' => $item['type'] ?? '--',
-                'object' => $item['object'] ?? []
-            ];
-        }
-        return $backTraceList;
-    }
 
     /**
      * 保存错误记录
@@ -118,12 +105,12 @@ class Log {
             'backtrace' => $this->formatBackTrace($backTrace)
         ];
         //存到节点内存等待转存
+        $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
-        if (RUNNING_SERVER) {
-            $table = LogTable::instance();
+        if (RUNNING_SERVER && $table->count() < 200) {
             $table->set($logId, ['type' => 'error', 'log' => $log]);
         } else {
-            Manager::instance()->addLog('error', $log);
+            $this->push('error', $log);
         }
         //推送到控制台
         Console::error($log['message'] . ' @ ' . $log['file']);
@@ -139,8 +126,9 @@ class Log {
     /**
      * 保存信息日志
      * @param string $msg
+     * @param bool $report
      */
-    public function info(string $msg = ''): void {
+    public function info(string $msg = '', bool $report = false): void {
         $backTrace = debug_backtrace();
         $m = [
             'file' => !empty($backTrace[0]['file']) ? $backTrace[0]['file'] : '--',
@@ -153,23 +141,25 @@ class Log {
             'module' => $this->_module
         ];
         //存到节点内存等待转存
-        $logId = Counter::instance()->incr($this->idCounterKey);
-        if (RUNNING_SERVER) {
-            $table = LogTable::instance();
+        $table = LogTable::instance();
+        if (RUNNING_SERVER && $table->count() < 200) {
+            $logId = Counter::instance()->incr($this->idCounterKey);
             $table->set($logId, ['type' => 'info', 'log' => $log]);
         } else {
-            Manager::instance()->addLog('info', $log);
+            $this->push('info', $log);
         }
         //推送到控制台
         Console::info($msg);
         //通知机器人
-        try {
-            $m['time'] = date('Y-m-d H:i:s');
-            $m['ip'] = SERVER_HOST;
-            $m['message'] = $msg;
-            SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
-        } catch (\Exception $exception) {
-            Console::warning("机器人推送错误日志失败:" . $exception->getMessage());
+        if ($report) {
+            try {
+                $m['time'] = date('Y-m-d H:i:s');
+                $m['ip'] = SERVER_HOST;
+                $m['message'] = $msg;
+                SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
+            } catch (\Exception $exception) {
+                Console::warning("机器人推送错误日志失败:" . $exception->getMessage());
+            }
         }
     }
 
@@ -187,11 +177,12 @@ class Log {
             'module' => 'Request'
         ];
         //存到节点内存等待转存
-        if (RUNNING_SERVER) {
+        $table = LogTable::instance();
+        if (RUNNING_SERVER && $table->count() < 200) {
             $logId = Counter::instance()->incr($this->idCounterKey);
-            LogTable::instance()->set($logId, ['type' => 'slow', 'log' => $log]);
+            $table->set($logId, ['type' => 'slow', 'log' => $log]);
         } else {
-            Manager::instance()->addLog('slow', $log);
+            $this->push('slow', $log);
         }
     }
 
@@ -202,8 +193,14 @@ class Log {
      */
     public function crontab(array $log): void {
         $log['time'] = date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3);
-        $logId = Counter::instance()->incr($this->idCounterKey);
-        LogTable::instance()->set($logId, ['type' => 'crontab', 'log' => $log]);
+        $table = LogTable::instance();
+        if (RUNNING_SERVER && $table->count() < 100) {
+            $logId = Counter::instance()->incr($this->idCounterKey);
+            $table->set($logId, ['type' => 'crontab', 'log' => $log]);
+        } else {
+            $this->push('crontab', $log);
+        }
+
     }
 
     /**
@@ -211,34 +208,22 @@ class Log {
      * @return int
      */
     public function backup(): int {
-        //主节点日志本地化
+        //主节点转存子节点日志到本地
         if (App::isMaster()) {
             $masterDB = Redis::pool($this->_config['server'] ?? 'main');
             if ($masterDB instanceof NullPool) {
                 return 0;
             }
-            $types = ['info', 'error', 'slow', 'crontab'];
-            foreach ($types as $type) {
+            foreach ($this->logTypes as $type) {
                 $logLength = min(50, $masterDB->lLength('_LOGS_' . $type));
                 if (!$logLength) {
                     continue;
                 }
                 for ($i = 0; $i < $logLength; $i++) {
                     $log = $masterDB->rPop('_LOGS_' . strtolower($type));
-                    if ($log) {
-                        $message = $log['log'] ?? $log['message'];
-                        //本地化
-                        if ($type == 'crontab') {
-                            $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
-                        } else {
-                            $dir = APP_LOG_PATH . '/' . $type . '/';
-                        }
-                        if (!is_dir($dir)) {
-                            mkdir($dir, 0775, true);
-                        }
-                        $fileName = $dir . date('Y-m-d', strtotime($log['day'])) . '.log';
-                        $message['host'] = $log['host'] ?? SERVER_HOST;
-                        File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
+                    if ($log && !$this->saveToFile($type, $log)) {
+                        Console::error('日志写入失败:' . $log);
+                        $masterDB->rPush('_LOGS_' . strtolower($type), $log);
                     }
                 }
             }
@@ -255,7 +240,7 @@ class Log {
         for ($id = $start + 1; $id <= $maxLogId; $id++) {
             $row = $table->get($id);
             if ($row) {
-                if (Manager::instance()->addLog($row['type'], $row['log']) !== false) {
+                if ($this->push($row['type'], $row['log']) !== false) {
                     $table->delete($id);
                     $logId = $id;
                 } else {
@@ -264,6 +249,104 @@ class Log {
             }
         }
         Counter::instance()->set($this->backupCounterKey, $logId);
+        return $count;
+    }
+
+    /**
+     * 记录日志
+     * @param string $type
+     * @param mixed $log
+     * @return bool|int
+     */
+    public function push(string $type, mixed $log): bool|int {
+        if (App::isMaster()) {
+            return $this->saveToFile($type, [
+                'day' => Date::today(),
+                'host' => SERVER_HOST,
+                'log' => $log
+            ]);
+        }
+        try {
+            //TODO 日志推送到master节点
+            $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
+            if ($masterDB instanceof NullPool) {
+                if (!RUNNING_SERVER) {
+                    //非server 日志本地化
+                    if ($type == 'crontab') {
+                        $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
+                        $content = $log['message'];
+                    } else {
+                        $dir = APP_LOG_PATH . '/' . $type . '/';
+                        $content = $log;
+                    }
+                    $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
+                    if (!is_dir($dir)) {
+                        mkdir($dir, 0775, true);
+                    }
+                    File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
+                }
+                return false;
+            }
+            $queueKey = "_LOGS_" . strtolower($type);
+            return $masterDB->lPush($queueKey, [
+                'day' => Date::today(),
+                'host' => SERVER_HOST,
+                'log' => $log
+            ]);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * @param string $type
+     * @param array $log
+     * @return bool
+     */
+    protected function saveToFile(string $type, array $log): bool {
+        $message = $log['log'] ?? $log['message'];
+        //本地化
+        if ($type == 'crontab') {
+            $dir = APP_LOG_PATH . '/' . $type . '/' . $message['task'] . '/';
+        } else {
+            $dir = APP_LOG_PATH . '/' . $type . '/';
+        }
+        if (!is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+        $day = date('Y-m-d', strtotime($log['day']));
+        $fileName = $dir . $day . '.log';
+        $message['host'] = $log['host'] ?? SERVER_HOST;
+        $success = File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
+        if ($success && $day == date('Y-m-d')) {
+            if (Counter::instance()->get(md5($fileName))) {
+                Counter::instance()->incr(md5($fileName));
+            } else {
+                Counter::instance()->set(md5($fileName), $this->count($type, $day, $message['task'] ?? null));
+            }
+        }
+        return $success;
+    }
+
+    /**
+     * 统计日志
+     * @param string $type
+     * @param string $day
+     * @param ?string $taskName
+     * @return int
+     */
+    public function count(string $type, string $day, ?string $taskName = null): int {
+        if ($taskName) {
+            $dir = APP_LOG_PATH . '/' . $type . '/' . $taskName . '/';
+        } else {
+            $dir = APP_LOG_PATH . '/' . $type . '/';
+        }
+        $fileName = $dir . $day . '.log';
+        if ($day == date('Y-m-d') && $count = Counter::instance()->get($fileName)) {
+            return $count;
+        }
+        $count = $this->countFileLines($fileName);
+        Counter::instance()->set(md5($fileName), $count);
         return $count;
     }
 
@@ -321,28 +404,48 @@ class Log {
     }
 
     /**
-     * 统计REDIS日志数量
-     * @param null $day
-     * @return array
+     * 读取本地日志
+     * @param $type
+     * @param $day
+     * @param $start
+     * @param $size
+     * @param ?string $subDir
+     * @return ?array
      */
-    public function count($day = null): array {
-        $day = $day ?: date('Y-m-d');
-        return [
-            'error' => Manager::instance()->countLog('error', $day),
-            'info' => Manager::instance()->countLog('info', $day)
-        ];
-    }
-
-    /**
-     * 读取REDIS里储存的日志
-     * @param string $type
-     * @param null $day
-     * @param int $length
-     * @return array|bool
-     */
-    public function get(string $type = 'ERROR', $day = null, int $length = 1000): bool|array {
-        $day = $day ?: date('Y-m-d');
-        return Manager::instance()->getLog(strtolower($type), $day, 0, $length);
+    public function get($type, $day, $start, $size, string $subDir = null): ?array {
+        if ($subDir) {
+            $dir = APP_LOG_PATH . '/' . $type . '/' . $subDir . '/';
+        } else {
+            $dir = APP_LOG_PATH . '/' . $type . '/';
+        }
+        $fileName = $dir . $day . '.log';
+        if (!file_exists($fileName)) {
+            return [];
+        }
+        if ($start < 0) {
+            $size = abs($start);
+            $start = 0;
+        }
+        clearstatcache();
+        $logs = [];
+        // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
+        $command = sprintf(
+            'tac %s | sed -n %d,%dp',
+            escapeshellarg($fileName),
+            $start + 1,
+            $start + $size
+        );
+        $result = System::exec($command);
+        if ($result === false) {
+            return [];
+        }
+        $lines = explode("\n", $result['output']);
+        foreach ($lines as $line) {
+            if (trim($line) && ($log = JsonHelper::is($line) ? JsonHelper::recover($line) : $line)) {
+                $logs[] = $log;
+            }
+        }
+        return $logs;
     }
 
     /**
@@ -360,5 +463,35 @@ class Log {
             '{file}' => $file,// str_replace('"', '\\"', $file),
             '{line}' => intval($line),
         ]);
+    }
+
+    /**
+     * 统计日志文件行数
+     * @param $file
+     * @return int
+     */
+    protected function countFileLines($file): int {
+        $line = 0; //初始化行数
+        if (file_exists($file)) {
+            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
+            $arr = explode(' ', $output);
+            $line = (int)$arr[0];
+        }
+        return $line;
+    }
+
+    protected function formatBackTrace($backTrace): array {
+        $backTraceList = [];
+        foreach ($backTrace as $item) {
+            $backTraceList[] = [
+                'file' => $item['file'] ?? $item['class'] ?? '--',
+                'line' => $item['line'] ?? $item['function'],
+                'class' => $item['class'] ?? '--',
+                'function' => $item['function'] ?? '--',
+                'type' => $item['type'] ?? '--',
+                'object' => $item['object'] ?? []
+            ];
+        }
+        return $backTraceList;
     }
 }
