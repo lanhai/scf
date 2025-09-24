@@ -64,15 +64,16 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
+
         //监控内存使用
-        MemoryMonitor::start('worker:' . ($workerId + 1));
+        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: 200, autoRestart: true);
         Process::signal(SIGUSR2, function () use ($workerId) {
             try {
-                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器");
+                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
                 MemoryMonitor::stop();
                 Timer::clearAll();
             } catch (Throwable $e) {
-                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage());
+                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
             }
         });
     }

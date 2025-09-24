@@ -41,7 +41,7 @@ define('RUNNING_INSTALL', in_array('install', $argv));//创建应用
 define('RUNNING_TOOLBOX', in_array('toolbox', $argv));//cli工具
 define('RUNNING_PACKAGE', in_array('package', $argv));//包发布到github
 define('RUNNING_CREATE_AR', RUNNING_TOOLBOX && in_array('ar', $argv));//构建数据AR文件
-define('RUNNING_BUILD_FRAMEWORK', RUNNING_BUILD && in_array('framework', $argv));//框架源码构建
+define('RUNNING_BUILD_FRAMEWORK', RUNNING_BUILD && (in_array('framework', $argv) || in_array('dashboard', $argv)));//框架源码构建
 
 const FRAMEWORK_IS_PHAR = IS_PACK || (!IS_DEV && !NO_PACK && !RUNNING_BUILD && !RUNNING_PACKAGE && !RUNNING_INSTALL);//框架源码是否打包
 

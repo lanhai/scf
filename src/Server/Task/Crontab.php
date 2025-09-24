@@ -146,7 +146,6 @@ class Crontab extends Struct {
         //迭代检查计时器
         Timer::tick(5000, function () {
             if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                //Console::warning("【Crontab#" . $this->manager_id . "】[{$this->name}-{$this->namespace}]管理进程已迭代,清除所有定时器");
                 MemoryMonitor::stop();
                 Timer::clearAll();
                 return;
@@ -181,7 +180,6 @@ class Crontab extends Struct {
             $this->log('任务关闭,已挂起等待状态更新');
             Timer::tick(10 * 1000, function ($timerId) {
                 if ($this->status == STATUS_ON) {
-                    $this->startTask();
                     Timer::clear($timerId);
                 }
             });
@@ -589,7 +587,7 @@ class Crontab extends Struct {
             $this->mode = $attributes['mode'] ?? $this->mode;
             $this->interval = $attributes['interval'] ?? $this->interval;
             $this->status = $attributes['status'] ?? $this->status;
-            $this->times = $attributes['times'] ?? $this->times;
+            $this->times = ($attributes['times'] ?? null) ?: $this->times;
             $this->expired = $attributes['expired'] ?? $this->expired;
             return $attributes;
         }
@@ -607,7 +605,7 @@ class Crontab extends Struct {
             $this->mode = $config['mode'] ?? $this->mode;
             $this->interval = $config['interval'] ?? $this->interval;
             $this->status = $config['status'] ?? $this->status;
-            $this->times = $config['times'] ?? $this->times;
+            $this->times = ($config['times'] ?? []) ?: $this->times;
         }
     }
 

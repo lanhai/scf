@@ -5,6 +5,7 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
@@ -13,6 +14,7 @@ use Scf\Server\Http;
 use Scf\Server\Manager;
 use Scf\Util\Auth;
 use Swoole\Coroutine\Channel;
+use Swoole\Event;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
 use Swoole\Timer;
@@ -21,6 +23,9 @@ use Swoole\WebSocket\Server;
 use Throwable;
 
 class SocketListener extends Listener {
+
+    /** 防止同一 fd 并发 push 造成阻塞 */
+    private static array $pushing = [];
 
     /**
      * 接收消息
@@ -173,12 +178,31 @@ class SocketListener extends Listener {
             }
             $status = Manager::instance()->getStatus();
             if ($server->exist($fd) && $server->isEstablished($fd)) {
-                try {
-                    $server->push($fd, JsonHelper::toJson($status));
-                } catch (Throwable) {
-                    $server->close($fd);
-                    Timer::clear($id);
+                // 避免同一 fd 在上一次发送未完成时再次 push，导致协程互等
+                if (!empty(self::$pushing[$fd])) {
+                    return; // 跳过本轮，等下次
                 }
+                self::$pushing[$fd] = true;
+                Event::defer(function () use ($server, $fd, $status, $id) {
+                    try {
+                        // push 可能因发送缓冲区拥堵而 yield，这里放到下一轮事件循环中执行避免阻塞 tick 回调
+                        $ok = $server->push($fd, JsonHelper::toJson($status));
+                        if ($ok === false) {
+                            // 发送失败，关闭连接并停止推送
+                            if ($server->exist($fd)) {
+                                $server->close($fd);
+                            }
+                            Timer::clear($id);
+                        }
+                    } catch (Throwable) {
+                        if ($server->exist($fd)) {
+                            $server->close($fd);
+                        }
+                        Timer::clear($id);
+                    } finally {
+                        unset(self::$pushing[$fd]);
+                    }
+                });
             } else {
                 Manager::instance()->removeDashboardClient($fd);
                 Timer::clear($id);
@@ -240,6 +264,7 @@ class SocketListener extends Listener {
                 $response->header($key, $val);
             }
             $response->status(101);
+            Counter::instance()->incr("worker:" . Http::server()->worker_id . ":connection");
 //            Event::defer(function () use ($fd) {
 //                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
 //                    'time' => date('Y-m-d H:i:s'),
@@ -262,6 +287,10 @@ class SocketListener extends Listener {
         $server->close($request->fd);
     }
 
+    public function onConnect(Server $server, $fd): void {
+
+    }
+
     /**
      *连接关闭
      * @param Server $server
@@ -270,6 +299,7 @@ class SocketListener extends Listener {
      */
     protected function onClose(Server $server, $fd): void {
         if ($server->isEstablished($fd)) {
+            Counter::instance()->decr("worker:{$server->worker_id}:connection");
             Manager::instance()->removeNodeClient($fd);
             Manager::instance()->removeDashboardClient($fd);
         }

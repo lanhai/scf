@@ -29,11 +29,11 @@ class SubProcess {
 
 
     public static function createHeartbeatProcess(Server $server): Process {
-        return new Process(function ($process) use ($server) {
+        return new Process(function (Process $process) use ($server) {
             Console::info("【Heatbeat】主节点连接PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
-                MemoryMonitor::start('Heatbeat');
+                Runtime::instance()->serverIsAlive() and MemoryMonitor::start('Heatbeat');
                 $node = Node::factory();
                 $node->appid = APP_ID;
                 $node->id = APP_NODE_ID;
@@ -54,7 +54,8 @@ class SubProcess {
                 while (true) {
                     // 主进程存活检测
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                        Console::warning('【Heatbeat】主进程退出，connectMaster 随之退出');
+                        MemoryMonitor::stop();
+                        Console::warning('【Heatbeat】管理进程退出,结束心跳');
                         break;
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
@@ -167,7 +168,6 @@ class SubProcess {
                     }
                 }
             });
-            \Swoole\Event::wait();
         });
     }
 
@@ -177,35 +177,34 @@ class SubProcess {
      * @return Process
      */
     public static function createLogBackupProcess(Server $server): Process {
-        return new Process(function ($process) use ($server) {
-            if (Process::kill($server->manager_pid, 0)) {
-                App::mount();
-                MemoryMonitor::start('LogBackup');
-                $serverConfig = Config::server();
-                $logger = Log::instance();
-                $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
-                //清理过期日志
-                $clearCount = $logger->clear($logExpireDays);
-                if ($clearCount) {
-                    Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
-                }
-                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
-                Timer::tick(3000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
-                    if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
-                        $clearCount = $logger->clear($logExpireDays);
-                        if ($clearCount) {
-                            Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
-                        }
-                    }
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                        Console::warning("【LogBackup】Manager process {$server->manager_pid} is dead");
-                        Timer::clear($tid);
-                        return;
-                    }
-                    $logger->backup();
-                });
-                \Swoole\Event::wait();
+        return new Process(function (Process $process) use ($server) {
+            Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+            App::mount();
+            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('LogBackup');
+            $serverConfig = Config::server();
+            $logger = Log::instance();
+            $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
+            //清理过期日志
+            $clearCount = $logger->clear($logExpireDays);
+            if ($clearCount) {
+                Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
             }
+            Timer::tick(3000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
+                if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                    MemoryMonitor::stop();
+                    Console::warning("【LogBackup】管理进程退出,结束备份");
+                    Timer::clear($tid);
+                    return;
+                }
+                if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
+                    $clearCount = $logger->clear($logExpireDays);
+                    if ($clearCount) {
+                        Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+                    }
+                }
+                $logger->backup();
+            });
+            \Swoole\Event::wait();
         });
     }
 
@@ -216,71 +215,70 @@ class SubProcess {
      * @return Process
      */
     public static function createFileWatchProcess(Server|\Swoole\Server $server, int $port = 0): Process {
-        return new Process(function ($process) use ($server, $port) {
+        return new Process(function (Process $process) use ($server, $port) {
+            Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
             sleep(1);
-            if (Process::kill($server->manager_pid, 0)) {
-                App::mount();
-                MemoryMonitor::start('FileWatcher');
-                Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
-                $scanDirectories = function () {
-                    if (APP_SRC_TYPE == 'dir') {
-                        $appFiles = Dir::scan(APP_PATH . '/src');
-                    } else {
-                        $appFiles = [];
-                    }
-                    return [...$appFiles, ...Dir::scan(Root::dir())];
-                };
-                $files = $scanDirectories();
-                $fileList = [];
-                foreach ($files as $path) {
-                    $fileList[] = [
-                        'path' => $path,
-                        'md5' => md5_file($path)
-                    ];
+            App::mount();
+            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('FileWatcher');
+            $scanDirectories = function () {
+                if (APP_SRC_TYPE == 'dir') {
+                    $appFiles = Dir::scan(APP_PATH . '/src');
+                } else {
+                    $appFiles = [];
                 }
-                while (true) {
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                        Console::warning("【FileWatcher】Manager process {$server->manager_pid} is dead");
-                        break;
-                    }
-                    $changed = false;
-                    $changedFiles = [];
-                    $currentFiles = $scanDirectories();
-                    $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
-                    foreach ($currentFilePaths as $path) {
-                        if (!in_array($path, array_column($fileList, 'path'))) {
-                            $fileList[] = [
-                                'path' => $path,
-                                'md5' => md5_file($path)
-                            ];
-                            $changed = true;
-                            $changedFiles[] = $path;
-                        }
-                    }
-                    foreach ($fileList as $key => &$file) {
-                        if (!file_exists($file['path'])) {
-                            $changed = true;
-                            $changedFiles[] = $file['path'];
-                            unset($fileList[$key]);
-                            continue;
-                        }
-                        $getMd5 = md5_file($file['path']);
-                        if (strcmp($file['md5'], $getMd5) !== 0) {
-                            $file['md5'] = $getMd5;
-                            $changed = true;
-                            $changedFiles[] = $file['path'];
-                        }
-                    }
-                    if ($changed) {
-                        Console::warning('---------以下文件发生变动,即将重启---------');
-                        foreach ($changedFiles as $f) {
-                            Console::write($f);
-                        }
-                        Console::warning('-------------------------------------------');
-                        Http::instance()->reload();
-                    }
-                    sleep(3);
+                return [...$appFiles, ...Dir::scan(Root::dir())];
+            };
+            $files = $scanDirectories();
+            $fileList = [];
+            foreach ($files as $path) {
+                $fileList[] = [
+                    'path' => $path,
+                    'md5' => md5_file($path)
+                ];
+            }
+            while (true) {
+                if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                    MemoryMonitor::stop();
+                    Console::warning("【FileWatcher】管理进程退出,结束监听");
+                    break;
                 }
+                $changed = false;
+                $changedFiles = [];
+                $currentFiles = $scanDirectories();
+                $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
+                foreach ($currentFilePaths as $path) {
+                    if (!in_array($path, array_column($fileList, 'path'))) {
+                        $fileList[] = [
+                            'path' => $path,
+                            'md5' => md5_file($path)
+                        ];
+                        $changed = true;
+                        $changedFiles[] = $path;
+                    }
+                }
+                foreach ($fileList as $key => &$file) {
+                    if (!file_exists($file['path'])) {
+                        $changed = true;
+                        $changedFiles[] = $file['path'];
+                        unset($fileList[$key]);
+                        continue;
+                    }
+                    $getMd5 = md5_file($file['path']);
+                    if (strcmp($file['md5'], $getMd5) !== 0) {
+                        $file['md5'] = $getMd5;
+                        $changed = true;
+                        $changedFiles[] = $file['path'];
+                    }
+                }
+                if ($changed) {
+                    Console::warning('---------以下文件发生变动,即将重启---------');
+                    foreach ($changedFiles as $f) {
+                        Console::write($f);
+                    }
+                    Console::warning('-------------------------------------------');
+                    Http::instance()->reload();
+                }
+                sleep(3);
             }
         }, false, 2, 1);
     }

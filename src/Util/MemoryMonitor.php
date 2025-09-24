@@ -7,6 +7,7 @@ use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Console;
 use Scf\Core\Key;
+use Scf\Core\Log;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
@@ -18,6 +19,7 @@ use Swoole\Event;
 use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
+use function Co\run;
 
 class MemoryMonitor {
     /**
@@ -41,16 +43,15 @@ class MemoryMonitor {
         string $processName = 'worker',
         int    $interval = 10000,
         int    $limitMb = 1024,
-        bool   $forceExit = false
+        bool   $autoRestart = false
     ): void {
         if (self::$timerId) {
             return; // 避免重复启动
         }
         $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $run = function () use (&$run, &$managerId, $processName, $interval, $limitMb, $forceExit) {
+        $run = function () use (&$run, $managerId, $processName, $interval, $limitMb, $autoRestart) {
             $currentManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-            if ($managerId !== $currentManagerId || !Runtime::instance()->serverIsAlive()) {
-                $managerId = $currentManagerId;
+            if (((str_starts_with($processName, "worker:") || str_starts_with($processName, "crontab:")) && $managerId !== $currentManagerId) || !Runtime::instance()->serverIsAlive()) {
                 Timer::clear(self::$timerId);
                 return;
             }
@@ -80,14 +81,20 @@ class MemoryMonitor {
             } else {
                 // macOS / other UNIX-like systems without /proc
                 $pid = posix_getpid();
-                $rssOut = @shell_exec('ps -o rss= -p ' . (int)$pid . ' 2>/dev/null');
+                if (Coroutine::getCid() > 0) {
+                    $result = System::exec('ps -o rss= -p ' . $pid . ' 2>/dev/null');
+                } else {
+                    run(function () use ($pid, &$result) {
+                        $result = System::exec('ps -o rss= -p ' . $pid . ' 2>/dev/null');
+                    });
+                }
+                $rssOut = $result['output'] ?? '';
                 if (is_string($rssOut) && ($rssKb = (int)trim($rssOut)) > 0) {
                     $vmrssMb = round($rssKb / 1024, 2);
                 }
             }
-
             $key = $processName;
-            $data = [
+            $update = [
                 'process' => $processName,
                 'usage_mb' => $usageMb,
                 'real_mb' => $realMb,
@@ -95,21 +102,40 @@ class MemoryMonitor {
                 'pid' => posix_getpid(),
                 'time' => date('Y-m-d H:i:s'),
                 'rss_mb' => $vmrssMb ?? '-',
-                'pss_mb' => $pssMb ?? '-',
+                'pss_mb' => $pssMb ?? '-'
             ];
-            MemoryMonitorTable::instance()->set($key, $data);
-            $processList = Runtime::instance()->get('MEMORY_MONITOR_KEYS') ?: [];
-            if (!in_array($key, $processList)) {
-                $processList[] = $key;
+            if (!$data = MemoryMonitorTable::instance()->get($key)) {
+                $update = [
+                    ...$update,
+                    'restart_ts' => 0,
+                    'restart_count' => 0
+                ];
+            } else {
+                $update = ArrayHelper::merge($data, $update);
             }
-            Runtime::instance()->set('MEMORY_MONITOR_KEYS', $processList);
-            if ($limitMb > 0 && $usageMb > $limitMb) {
-                Console::warning("[MemoryMonitor][WARN] {$processName} memory exceed {$limitMb}MB, current={$usageMb}MB");
-                if ($forceExit) {
-                    Console::warning("[MemoryMonitor][EXIT] {$processName} exit due to memory overflow");
-                    exit(1);
+            // 如果是 worker 进程并且占用超过阈值(默认使用 $limitMb)，则优雅重启该 worker
+            if ($autoRestart && str_starts_with($processName, 'worker:') && $usageMb > $limitMb) {
+                // 解析 workerId
+                $workerId = null;
+                if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
+                    $workerId = (int)$mWid[1];
+                }
+                if ($workerId !== null) {
+                    // 节流：60 秒内只触发一次，避免抖动
+                    if (time() - $data['restart_ts'] >= 60) {
+                        // 仅当当前代码运行在该 worker 内时才执行 stop，防止跨进程误停
+                        $server = \Scf\Server\Http::server();
+                        if ($server && isset($server->worker_id)) {
+                            Log::instance()->setModule('system')->info("{$processName}内存过高 {$usageMb}MB ≥ {$limitMb}MB，触发重启", true);
+                            // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
+                            $server->stop(-1, true);
+                            $update['restart_ts'] = time();
+                            $update['restart_count']++;
+                        }
+                    }
                 }
             }
+            MemoryMonitorTable::instance()->set($key, $update);
             // 递归调度下一次
             self::$timerId = Timer::after($interval, $run);
         };
@@ -136,108 +162,83 @@ class MemoryMonitor {
             $rssTotal = 0.0; // 累计RSS（MB）
             $pssTotal = 0.0; // 累计PSS（MB'])
             $osActualTotal = 0.0; // 累计 OS 视角实际占用（优先PSS, 其次RSS）
-            //$globalSetKey = 'MEMORY_MONITOR_KEYS_' . APP_NODE_ID;
-            //$keys = Redis::pool()->sMembers($globalSetKey) ?: [];
-            $keys = Runtime::instance()->get('MEMORY_MONITOR_KEYS') ?: [];
-            //根据id排序
-            usort($keys, function ($a, $b) {
-                // 取中间部分
-                $aParts = explode(':', $a);
-                $bParts = explode(':', $b);
-                $aMid = $aParts[1] ?? $a;
-                $bMid = $bParts[1] ?? $b;
-                // 提取数字
-                preg_match('/\d+$/', $aMid, $ma);
-                preg_match('/\d+$/', $bMid, $mb);
-                if ($ma && $mb) {
-                    return intval($ma[0]) <=> intval($mb[0]);
-                }
-                // 没数字时走自然排序
-                return strnatcmp($aMid, $bMid);
-            });
-            foreach ($keys as $key) {
-                if ($filter && !str_contains($key, $filter)) {
-                    continue;
-                }
-                $data = MemoryMonitorTable::instance()->get($key);
-                if (!$data) {
-                    // 认为离线
-                    $offline++;
+            $processList = MemoryMonitorTable::instance()->rows();
+            if ($processList) {
+                foreach ($processList as $data) {
+                    $key = $data['process'];
+                    if ($filter && !str_contains($key, $filter)) {
+                        continue;
+                    }
+                    $process = $data['process'] ?? '--';
+                    $pid = $data['pid'] ?? '--';
+                    $usage = (float)($data['usage_mb'] ?? 0);
+                    $real = (float)($data['real_mb'] ?? 0);
+                    $peak = (float)($data['peak_mb'] ?? 0);
+                    $usageTotal += $usage;
+                    $realTotal += $real; // 统计累计实际内存
+                    $peakTotal += $peak;
+
+                    $rssMb = null;
+                    $pssMb = null;
+                    if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
+                        $rssMb = (float)$data['rss_mb'];
+                    }
+                    if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
+                        $pssMb = (float)$data['pss_mb'];
+                    }
+                    // OS 实际占用：优先使用 PSS，否则退化为 RSS
+                    $osActualMb = null;
+                    if ($pssMb !== null) {
+                        $osActualMb = $pssMb;
+                    } elseif ($rssMb !== null) {
+                        $osActualMb = $rssMb;
+                    }
+
+                    if ($rssMb !== null) {
+                        $rssTotal += $rssMb;
+                    }
+                    if ($pssMb !== null) {
+                        $pssTotal += $pssMb;
+                    }
+                    if ($osActualMb !== null) {
+                        $osActualTotal += $osActualMb;
+                    }
+
+                    $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
+                    $status = Color::green('正常');
+                    $online++;
+                    if (str_starts_with($process, 'worker:')) {
+                        $connection = Counter::instance()->get($process . ":connection") ?: 0;
+                    } else {
+                        $connection = 0;
+                    }
                     $rows[] = [
-                        'name' => $key,
-                        'pid' => '--',
-                        'usage' => '--',
-                        'real' => '--',
-                        'peak' => '--',
-                        'rss' => '--',
-                        'pss' => '--',
-                        'updated' => '--',
-                        'status' => '离线',
-                        'rss_num' => '--',
+                        'name' => $process,
+                        'pid' => $pid,
+                        'time' => strtotime($data['time']),
+                        'usage' => number_format($usage, 2) . ' MB',
+                        'real' => number_format($real, 2) . ' MB',
+                        'peak' => number_format($peak, 2) . ' MB',
+                        'os_actual' => $osActualMb === null ? '-' : (number_format($osActualMb, 2) . ' MB'),
+                        'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
+                        'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
+                        'updated' => $time,
+                        'status' => $status,
+                        'connection' => $connection,
+                        'os_actual_num' => $osActualMb ?? null,
+                        'restart_ts' => $data['restart_ts'],
+                        'restart_count' => $data['restart_count']
                     ];
-                    continue;
                 }
-                $process = $data['process'] ?? '--';
-                $pid = $data['pid'] ?? '--';
-                $usage = (float)($data['usage_mb'] ?? 0);
-                $real = (float)($data['real_mb'] ?? 0);
-                $peak = (float)($data['peak_mb'] ?? 0);
-                $usageTotal += $usage;
-                $realTotal += $real; // 统计累计实际内存
-                $peakTotal += $peak;
-
-                $rssMb = null;
-                $pssMb = null;
-                if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
-                    $rssMb = (float)$data['rss_mb'];
+                ArrayHelper::multisort($rows, 'os_actual_num', SORT_DESC);
+                // 排序完成后移除临时字段 os_actual_num，避免对外输出
+                foreach ($rows as &$__row) {
+                    if (array_key_exists('os_actual_num', $__row)) {
+                        unset($__row['os_actual_num']);
+                    }
                 }
-                if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
-                    $pssMb = (float)$data['pss_mb'];
-                }
-                // OS 实际占用：优先使用 PSS，否则退化为 RSS
-                $osActualMb = null;
-                if ($pssMb !== null) {
-                    $osActualMb = $pssMb;
-                } elseif ($rssMb !== null) {
-                    $osActualMb = $rssMb;
-                }
-
-                if ($rssMb !== null) {
-                    $rssTotal += $rssMb;
-                }
-                if ($pssMb !== null) {
-                    $pssTotal += $pssMb;
-                }
-                if ($osActualMb !== null) {
-                    $osActualTotal += $osActualMb;
-                }
-
-                $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
-                $status = Color::green('正常');
-                $online++;
-                $rows[] = [
-                    'name' => $process,
-                    'pid' => $pid,
-                    'time' => strtotime($data['time']),
-                    'usage' => number_format($usage, 2) . ' MB',
-                    'real' => number_format($real, 2) . ' MB',
-                    'peak' => number_format($peak, 2) . ' MB',
-                    'os_actual' => $osActualMb === null ? '-' : (number_format($osActualMb, 2) . ' MB'),
-                    'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
-                    'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
-                    'updated' => $time,
-                    'status' => $status,
-                    'os_actual_num' => $osActualMb ?? null
-                ];
+                unset($__row);
             }
-            ArrayHelper::multisort($rows, 'os_actual_num', SORT_DESC);
-            // 排序完成后移除临时字段 os_actual_num，避免对外输出
-            foreach ($rows as &$__row) {
-                if (array_key_exists('os_actual_num', $__row)) {
-                    unset($__row['os_actual_num']);
-                }
-            }
-            unset($__row);
             // 获取服务器总物理内存 (MB)
             $totalMemMb = null;
             if (PHP_OS_FAMILY === 'Linux') {
@@ -298,7 +299,7 @@ class MemoryMonitor {
                 'rows' => $rows,
                 'online' => $online,
                 'offline' => $offline,
-                'total' => count($keys),
+                'total' => count($processList),
                 'usage_total_mb' => round($usageTotal, 2),
                 'real_total_mb' => round($realTotal, 2), // 累计实际内存占用（MB）
                 'peak_total_mb' => round($peakTotal, 2),

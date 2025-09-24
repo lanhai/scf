@@ -3,6 +3,7 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
+use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
@@ -95,6 +96,7 @@ class CgiListener extends Listener {
         Request::instance()->register($request);
         //使用原子子增值统计并发访问量
         Counter::instance()->incr(Key::COUNTER_REQUEST);
+        Counter::instance()->incr("worker:".Server::server()->worker_id.":connection");
         $countKey = Key::COUNTER_REQUEST . time();
         $count = Counter::instance()->incr($countKey);
         if ($count == 1) {
@@ -166,6 +168,7 @@ class CgiListener extends Listener {
         }
         Done:
         Event::defer(function () {
+            Counter::instance()->decr("worker:".Server::server()->worker_id.":connection");
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
         });
     }

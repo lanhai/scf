@@ -2,6 +2,8 @@
 
 namespace Scf\Server\Controller;
 
+use PhpZip\Exception\ZipException;
+use PhpZip\ZipFile;
 use Scf\App\Updater;
 use Scf\Client\Http;
 use Scf\Command\Color;
@@ -26,7 +28,9 @@ use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
 use Scf\Util\Date;
+use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
+use Swoole\Coroutine\Http\Client;
 use Throwable;
 
 class DashboardController extends Controller {
@@ -40,7 +44,7 @@ class DashboardController extends Controller {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
             Response::interrupt("应用尚未完成初始化安装", 'APP_NOT_INSTALL_YET', status: 200);
         }
-        $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes'];
+        $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes', '/update_dashboard'];
         if (!in_array($path, $publisPaths) && !$this->isLogin()) {
             Response::interrupt("未授权的访问: " . $path, 'NOT_LOGIN', status: 200);
         }
@@ -415,13 +419,31 @@ class DashboardController extends Controller {
         if (APP_SRC_TYPE == 'phar') {
             $status['latest_version'] = App::latestVersion();
         }
-        //if (FRAMEWORK_IS_PHAR) {
         $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
         $remoteVersionResponse = $client->get();
+        $client->close();
         if (!$remoteVersionResponse->hasError()) {
             $remoteVersion = $remoteVersionResponse->getData();
         }
-        //}
+        //控制面板
+        $dashboardDir = SCF_ROOT . '/build/public/dashboard';
+        $versionJson = $dashboardDir . '/version.json';
+        if (!file_exists($versionJson)) {
+            $currentDashboardVersion = [
+                'version' => '0.0.0',
+            ];
+        } else {
+            $currentDashboardVersion = JsonHelper::recover(File::read($versionJson));
+        }
+        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_REMOTE_VERSION_SERVER));
+        $dashboardVersionResponse = $client->get();
+        if (!$dashboardVersionResponse->hasError()) {
+            $dashboardVersion = $dashboardVersionResponse->getData();
+        }
+        $status['dashboard'] = [
+            'version' => $currentDashboardVersion['version'],
+            'latest_version' => $dashboardVersion['version'] ?? '--',
+        ];
         $status['framework'] = [
             'is_phar' => FRAMEWORK_IS_PHAR,
             'version' => FRAMEWORK_BUILD_VERSION,
@@ -430,6 +452,89 @@ class DashboardController extends Controller {
             'build' => FRAMEWORK_BUILD_TIME
         ];
         return Result::success($status);
+    }
+
+    /**
+     * 面板更新
+     * @return Result
+     */
+    public function actionUpdateDashboard(): Result {
+        $dashboardDir = SCF_ROOT . '/build/public/dashboard';
+        $versionJson = $dashboardDir . '/version.json';
+        if (!file_exists($versionJson)) {
+            $localVersion = '0.0.0';
+        } else {
+            $localVersion = JsonHelper::recover(File::read($versionJson))['version'] ?? '0.0.0';
+        }
+        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_REMOTE_VERSION_SERVER));
+        $dashboardVersionResponse = $client->get();
+        if ($dashboardVersionResponse->hasError()) {
+            return Result::error('版本信息获取失败:' . $dashboardVersionResponse->getMessage());
+        }
+        $dashboardVersion = $dashboardVersionResponse->getData();
+        if ($localVersion == $dashboardVersion['version']) {
+            return Result::success("当前已是最新版本");
+        }
+        $publicFilePath = SCF_ROOT . '/build/dashboard.zip';
+        if (file_exists($publicFilePath)) {
+            unlink($publicFilePath);
+            clearstatcache();
+        }
+        if (!is_dir(SCF_ROOT . '/build/public/dashboard')) {
+            mkdir(SCF_ROOT . '/build/public/dashboard', 0777, true);
+        } else {
+            $this->clearDashboard(SCF_ROOT . '/build/public/dashboard');
+        }
+        $downloadClient = Http::create($dashboardVersion['server'] . $dashboardVersion['file']);
+        $downloadResult = $downloadClient->download($publicFilePath);
+        if ($downloadResult->hasError()) {
+            return Result::error("下载升级包失败:" . $downloadResult->getMessage());
+        }
+        //解压缩
+        $zipFile = new ZipFile();
+        try {
+            $stream = File::read($publicFilePath);
+            $zipFile->openFromString($stream)->setReadPassword('scfdashboard')->extractTo(SCF_ROOT . '/build/public/dashboard');
+        } catch (ZipException $e) {
+            unlink($publicFilePath);
+            return Result::error('资源包解压失败:' . $e->getMessage());
+        } finally {
+            $zipFile->close();
+        }
+        unlink($publicFilePath);
+        if (!File::write($versionJson, JsonHelper::toJson($dashboardVersion))) {
+            return Result::error('版本文件更新时间');
+        }
+        return Result::success("面板已更新至:" . $dashboardVersion['version']);
+    }
+
+    /**
+     * 清除资源文件夹
+     * @param string $dir
+     * @return bool
+     */
+    protected function clearDashboard(string $dir): bool {
+        if (!is_dir($dir)) {
+            return true;
+        }
+        //先删除目录下的文件：
+        $dh = opendir($dir);
+        while ($file = readdir($dh)) {
+            if ($file != "." && $file != "..") {
+                $fullpath = $dir . "/" . $file;
+                if (!is_dir($fullpath)) {
+                    try {
+                        unlink($fullpath);
+                    } catch (Throwable) {
+
+                    }
+                } else {
+                    $this->clearDashboard($fullpath);
+                }
+            }
+        }
+        closedir($dh);
+        return true;
     }
 
     /**
@@ -650,7 +755,7 @@ class DashboardController extends Controller {
 
     protected array $loginUser = [
         'username' => '系统管理员',
-        'avatar' => 'http://ascript.oss-cn-chengdu.aliyuncs.com/upload/20240513/04c3eeac-f118-4ea7-8665-c9bd4d20a05d.png',
+        'avatar' => 'https://ascript.oss-cn-chengdu.aliyuncs.com/upload/20240513/04c3eeac-f118-4ea7-8665-c9bd4d20a05d.png',
         'token' => null
     ];
     protected string $password = '';

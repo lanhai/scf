@@ -13,7 +13,6 @@ use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
-use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;

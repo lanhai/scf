@@ -66,6 +66,7 @@ class Http extends \Scf\Core\Server {
      * @var int 启动时间
      */
     protected int $started = 0;
+    protected Process $crontabManagerProcess;
 
     /**
      * @param string $role
@@ -280,7 +281,12 @@ class Http extends \Scf\Core\Server {
             $this->log(Color::red('服务器即将关闭'));
         });
         $this->server->on("ManagerStart", function (Server $server) {
-            MemoryMonitor::start('Server:Manager');
+            //Console::info('ManagerStart');
+            //MemoryMonitor::start('Server:Manager');
+        });
+        $this->server->on("ManagerStop", function (Server $server) {
+            //Console::info('onManagerStop');
+            //MemoryMonitor::stop();
         });
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
@@ -348,7 +354,7 @@ INFO;
             $this->addCrontabProcess($serverConfig);
             //日志备份进程
             $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
-            //连接主节点
+            //心跳进程
             $this->server->addProcess(SubProcess::createHeartbeatProcess($this->server));
             //启动文件监听进程
             if ((Env::isDev() && APP_SRC_TYPE == 'dir') || Manager::instance()->issetOpt('watch')) {
@@ -360,45 +366,6 @@ INFO;
         }
     }
 
-    /**
-     * 清除worker定时器
-     * @return void
-     */
-    public function clearWorkerTimer(): void {
-        $server = $this->server;
-        // 向所有 worker 广播清理定时器（通过 SIGUSR1）
-        $workerNum = (int)($server->setting['worker_num'] ?? 0);
-        $taskNum = (int)($server->setting['task_worker_num'] ?? 0);
-        // 普通 worker
-        for ($i = 0; $i < $workerNum; $i++) {
-            //$server->sendMessage('cleanTimer', $i);
-            $pid = $server->getWorkerPid($i);
-            if ($pid > 0) Process::kill($pid, SIGUSR2);
-        }
-        // task worker
-        for ($i = 0; $i < $taskNum; $i++) {
-            //$server->sendMessage('cleanTimer', $workerNum + $i);
-            $pid = $server->getWorkerPid($workerNum + $i);
-            if ($pid > 0) Process::kill($pid, SIGUSR2);
-        }
-        Console::info('【Server】已向所有worker发送清理定时器指令');
-    }
-
-    /**
-     * 给CrontabManager 发送消息
-     * @param $cmd
-     * @param array $params
-     * @return bool|int
-     */
-    public function sendCommandToCrontabManager($cmd, array $params = []): bool|int {
-        $socket = $this->crontabManagerProcess->exportSocket();
-        return $socket->send(JsonHelper::toJson([
-            'command' => $cmd,
-            'params' => $params,
-        ]));
-    }
-
-    protected Process $crontabManagerProcess;
 
     /**
      * 启动定时任务和队列的守护进程,跟随server的重启而重新加载文件创建新进程迭代老进程,注意相关应用内部需要有table记录mannger id自增后自动终止销毁timer/while ture等循环机制避免出现僵尸进程
@@ -408,23 +375,23 @@ INFO;
         Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
         Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
         $crontabProcess = new Process(function (Process $process) use ($config) {
-            //等待服务器启动完成
-            while (true) {
-                if (Runtime::instance()->serverUseable()) {
-                    break;
-                }
+            if (!Runtime::instance()->serverUseable()) {
                 sleep(1);
             }
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+                if (!Runtime::instance()->serverIsAlive()) {
+                    Console::warning("【Crontab】#{$managerId} 服务器已关闭,结束运行");
+                    sleep(5);
+                    continue;
+                }
                 if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive()) {
                     Runtime::instance()->crontabProcessStatus(true);
                     $taskList = CrontabManager::start();
                     if ($taskList) {
                         Console::info("【Crontab】Crontab#{$managerId} 排程任务已创建");
                         while ($ret = Process::wait(false)) {
-                            //Console::warning("process exit:" . $ret['pid']);
                             if ($t = CrontabManager::getTaskTableByPid($ret['pid'])) {
                                 CrontabManager::removeTaskTable($t['id']);
                             }
@@ -452,9 +419,6 @@ INFO;
                                 CrontabManager::removeTaskTable($processTask['id']);
                             }
                         } elseif ($taskInstance['manager_id'] !== $managerId) {
-//                        if (Process::kill((int)$taskInstance['pid'], 0)) {
-//                            Process::kill((int)$taskInstance['pid'], SIGKILL);
-//                        }
                             CrontabManager::removeTaskTable($processTask['id']);
                         }
                     }
@@ -482,11 +446,7 @@ INFO;
                     }
                     unset($socket);
                 });
-                if (!Runtime::instance()->serverIsAlive()) {
-                    Console::info("【Crontab】#{$managerId} 服务器已关闭,终止进程");
-                    $process->exit();
-                    break;
-                }
+
             }
         });
         $this->crontabManagerProcess = $crontabProcess;
@@ -496,17 +456,18 @@ INFO;
         $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
         if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-            $redisQueueProcess = new Process(function ($process) use ($config) {
-                //等待服务器启动完成
-                while (true) {
-                    if (Runtime::instance()->serverUseable()) {
-                        break;
-                    }
+            $redisQueueProcess = new Process(function (Process $process) use ($config) {
+                if (!Runtime::instance()->serverUseable()) {
                     sleep(1);
                 }
-                $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                 define('IS_REDIS_QUEUE_PROCESS', true);
                 while (true) {
+                    $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+                    if (!Runtime::instance()->serverIsAlive()) {
+                        Console::warning("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
+                        sleep(5);
+                        continue;
+                    }
                     if (!Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive()) {
                         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                         Runtime::instance()->redisQueueProcessStatus(true);
@@ -515,11 +476,6 @@ INFO;
                     Runtime::instance()->redisQueueProcessStatus(false);
                     Console::warning("【RedisQueue】#{$managerId}管理进程已迭代,重启队列进程");
                     sleep(1);
-                    if (!Runtime::instance()->serverIsAlive()) {
-                        Console::info("【RedisQueue】#{$managerId} 服务器已关闭,终止进程");
-                        $process->exit(0);
-                        break;
-                    }
                 }
             });
             $pid = $this->server->addProcess($redisQueueProcess);
@@ -532,10 +488,26 @@ INFO;
      * @return void
      */
     public function shutdown(): void {
+        Runtime::instance()->serverUseable(false);
         Runtime::instance()->serverIsAlive(false);
-        $this->clearWorkerTimer();
         $this->sendCommandToCrontabManager('shutdown');
-        $this->server->shutdown();
+        Timer::after(1000, function () {
+            $this->server->shutdown();
+        });
+    }
+
+    /**
+     * 给CrontabManager 发送消息
+     * @param $cmd
+     * @param array $params
+     * @return bool|int
+     */
+    public function sendCommandToCrontabManager($cmd, array $params = []): bool|int {
+        $socket = $this->crontabManagerProcess->exportSocket();
+        return $socket->send(JsonHelper::toJson([
+            'command' => $cmd,
+            'params' => $params,
+        ]));
     }
 
     /**
@@ -545,23 +517,49 @@ INFO;
     public function reload(): void {
         $countdown = App::isDevEnv() ? 1 : 3;
         Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
-        Timer::tick(1000, function ($id) use (&$countdown) {
+        $channel = new Coroutine\Channel(1);
+        Timer::tick(1000, function ($id) use (&$countdown, $channel) {
             $countdown--;
             if ($countdown == 0) {
                 Timer::clear($id);
-                $this->sendCommandToCrontabManager('upgrade');
-                $this->clearWorkerTimer();
-                $this->server->reload();
-                //重启控制台
-                if (App::isMaster()) {
-                    $dashboardHost = 'http://localhost:' . Runtime::instance()->dashboardPort() . '/reload';
-                    $client = \Scf\Client\Http::create($dashboardHost);
-                    $client->get();
-                }
+                $channel->push(true);
             } else {
                 Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
             }
         });
+        $channel->pop($countdown + 1);
+        $this->sendCommandToCrontabManager('upgrade');
+        $this->server->reload();
+        //重启控制台
+        if (App::isMaster()) {
+            $dashboardHost = 'http://localhost:' . Runtime::instance()->dashboardPort() . '/reload';
+            $client = \Scf\Client\Http::create($dashboardHost);
+            $client->get();
+        }
+    }
+
+    /**
+     * 清除worker定时器
+     * @return void
+     */
+    public function clearWorkerTimer(): void {
+        $server = $this->server;
+        // 向所有 worker 广播清理定时器（通过 SIGUSR1）
+        $workerNum = (int)($server->setting['worker_num'] ?? 0);
+        $taskNum = (int)($server->setting['task_worker_num'] ?? 0);
+        // 普通 worker
+        for ($i = 0; $i < $workerNum; $i++) {
+            //$server->sendMessage('cleanTimer', $i);
+            $pid = $server->getWorkerPid($i);
+            if ($pid > 0) Process::kill($pid, SIGUSR2);
+        }
+        // task worker
+        for ($i = 0; $i < $taskNum; $i++) {
+            //$server->sendMessage('cleanTimer', $workerNum + $i);
+            $pid = $server->getWorkerPid($workerNum + $i);
+            if ($pid > 0) Process::kill($pid, SIGUSR2);
+        }
+        Console::info('【Server】已向所有worker发送清理定时器指令');
     }
 
     /**

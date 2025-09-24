@@ -11,7 +11,7 @@ class MemoryMonitorTable extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 1024,
+        'size' => 520,
         'colums' => [
             'process' => ['type' => Table::TYPE_STRING, 'size' => 128],
             'usage_mb' => ['type' => Table::TYPE_STRING, 'size' => 32],
@@ -20,7 +20,9 @@ class MemoryMonitorTable extends ATable {
             'pid' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'time' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'rss_mb' => ['type' => Table::TYPE_STRING, 'size' => 32],
-            'pss_mb' => ['type' => Table::TYPE_STRING, 'size' => 32]
+            'pss_mb' => ['type' => Table::TYPE_STRING, 'size' => 32],
+            'restart_ts' => ['type' => Table::TYPE_INT, 'size' => 0],
+            'restart_count' => ['type' => Table::TYPE_INT, 'size' => 0]
         ]
     ];
 }
