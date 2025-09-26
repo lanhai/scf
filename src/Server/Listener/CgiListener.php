@@ -69,16 +69,7 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
-        if (!Runtime::instance()->serverUseable()) {
-            $response->header("Content-Type", "text/html; charset=utf-8");
-            $response->status(503);
-            $response->end(JsonHelper::toJson([
-                'errCode' => 'SERVICE_UNAVAILABLE',
-                'message' => "服务暂不可用,请稍后重试",
-                'data' => ""
-            ]));
-            return;
-        }
+
         $mysqlExecuteCount = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
         $requestCount = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
         if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
@@ -95,7 +86,6 @@ class CgiListener extends Listener {
         Response::instance()->register($response);
         Request::instance()->register($request);
         //使用原子子增值统计并发访问量
-        Counter::instance()->incr(Key::COUNTER_REQUEST);
         Counter::instance()->incr("worker:".Server::server()->worker_id.":connection");
         $countKey = Key::COUNTER_REQUEST . time();
         $count = Counter::instance()->incr($countKey);
@@ -105,14 +95,19 @@ class CgiListener extends Listener {
             });
         }
         $countKeyDay = Key::COUNTER_REQUEST . Date::today();
-        $countToday = Counter::instance()->incr($countKeyDay);
-        if ($countToday == 1) {
-            Timer::after(86400 * 1000 * 2, function () use ($countKeyDay) {
-                Counter::instance()->delete($countKeyDay);
-            });
-        }
+        Counter::instance()->incr($countKeyDay);
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
+            if (!Runtime::instance()->serverIsReady()) {
+                $response->header("Content-Type", "application/json;charset=utf-8");
+                $response->status(503);
+                $response->end(JsonHelper::toJson([
+                    'errCode' => 'SERVICE_UNAVAILABLE',
+                    'message' => "服务暂不可用,请稍后重试",
+                    'data' => ""
+                ]));
+                return;
+            }
             $logger = Log::instance();
             $app = App::instance();
             Env::isDev() and $logger->enableDebug();

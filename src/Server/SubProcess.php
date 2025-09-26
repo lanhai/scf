@@ -10,6 +10,7 @@ use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
+use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Helper\JsonHelper;
@@ -27,7 +28,96 @@ use function Co\run;
 
 class SubProcess {
 
+    /**
+     * 内存占用统计
+     * @param Server $server
+     * @return Process
+     */
+    public static function createMemoryUsageCountProcess(Server $server): Process {
+        return new Process(function (Process $process) use ($server) {
+            Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
+            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('MemoryMonitor');
+            Coroutine\run(function () use ($server, $process) {
+                $schedule = null; // self-rescheduling closure
+                $schedule = function () use (&$schedule, $process, $server) {
+                    // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                        MemoryMonitor::stop();
+                        Console::warning("【MemoryMonitor】管理进程退出,结束统计");
+                        return; // 不再重排
+                    }
+                    // 2) 执行一次完整统计
+                    $processList = MemoryMonitorTable::instance()->rows();
+                    if ($processList) {
+                        $barrier = Coroutine\Barrier::make();
+                        foreach ($processList as $processInfo) {
+                            Coroutine::create(function () use ($barrier, $processInfo, $process) {
+                                $processName = $processInfo['process'];
+                                $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
+                                $limitMb = $processInfo['limit_memory_mb'] ?? 1024;
+                                $pid = $processInfo['pid'];
+                                if (!Process::kill($pid, 0)) {
+                                    //MemoryMonitorTable::instance()->delete($processName);
+                                    return;
+                                }
+                                // 根据PID查询 PSS/RSS（KB）
+                                $mem = self::getPssRssByPid((int)$pid);
+                                $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;    // MB
+                                $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;    // MB
+                                // 实际用于阈值判断的 OS 占用：优先 PSS，没有则回落到 RSS
+                                $osActualMb = $pss ?? $rss;
+                                $processInfo['rss_mb'] = $rss;
+                                $processInfo['pss_mb'] = $pss;
+                                $processInfo['os_actual'] = $osActualMb;
+                                //更新占用
+                                if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
+                                    // 解析 workerId
+                                    $workerId = null;
+                                    if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
+                                        $workerId = (int)$mWid[1];
+                                    }
+                                    if ($workerId !== null) {
+                                        // 节流：120 秒内只触发一次，避免抖动
+                                        if (time() - $processInfo['restart_ts'] >= 120) {
+                                            // 仅当当前代码运行在该 worker 内时才执行 stop，防止跨进程误停
+                                            if (isset($server->worker_id)) {
+                                                Log::instance()->setModule('system')->info("{$processName}内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
+                                                // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
+                                                $server->stop($processInfo['pid'], true);
+                                                $processInfo['restart_ts'] = time();
+                                                $processInfo['restart_count']++;
+                                            }
+                                        }
+                                    }
+                                }
 
+                                $curr = MemoryMonitorTable::instance()->get($processName);
+                                if ($curr['pid'] !== $processInfo['pid']) {
+                                    $processInfo['pid'] = $curr['pid'];
+                                }
+                                MemoryMonitorTable::instance()->set($processName, $processInfo);
+                            });
+                        }
+                        try {
+                            Coroutine\Barrier::wait($barrier);
+                        } catch (\Throwable $throwable) {
+                            Log::instance()->error("内存统计错误:" . $throwable->getMessage());
+                        }
+                    }
+                    // 3) 统计完成后再安排下一轮，避免 tick 重叠
+                    Timer::after(5000, $schedule);
+                };
+                // 立即安排首轮；若希望立刻执行一次可改为 $schedule();
+                Timer::after(2000, $schedule);
+            });
+        });
+    }
+
+    /**
+     * 心跳和状态推送
+     * @param Server $server
+     * @return Process
+     */
     public static function createHeartbeatProcess(Server $server): Process {
         return new Process(function (Process $process) use ($server) {
             Console::info("【Heatbeat】主节点连接PID:" . $process->pid, false);
@@ -201,6 +291,11 @@ class SubProcess {
                     if ($clearCount) {
                         Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
                     }
+                    //清理过期请求统计
+                    $countKeyDay = Key::COUNTER_REQUEST . Date::leftday(2);
+                    if (Counter::instance()->get($countKeyDay)) {
+                        Counter::instance()->delete($countKeyDay);
+                    }
                 }
                 $logger->backup();
             });
@@ -281,5 +376,80 @@ class SubProcess {
                 sleep(3);
             }
         }, false, 2, 1);
+    }
+
+    /**
+     * 获取进程内存占用（PSS/RSS）
+     * 返回单位：KB；若不可得则为 null
+     */
+    public static function getPssRssByPid(int $pid): array {
+        $rssKb = null;
+        $pssKb = null;
+        // 优先 Linux /proc 读取（容器&宿主机通用）
+        $smapsRollup = "/proc/{$pid}/smaps_rollup";
+        $smaps = "/proc/{$pid}/smaps";
+        $status = "/proc/{$pid}/status";
+        if (is_readable($smapsRollup)) {
+            [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
+            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+        }
+        if (is_readable($smaps)) {
+            [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
+            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+        }
+        // 尝试从 /proc/<pid>/status 读取 RSS（VmRSS）
+        if (is_readable($status)) {
+            $content = @file($status) ?: [];
+            foreach ($content as $line) {
+                if (str_starts_with($line, 'VmRSS:')) {
+                    if (preg_match('/(\d+)/', $line, $m)) {
+                        $rssKb = (int)$m[1];
+                    }
+                    break;
+                }
+            }
+        }
+        // 非 Linux（如 macOS）或受限环境：使用命令行兜底
+        if ($rssKb === null) {
+            $psOut = @shell_exec("ps -o rss= -p " . (int)$pid);
+            if ($psOut !== null) {
+                $rssKb = (int)trim($psOut) ?: null;
+            }
+        }
+        // macOS 近似 PSS：使用 vmmap -summary 的 Physical footprint
+        if ($pssKb === null && PHP_OS_FAMILY === 'Darwin') {
+            $vmmap = @shell_exec("vmmap " . (int)$pid . " -summary 2>/dev/null");
+            if ($vmmap) {
+                // 兼容不同本地化：匹配 Physical footprint / PhysFootprint
+                if (preg_match('/(Physical footprint|PhysFootprint):\s*([0-9\.]+)\s*(KB|MB|GB)/i', $vmmap, $m)) {
+                    $val = (float)$m[2];
+                    $unit = strtoupper($m[3]);
+                    $kb = $val * ($unit === 'GB' ? 1048576 : ($unit === 'MB' ? 1024 : 1));
+                    $pssKb = (int)round($kb);
+                }
+            }
+        }
+        return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+    }
+
+    /**
+     * 解析 smaps/smaps_rollup：汇总 Pss/Rss
+     * 返回 [pssKb, rssKb]
+     */
+    private static function parseSmapsLike(string $file): array {
+        $pss = 0; $rss = 0; $hasPss = false; $hasRss = false;
+        // 使用 @file 读取，避免在进程退出时 fgets 报错
+        $lines = @file($file);
+        if ($lines === false) {
+            return [null, null];
+        }
+        foreach ($lines as $line) {
+            if (strncmp($line, 'Pss:', 4) === 0) {
+                if (preg_match('/(\d+)/', $line, $m)) { $pss += (int)$m[1]; $hasPss = true; }
+            } elseif (strncmp($line, 'Rss:', 4) === 0) {
+                if (preg_match('/(\d+)/', $line, $m)) { $rss += (int)$m[1]; $hasRss = true; }
+            }
+        }
+        return [$hasPss ? $pss : null, $hasRss ? $rss : null];
     }
 }

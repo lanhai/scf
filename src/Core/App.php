@@ -51,6 +51,9 @@ class App {
         try {
             $httpServer = \Scf\Server\Http::instance();
             if (Updater::instance()->appointUpdateTo($type, $version)) {
+                if ($type == 'public') {
+                    return true;
+                }
                 Timer::after(App::isMaster() ? 5000 : 100, function () use ($httpServer, $type) {
                     if ($type == 'framework') {
                         Timer::after(1000, function () use ($httpServer) {
@@ -211,47 +214,6 @@ class App {
         return self::installer()->app_path;
     }
 
-    public static function countMemory($showAll = false): void {
-        // 获取所有 PHP 进程的内存占用量
-        $output = System::exec("ps -eo pid,comm,etime,rss,stat | grep -w 'php'");
-        // 提取 RSS 列并计算总内存占用量（KB）
-        $memoryUsage = array_filter(explode("\n", trim($output['output'])), function ($line) {
-            return !empty($line);
-        });
-        $totalMemoryKB = 0;
-        $renderData = [];
-        foreach ($memoryUsage as $line) {
-            $columns = preg_split('/\s+/', $line);
-            $totalMemoryKB += (int)$columns[3]; // RSS 是第三列
-            if ($showAll) {
-                $renderData[] = [
-                    $columns[0],
-                    $columns[1],
-                    $columns[2],
-                    round((int)$columns[3] / 1024, 2),
-                    $columns[4]
-                ];
-            }
-        }
-        // 转换为 MB
-        $totalMemoryMB = round($totalMemoryKB / 1024, 2);
-        $logCount = LogTable::instance()->count();
-        Console::log("当前PHP进程数:" . Color::cyan(count($memoryUsage)) . ";内存占用:" . Color::cyan($totalMemoryMB) . "MB;日志数量:" . Color::cyan($logCount) . "条");
-        if ($showAll) {
-            $headers = ['进程ID', '进程名称', '运行时间', '内存占用(MB)', '状态'];
-            array_walk($headers, function (&$value) {
-                $value = Color::cyan($value);
-            });
-            $output = new ConsoleOutput();
-            $table = new Table($output);
-            $table
-                ->setHeaders($headers)
-                ->setRows($renderData);
-            $table->render();
-        }
-
-    }
-
     public static function clearTemplateCache(): void {
         $dir = APP_TMP_PATH . '/template';
         if (!is_dir($dir)) {
@@ -350,6 +312,7 @@ class App {
                         $dao->updateTable($table);
                     }
                 }
+                Console::info("【Database】数据库&表检查更新完成");
             }
             //同步权限节点
             $versionFile = self::src() . '/config/access/nodes.yml';
@@ -420,13 +383,16 @@ class App {
 
     public static function getServerIp() {
         $ip = null;
-        $client = new Client('host.docker.internal', '19502');
-        $client->set(['timeout' => 10]);
-        if (!$client->get('/') || $client->statusCode !== 200) {
-            Console::log(Color::red('获取服务器IP地址失败,请确保宿主机myip服务已启动![' . $client->errMsg . ']'));
-        } else {
-            $ip = JsonHelper::recover($client->getBody());
-        }
+        Coroutine\go(function () use (&$ip) {
+            $client = new Client('host.docker.internal', '19502');
+            $client->set(['timeout' => 10]);
+            if (!$client->get('/') || $client->statusCode !== 200) {
+                Console::log(Color::red('获取服务器IP地址失败,请确保宿主机myip服务已启动![' . $client->errMsg . ']'));
+            } else {
+                $ip = JsonHelper::recover($client->getBody());
+            }
+        });
+        Event::wait();
         if (is_null($ip)) {
             Console::log(Color::notice('3秒后重试'));
             sleep(3);

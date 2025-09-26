@@ -75,7 +75,12 @@ class Installer extends Struct {
      */
     public function update(): bool {
         self::$_apps[$this->app_path] = $this->asArray();
-        $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(array_values(self::$_apps)));
+        clearstatcache();
+        $jsonFile = SCF_APPS_ROOT . '/apps.json';
+        $apps = File::readJson($jsonFile) ?: [];
+        $apps = ArrayHelper::index($apps, 'app_path');
+        $apps[$this->app_path] = $this->asArray();
+        $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(array_values($apps)));
         clearstatcache();
         Runtime::instance()->set('_APP_PROFILE_', $this->asArray());
         return $result;
@@ -115,6 +120,7 @@ class Installer extends Struct {
                 exit();
             }
         }
+        clearstatcache();
         if (file_exists($jsonFile)) {
             $try++;
             $apps = File::readJson($jsonFile);

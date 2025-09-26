@@ -185,7 +185,7 @@ class Updater {
             //更新本地配置文件
             $app = App::installer();
             $app->version = $version;
-            $app->updated = date('Y-m-d H:i:s');
+            $app->updated = date('Yx-m-d H:i:s');
             if (!$app->update()) {
                 Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
                 return false;

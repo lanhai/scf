@@ -94,9 +94,6 @@ class Toolbox implements CommandInterface {
         run(function () {
             try {
                 $app = new App();
-//                Console::line();
-//                Console::write("当前运行环境:" . (Lifetime::isDevEnv() ? '开发环境' : '生产环境'));
-//                Console::line();
                 $app->ready(Manager::instance()->getArg(1) ?: 0);
             } catch (ExitException) {
                 Event::exit();

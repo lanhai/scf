@@ -26,122 +26,50 @@ class MemoryMonitor {
      * 协程友好的文件读取：在协程中用 System::readFile，其他环境回退到 file_get_contents
      * @return string|false
      */
-    private static function readFileCo(string $path): bool|string {
+    private static function readFileCo(): bool|string {
         try {
             if (Coroutine::getCid() > 0 && method_exists(System::class, 'readFile')) {
-                return System::readFile($path);
+                return System::readFile('/proc/meminfo');
             }
         } catch (\Throwable $e) {
             // ignore and fallback
         }
-        return @file_get_contents($path);
+        return @file_get_contents('/proc/meminfo');
     }
 
     protected static int $timerId = 0;
 
     public static function start(
         string $processName = 'worker',
-        int    $interval = 10000,
+        int    $interval = 2000,//延时两秒
         int    $limitMb = 1024,
         bool   $autoRestart = false
     ): void {
-        if (self::$timerId) {
-            return; // 避免重复启动
-        }
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        $run = function () use (&$run, $managerId, $processName, $interval, $limitMb, $autoRestart) {
-            $currentManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-            if (((str_starts_with($processName, "worker:") || str_starts_with($processName, "crontab:")) && $managerId !== $currentManagerId) || !Runtime::instance()->serverIsAlive()) {
-                Timer::clear(self::$timerId);
-                return;
-            }
+        $run = function () use (&$run, $processName, $interval, $limitMb, $autoRestart) {
             $usage = memory_get_usage(true);
             $real = memory_get_usage();
             $peak = memory_get_peak_usage(true);
             $usageMb = round($usage / 1048576, 2);
             $realMb = round($real / 1048576, 2);
             $peakMb = round($peak / 1048576, 2);
-            $vmrssMb = null;
-            $pssMb = null;
-            if (PHP_OS_FAMILY === 'Linux') {
-                $statusPath = '/proc/self/status';
-                if (is_readable($statusPath)) {
-                    $statusTxt = @self::readFileCo($statusPath) ?: '';
-                    if ($statusTxt && preg_match('/^VmRSS:\s+(\d+)\s+kB/im', $statusTxt, $m1)) {
-                        $vmrssMb = round(((int)$m1[1]) / 1024, 2);
-                    }
-                }
-                $smapsPath = '/proc/self/smaps_rollup';
-                if (is_readable($smapsPath)) {
-                    $smapsTxt = @self::readFileCo($smapsPath) ?: '';
-                    if ($smapsTxt && preg_match('/^Pss:\s+(\d+)\s+kB/im', $smapsTxt, $m3)) {
-                        $pssMb = round(((int)$m3[1]) / 1024, 2);
-                    }
-                }
-            } else {
-                // macOS / other UNIX-like systems without /proc
-                $pid = posix_getpid();
-                if (Coroutine::getCid() > 0) {
-                    $result = System::exec('ps -o rss= -p ' . $pid . ' 2>/dev/null');
-                } else {
-                    run(function () use ($pid, &$result) {
-                        $result = System::exec('ps -o rss= -p ' . $pid . ' 2>/dev/null');
-                    });
-                }
-                $rssOut = $result['output'] ?? '';
-                if (is_string($rssOut) && ($rssKb = (int)trim($rssOut)) > 0) {
-                    $vmrssMb = round($rssKb / 1024, 2);
-                }
-            }
-            $key = $processName;
-            $update = [
+            MemoryMonitorTable::instance()->set($processName, [
                 'process' => $processName,
                 'usage_mb' => $usageMb,
                 'real_mb' => $realMb,
                 'peak_mb' => $peakMb,
                 'pid' => posix_getpid(),
                 'time' => date('Y-m-d H:i:s'),
-                'rss_mb' => $vmrssMb ?? '-',
-                'pss_mb' => $pssMb ?? '-'
-            ];
-            if (!$data = MemoryMonitorTable::instance()->get($key)) {
-                $update = [
-                    ...$update,
-                    'restart_ts' => 0,
-                    'restart_count' => 0
-                ];
-            } else {
-                $update = ArrayHelper::merge($data, $update);
-            }
-            // 如果是 worker 进程并且占用超过阈值(默认使用 $limitMb)，则优雅重启该 worker
-            if ($autoRestart && str_starts_with($processName, 'worker:') && $usageMb > $limitMb) {
-                // 解析 workerId
-                $workerId = null;
-                if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
-                    $workerId = (int)$mWid[1];
-                }
-                if ($workerId !== null) {
-                    // 节流：60 秒内只触发一次，避免抖动
-                    if (time() - $data['restart_ts'] >= 60) {
-                        // 仅当当前代码运行在该 worker 内时才执行 stop，防止跨进程误停
-                        $server = \Scf\Server\Http::server();
-                        if ($server && isset($server->worker_id)) {
-                            Log::instance()->setModule('system')->info("{$processName}内存过高 {$usageMb}MB ≥ {$limitMb}MB，触发重启", true);
-                            // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
-                            $server->stop(-1, true);
-                            $update['restart_ts'] = time();
-                            $update['restart_count']++;
-                        }
-                    }
-                }
-            }
-            MemoryMonitorTable::instance()->set($key, $update);
-            // 递归调度下一次
-            self::$timerId = Timer::after($interval, $run);
+                'rss_mb' => 0,
+                'pss_mb' => 0,
+                'os_actual' => 0,
+                'limit_memory_mb' => $limitMb,
+                'auto_restart' => $autoRestart ? 1 : 0,
+                'restart_ts' => 0,
+                'restart_count' => 0
+            ]);
         };
-        $run();
         // 启动第一次
-        self::$timerId = Timer::after($interval, $run);
+        $run();
     }
 
     /**
@@ -203,7 +131,6 @@ class MemoryMonitor {
                     if ($osActualMb !== null) {
                         $osActualTotal += $osActualMb;
                     }
-
                     $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
                     $status = Color::green('正常');
                     $online++;
@@ -227,7 +154,8 @@ class MemoryMonitor {
                         'connection' => $connection,
                         'os_actual_num' => $osActualMb ?? null,
                         'restart_ts' => $data['restart_ts'],
-                        'restart_count' => $data['restart_count']
+                        'restart_count' => $data['restart_count'],
+                        'limit_memory_mb' => $data['limit_memory_mb']
                     ];
                 }
                 ArrayHelper::multisort($rows, 'os_actual_num', SORT_DESC);
@@ -242,7 +170,7 @@ class MemoryMonitor {
             // 获取服务器总物理内存 (MB)
             $totalMemMb = null;
             if (PHP_OS_FAMILY === 'Linux') {
-                $meminfo = @self::readFileCo('/proc/meminfo');
+                $meminfo = @self::readFileCo();
                 if ($meminfo && preg_match('/^MemTotal:\s+(\d+)\s+kB/im', $meminfo, $m)) {
                     $totalMemMb = round(((int)$m[1]) / 1024, 2);
                 }
@@ -257,7 +185,7 @@ class MemoryMonitor {
             $freeMemMb = null;
             if (PHP_OS_FAMILY === 'Linux') {
                 if (!isset($meminfo)) {
-                    $meminfo = @self::readFileCo('/proc/meminfo');
+                    $meminfo = @self::readFileCo();
                 }
                 if ($meminfo) {
                     if (preg_match('/^MemAvailable:\s+(\d+)\s+kB/im', $meminfo, $mA)) {

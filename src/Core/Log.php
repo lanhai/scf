@@ -315,7 +315,6 @@ class Log {
         }
         $day = date('Y-m-d', strtotime($log['day']));
         $fileName = $dir . $day . '.log';
-        $message['host'] = $log['host'] ?? SERVER_HOST;
         $success = File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
         if ($success && $day == date('Y-m-d')) {
             if (Counter::instance()->get(md5($fileName))) {
@@ -341,11 +340,12 @@ class Log {
             $dir = APP_LOG_PATH . '/' . $type . '/';
         }
         $fileName = $dir . $day . '.log';
-        if ($day == date('Y-m-d') && $count = Counter::instance()->get($fileName)) {
+        $count = Counter::instance()->get(md5($fileName));
+        if ($day == date('Y-m-d') && $count !== false) {
             return $count;
         }
         $count = $this->countFileLines($fileName);
-        Counter::instance()->set(md5($fileName), $count);
+        $day == date('Y-m-d') and Counter::instance()->set(md5($fileName), $count);
         return $count;
     }
 

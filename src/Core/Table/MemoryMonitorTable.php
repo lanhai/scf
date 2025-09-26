@@ -22,7 +22,10 @@ class MemoryMonitorTable extends ATable {
             'rss_mb' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'pss_mb' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'restart_ts' => ['type' => Table::TYPE_INT, 'size' => 0],
-            'restart_count' => ['type' => Table::TYPE_INT, 'size' => 0]
+            'restart_count' => ['type' => Table::TYPE_INT, 'size' => 0],
+            'limit_memory_mb' => ['type' => Table::TYPE_INT, 'size' => 0],
+            'auto_restart' => ['type' => Table::TYPE_INT, 'size' => 1],
+            'os_actual' => ['type' => Table::TYPE_FLOAT, 'size' => 0],
         ]
     ];
 }

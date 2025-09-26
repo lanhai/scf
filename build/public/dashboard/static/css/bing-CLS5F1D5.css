@@ -1,5 +1,5 @@
 /*!  build: Vue Shop Vite 
      copyright: https://vuejs-core.cn/shop-vite   
-     time: 2025-09-24 10:24:53 
+     time: 2025-09-26 19:35:48 
  */
 .vab-footer[data-v-b9a9855e]{display:flex;align-items:center;justify-content:center;min-height:var(--el-footer-height);padding:0 var(--el-padding) 0 var(--el-padding);margin-top:var(--el-margin);color:var(--el-color-grey);background:var(--el-color-white);border:1px solid var(--el-border-color);border-radius:var(--el-border-radius-base);transition:var(--el-transition)}.vab-footer i[data-v-b9a9855e]{margin:0 3px}::view-transition-old(root),::view-transition-new(root){mix-blend-mode:normal;animation:none}::view-transition-old(root){z-index:999}::view-transition-new(root){z-index:1}.dark::view-transition-old(root){z-index:1}.dark::view-transition-new(root){z-index:999}.vab-dark{margin-left:var(--el-margin)}.vab-color-picker-popper{box-sizing:content-box!important;padding:calc(var(--el-padding) / 2)}.vab-color-picker-popper .el-color-dropdown__link-btn{display:none}.vab-color-picker-popper .el-color-dropdown__btns{margin-top:0}

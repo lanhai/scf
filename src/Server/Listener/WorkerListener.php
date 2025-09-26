@@ -54,7 +54,8 @@ class WorkerListener extends Listener {
             } catch (Throwable $throwable) {
                 Console::error($throwable->getMessage());
             }
-            Runtime::instance()->serverUseable(true);
+            Runtime::instance()->serverIsReady(true);
+
             $info = <<<INFO
 ---------Workers启动完成---------
 应用版本：{$version}
@@ -64,9 +65,9 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
-
         //监控内存使用
-        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: 200, autoRestart: true);
+        $limitMb = Config::get('app')['worker_limit_mb'] ?? 256;
+        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
         Process::signal(SIGUSR2, function () use ($workerId) {
             try {
                 //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);

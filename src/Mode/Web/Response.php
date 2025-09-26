@@ -37,6 +37,10 @@ class Response {
         return $this->isEnd;
     }
 
+    public function isWritable(): bool {
+        return $this->response->isWritable();
+    }
+
     /**
      * 输出成功结果
      * @param mixed $data
@@ -164,9 +168,9 @@ EOT;
 		</div>
 		<script src="https://libs.baidu.com/jquery/1.9.0/jquery.js"></script>
 		　<script>　
-				 var percent = 0;
+		     let percent = 0;
 			 let totalTime = {$time} * 1000;
-			 var timeOut = totalTime / 100;
+			 let timeOut = totalTime / 100;
 			 count();
 			 function count() {
 				 percent = percent + 1;
@@ -176,9 +180,6 @@ EOT;
 					 setTimeout(function () {
 						 count();
 					 }, timeOut);
-					 //setTimeout("count()", 100);
-				 } else {
-					 //window.location = "{$url}";
 				 }
 			 }
 		</script> 
@@ -196,17 +197,13 @@ EOT;
             if (0 === $time) {
                 $this->response->header('Location', $url, true);
             } else {
-                $this->response->header('refresh', $time, true);
-                $this->response->header('url', $url, true);
-                $this->stop(301);
-                //header("refresh:{$time};url={$url}");
-                //echo($str);
-                //echo($msg);
+                $this->response->header('Refresh', $time, true);
+                $this->response->header('Url', $url, true);
+                $this->response->end($msg);
             }
         } else {
-            //$str = "<meta http-equiv='Refresh' content='{$time};URL={$url}'>";
-            $this->write($str);
-            $this->stop(200);
+            $this->status(200);
+            $this->response->end($str);
         }
     }
 

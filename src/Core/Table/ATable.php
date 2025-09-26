@@ -44,18 +44,23 @@ abstract class ATable {
      * @return void
      */
     public static function register($tables = null): void {
-        if (is_array($tables)) {
-            foreach ($tables as $class) {
-                if (!isset(self::$_instances[$class])) {
-                    self::$_instances[$class] = new $class();
-                }
-            }
-        } else {
-            $class = static::class;
-            if (!isset(self::$_instances[$class])) {
-                self::$_instances[$class] = new $class();
+        foreach ((array)$tables as $cls) {
+            if (!isset(self::$_instances[$cls])) {
+                self::$_instances[$cls] = new $cls();
             }
         }
+//        if (is_array($tables)) {
+//            foreach ($tables as $class) {
+//                if (!isset(self::$_instances[$class])) {
+//                    self::$_instances[$class] = new $class();
+//                }
+//            }
+//        } else {
+//            $class = static::class;
+//            if (!isset(self::$_instances[$class])) {
+//                self::$_instances[$class] = new $class();
+//            }
+//        }
     }
 
     /**
@@ -70,6 +75,7 @@ abstract class ATable {
         foreach (self::$_instances as $k => $table) {
             $list[] = [
                 'class' => $k,
+                'size' => $table->size(),
                 'count' => $table->count(),
                 'status' => $table->stats(),
                 'memory_size' => $table->memorySize()
