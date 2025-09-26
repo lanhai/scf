@@ -14,7 +14,6 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\CrontabTable;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
-use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Swoole\Event;

@@ -74,24 +74,15 @@ class Installer extends Struct {
      * @return bool
      */
     public function update(): bool {
-        self::$_apps[$this->app_path] = $this->asArray();
         clearstatcache();
         $jsonFile = SCF_APPS_ROOT . '/apps.json';
         $apps = File::readJson($jsonFile) ?: [];
         $apps = ArrayHelper::index($apps, 'app_path');
         $apps[$this->app_path] = $this->asArray();
         $result = File::write(SCF_APPS_ROOT . '/apps.json', JsonHelper::toJson(array_values($apps)));
-        clearstatcache();
         Runtime::instance()->set('_APP_PROFILE_', $this->asArray());
+        self::$_apps = $apps;
         return $result;
-    }
-
-    /**
-     * 所有同目录安装的应用
-     * @return array
-     */
-    public function apps(): array {
-        return self::$_apps ? array_values(self::$_apps) : [];
     }
 
     /**
@@ -150,6 +141,14 @@ class Installer extends Struct {
         self::$_apps = $apps;
         Runtime::instance()->set('_APP_PROFILE_', $profile);
         return self::factory($profile);
+    }
+
+    /**
+     * 所有同目录安装的应用
+     * @return array
+     */
+    public function apps(): array {
+        return self::$_apps ? array_values(self::$_apps) : [];
     }
 
     /**
