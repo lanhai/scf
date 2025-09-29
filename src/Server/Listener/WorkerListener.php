@@ -55,7 +55,6 @@ class WorkerListener extends Listener {
                 Console::error($throwable->getMessage());
             }
             Runtime::instance()->serverIsReady(true);
-
             $info = <<<INFO
 ---------Workers启动完成---------
 应用版本：{$version}
@@ -68,15 +67,15 @@ INFO;
         //监控内存使用
         $limitMb = Config::get('app')['worker_limit_mb'] ?? 256;
         MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
-        Process::signal(SIGUSR2, function () use ($workerId) {
-            try {
-                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
-                MemoryMonitor::stop();
-                Timer::clearAll();
-            } catch (Throwable $e) {
-                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
-            }
-        });
+//        Process::signal(SIGUSR2, function () use ($workerId) {
+//            try {
+//                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
+//                MemoryMonitor::stop();
+//                Timer::clearAll();
+//            } catch (Throwable $e) {
+//                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
+//            }
+//        });
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {

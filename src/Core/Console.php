@@ -7,10 +7,10 @@ use Scf\Command\Color;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
-use Scf\Server\Manager;
+use Scf\Server\Http;
 use Scf\Util\Time;
-use Swoole\Coroutine;
 use Swoole\Timer;
+use Throwable;
 use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
@@ -214,10 +214,12 @@ class Console {
      * @param bool $push
      */
     public static function log(string $str, bool $push = true): void {
-        if (Runtime::instance()->get(self::$enablePushKey) == STATUS_ON && ENV_MODE == MODE_CGI && $push && Coroutine::getCid() !== -1 && defined('APP_ID')) {
-            Timer::after(100, function () use ($str) {
-                Manager::instance()->pushConsoleLog(Log::filter($str));
-            });
+        if ($push && RUNNING_SERVER && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
+            try {
+                Http::instance()->pushConsoleLog(date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3), Log::filter($str));
+            } catch (Throwable $e) {
+                Console::warning("控制台消息推送失败:" . $e->getMessage(), false);
+            }
         }
         if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";

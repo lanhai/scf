@@ -47,7 +47,6 @@ class CgiListener extends Listener {
                 case E_CORE_ERROR :
                 case E_COMPILE_ERROR :
                     Log::instance()->error($error['message']);
-                    // $server->send($fd, $error['message']);
                     $response->status(500);
                     $response->end($error['message']);
                     break;
@@ -85,19 +84,26 @@ class CgiListener extends Listener {
         }
         Response::instance()->register($response);
         Request::instance()->register($request);
-        //使用原子子增值统计并发访问量
-        Counter::instance()->incr("worker:".Server::server()->worker_id.":connection");
-        $countKey = Key::COUNTER_REQUEST . time();
-        $count = Counter::instance()->incr($countKey);
-        if ($count == 1) {
-            Timer::after(2000, function () use ($countKey, $count) {
-                Counter::instance()->delete($countKey);
+        //内存使用
+        $workerId = Server::server()->worker_id + 1;
+        $key = 'WORKER_MEMORY_USAGE:' . $workerId + 1;
+        //$lastUsage = Runtime::instance()->get($key) ?: 0;
+        Counter::instance()->incr("worker:" . $workerId . ":connection");
+        //等待响应
+        Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
+        //并发请求
+        $currentRequestKey = Key::COUNTER_REQUEST . time();
+        $currentRequest = Counter::instance()->incr($currentRequestKey);
+        if ($currentRequest == 1) {
+            Timer::after(3000, function () use ($currentRequestKey) {
+                Counter::instance()->delete($currentRequestKey);
             });
         }
-        $countKeyDay = Key::COUNTER_REQUEST . Date::today();
-        Counter::instance()->incr($countKeyDay);
-        Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
-        if (!$this->dashboradTakeover($request, $response) && !$this->isConsoleMessage($request, $response)) {
+
+        if (!$this->dashboradTakeover($request, $response)) {
+            //今日请求
+            $requestTodayCountKey = Key::COUNTER_REQUEST . Date::today();
+            Counter::instance()->incr($requestTodayCountKey);
             if (!Runtime::instance()->serverIsReady()) {
                 $response->header("Content-Type", "application/json;charset=utf-8");
                 $response->status(503);
@@ -162,26 +168,16 @@ class CgiListener extends Listener {
             }
         }
         Done:
-        Event::defer(function () {
-            Counter::instance()->decr("worker:".Server::server()->worker_id.":connection");
+        Event::defer(function () use ($workerId, $request) {
+            Counter::instance()->decr("worker:" . $workerId . ":connection");
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
+//            $usage = memory_get_usage();
+//            $usageMb = round($usage / 1048576, 2);
+//            if ($usageMb - $lastUsage >= 2) {
+//                \Scf\Core\Log::instance()->setModule("server")->info("{$key} [http:{$request->server['path_info']}]当前内存使用：{$usageMb}MB,较上次增长：" . round($usageMb - $lastUsage, 2) . "MB", false);
+//            }
+//            Runtime::instance()->set($key, $usageMb);
         });
-    }
-
-    /**
-     * 控制台消息推送
-     * @param \Swoole\Http\Request $request
-     * @param \Swoole\Http\Response $response
-     * @return bool
-     */
-    protected function isConsoleMessage(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/console.socket')) {
-            $data = Request::instance()->post()->pack();
-            Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson(['event' => 'console', 'message' => ['data' => $data['message']], 'time' => date('m-d H:i:s') . "." . substr(Time::millisecond(), -3), 'node' => $data['host']]));
-            $response->end('ok');
-            return true;
-        }
-        return false;
     }
 
     /**

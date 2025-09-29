@@ -85,21 +85,6 @@ class Manager extends Component {
     }
 
     /**
-     * 推送控制台日志到master节点
-     * @param $log
-     * @return void
-     */
-    public function pushConsoleLog($log): void {
-        $socketHost = $this->getMasterHost();
-        $client = Http::create("http://{$socketHost}/console.socket");
-        $client->post([
-            'message' => $log,
-            'host' => App::isMaster() ? 'master' : SERVER_HOST
-        ]);
-        $client->close();
-    }
-
-    /**
      * 向单一节点发送指令
      * @param string $command
      * @param string $host

@@ -14,6 +14,7 @@ use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Helper\JsonHelper;
+use Scf\Helper\StringHelper;
 use Scf\Root;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\CrontabManager;
@@ -27,6 +28,47 @@ use Swoole\WebSocket\Server;
 use function Co\run;
 
 class SubProcess {
+    /**
+     * 心跳和状态推送
+     * @param Server $server
+     * @return Process
+     */
+    public static function createConsolePushProcess(Server $server): Process {
+        return new Process(function (Process $process) use ($server) {
+            sleep(3);
+            Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
+            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('ConsolePush');
+            run(function () use ($server, $process) {
+                $masterSocket = Manager::instance()->getMasterSocketConnection();
+                while (true) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                        Console::warning('【ConsolePush】管理进程退出,结束心跳', false);
+                        break;
+                    }
+                    $masterSocket->push('::ping');
+                    $reply = $masterSocket->recv(3);
+                    if ($reply === false || empty($reply->data)) {
+                        Console::warning('【ConsolePush】与master节点连接读错误，准备重连', false);
+                        $masterSocket->close();
+                        break;
+                    }
+                    $socket = $process->exportSocket();
+                    $msg = $socket->recv(timeout: 30);
+                    if ($msg && StringHelper::isJson($msg)) {
+                        $payload = JsonHelper::recover($msg);
+                        $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
+                            'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
+                            ...$payload
+                        ]]));
+                    }
+                }
+                Coroutine::defer(function () {
+                    unset($masterSocket);
+                });
+            });
+            MemoryMonitor::stop();
+        });
+    }
 
     /**
      * 内存占用统计
@@ -44,6 +86,8 @@ class SubProcess {
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         MemoryMonitor::stop();
                         Console::warning("【MemoryMonitor】管理进程退出,结束统计");
+//                        Process::kill($server->manager_pid, SIGTERM);
+//                        Process::kill($server->master_pid, SIGTERM);
                         return; // 不再重排
                     }
                     // 2) 执行一次完整统计
@@ -51,13 +95,13 @@ class SubProcess {
                     if ($processList) {
                         $barrier = Coroutine\Barrier::make();
                         foreach ($processList as $processInfo) {
-                            Coroutine::create(function () use ($barrier, $processInfo, $process) {
+                            Coroutine::create(function () use ($barrier, $processInfo, $process, $server) {
                                 $processName = $processInfo['process'];
                                 $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
                                 $limitMb = $processInfo['limit_memory_mb'] ?? 1024;
                                 $pid = $processInfo['pid'];
                                 if (!Process::kill($pid, 0)) {
-                                    //MemoryMonitorTable::instance()->delete($processName);
+                                    Console::warning("【MemoryMonitor】{$processName} PID:{$pid}进程不存在,结束统计", false);
                                     return;
                                 }
                                 // 根据PID查询 PSS/RSS（KB）
@@ -69,6 +113,7 @@ class SubProcess {
                                 $processInfo['rss_mb'] = $rss;
                                 $processInfo['pss_mb'] = $pss;
                                 $processInfo['os_actual'] = $osActualMb;
+                                $processInfo['time'] = date('Y-m-d H:i:s');
                                 //更新占用
                                 if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
                                     // 解析 workerId
@@ -79,18 +124,14 @@ class SubProcess {
                                     if ($workerId !== null) {
                                         // 节流：120 秒内只触发一次，避免抖动
                                         if (time() - $processInfo['restart_ts'] >= 120) {
-                                            // 仅当当前代码运行在该 worker 内时才执行 stop，防止跨进程误停
-                                            if (isset($server->worker_id)) {
-                                                Log::instance()->setModule('system')->info("{$processName}内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
-                                                // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
-                                                $server->stop($processInfo['pid'], true);
-                                                $processInfo['restart_ts'] = time();
-                                                $processInfo['restart_count']++;
-                                            }
+                                            Log::instance()->setModule('system')->info("{$processName}内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
+                                            // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
+                                            $server->stop($processInfo['pid'], true);
+                                            $processInfo['restart_ts'] = time();
+                                            $processInfo['restart_count']++;
                                         }
                                     }
                                 }
-
                                 $curr = MemoryMonitorTable::instance()->get($processName);
                                 if ($curr['pid'] !== $processInfo['pid']) {
                                     $processInfo['pid'] = $curr['pid'];
@@ -103,6 +144,8 @@ class SubProcess {
                         } catch (\Throwable $throwable) {
                             Log::instance()->error("内存统计错误:" . $throwable->getMessage());
                         }
+                    } else {
+                        Console::warning("【MemoryMonitor】无进程", false);
                     }
                     // 3) 统计完成后再安排下一轮，避免 tick 重叠
                     Timer::after(5000, $schedule);
@@ -279,7 +322,7 @@ class SubProcess {
             if ($clearCount) {
                 Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
             }
-            Timer::tick(3000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
+            Timer::tick(5000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
                 if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                     MemoryMonitor::stop();
                     Console::warning("【LogBackup】管理进程退出,结束备份");
@@ -437,7 +480,10 @@ class SubProcess {
      * 返回 [pssKb, rssKb]
      */
     private static function parseSmapsLike(string $file): array {
-        $pss = 0; $rss = 0; $hasPss = false; $hasRss = false;
+        $pss = 0;
+        $rss = 0;
+        $hasPss = false;
+        $hasRss = false;
         // 使用 @file 读取，避免在进程退出时 fgets 报错
         $lines = @file($file);
         if ($lines === false) {
@@ -445,9 +491,15 @@ class SubProcess {
         }
         foreach ($lines as $line) {
             if (strncmp($line, 'Pss:', 4) === 0) {
-                if (preg_match('/(\d+)/', $line, $m)) { $pss += (int)$m[1]; $hasPss = true; }
+                if (preg_match('/(\d+)/', $line, $m)) {
+                    $pss += (int)$m[1];
+                    $hasPss = true;
+                }
             } elseif (strncmp($line, 'Rss:', 4) === 0) {
-                if (preg_match('/(\d+)/', $line, $m)) { $rss += (int)$m[1]; $hasRss = true; }
+                if (preg_match('/(\d+)/', $line, $m)) {
+                    $rss += (int)$m[1];
+                    $hasRss = true;
+                }
             }
         }
         return [$hasPss ? $pss : null, $hasRss ? $rss : null];

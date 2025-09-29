@@ -6,11 +6,8 @@ use Exception;
 use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Console;
-use Scf\Core\Key;
-use Scf\Core\Log;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
-use Scf\Core\Table\Runtime;
 use Scf\Helper\ArrayHelper;
 use Scf\Server\Dashboard;
 use Swoole\Coroutine;
@@ -19,7 +16,6 @@ use Swoole\Event;
 use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
-use function Co\run;
 
 class MemoryMonitor {
     /**

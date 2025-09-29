@@ -156,9 +156,9 @@ class Dashboard {
                 $this->_SERVER->on('WorkerStart', function (Server $server, $workerId) {
                     if (App::isReady()) {
                         App::mount();
-                        if ($workerId == 0) {
-                            Router::loadRoutes();
-                        }
+//                        if ($workerId == 0) {
+//                            Router::loadRoutes();
+//                        }
                     }
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {

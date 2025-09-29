@@ -10,7 +10,6 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Table\ATable;
-use Scf\Core\Table\Atomic;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
@@ -68,6 +67,7 @@ class Http extends \Scf\Core\Server {
      */
     protected int $started = 0;
     protected Process $crontabManagerProcess;
+    protected Process $consolePushProcess;
 
     /**
      * @param string $role
@@ -121,6 +121,8 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\Runtime',
             'Scf\Core\Table\RouteTable',
             'Scf\Core\Table\RouteCache',
+            'Scf\Core\Table\SocketRouteTable',
+            'Scf\Core\Table\SocketConnectionTable',
             'Scf\Core\Table\CrontabTable',
             'Scf\Core\Table\MemoryMonitorTable',
             'Scf\Core\Table\ServerNodeTable',
@@ -362,6 +364,9 @@ INFO;
             $this->server->addProcess(SubProcess::createHeartbeatProcess($this->server));
             //内存统计
             $this->server->addProcess(SubProcess::createMemoryUsageCountProcess($this->server));
+            //控制台推送
+            $this->consolePushProcess = SubProcess::createConsolePushProcess($this->server);
+            $this->server->addProcess($this->consolePushProcess);
             //启动文件监听进程
             if ((Env::isDev() && APP_SRC_TYPE == 'dir') || Manager::instance()->issetOpt('watch')) {
                 $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
@@ -453,7 +458,6 @@ INFO;
                     }
                     unset($socket);
                 });
-
             }
         });
         $this->crontabManagerProcess = $crontabProcess;
@@ -502,6 +506,23 @@ INFO;
         Timer::after(1000, function () {
             $this->server->shutdown();
         });
+    }
+
+    /**
+     * 推送控制台日志
+     * @param $time
+     * @param $message
+     * @return bool|int
+     */
+    public function pushConsoleLog($time, $message): bool|int {
+        if (isset($this->consolePushProcess)) {
+            $socket = $this->consolePushProcess->exportSocket();
+            return $socket->send(JsonHelper::toJson([
+                'time' => $time,
+                'message' => $message,
+            ]));
+        }
+        return false;
     }
 
     /**

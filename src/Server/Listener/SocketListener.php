@@ -5,14 +5,19 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Log;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
+use Scf\Core\Table\SocketConnectionTable;
+use Scf\Core\Table\SocketRouteTable;
 use Scf\Helper\JsonHelper;
+use Scf\Mode\Socket\Connection;
 use Scf\Server\Http;
 use Scf\Server\Manager;
 use Scf\Util\Auth;
+use Scf\Util\Time;
 use Swoole\Coroutine\Channel;
 use Swoole\Event;
 use Swoole\Http\Request;
@@ -24,6 +29,7 @@ use Throwable;
 
 class SocketListener extends Listener {
 
+
     /** 防止同一 fd 并发 push 造成阻塞 */
     private static array $pushing = [];
 
@@ -31,9 +37,22 @@ class SocketListener extends Listener {
      * 接收消息
      */
     protected function onMessage(Server $server, Frame $frame): void {
+        //$key = 'WORKER_MEMORY_USAGE:' . $server->worker_id + 1;
+        //$lastUsage = Runtime::instance()->get($key) ?: 0;
+
+        if ($route = SocketConnectionTable::instance()->route($frame->fd)) {
+            $this->callRoute($route, $frame->fd, Connection::EVENT_MESSAGE, $frame->data, server: $server);
+            return;
+        }
         if (JsonHelper::is($frame->data)) {
             $data = JsonHelper::recover($frame->data);
             switch ($data['event']) {
+                case 'console_log':
+                    $time = $data['data']['time'] ?? date('m-d H:i:s') . "." . substr(Time::millisecond(), -3);
+                    $message = $data['data']['message'] ?? "";
+                    $host = $data['data']['host'];
+                    Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson(['event' => 'console', 'message' => ['data' => $message], 'time' => $time, 'node' => $host]));
+                    break;
                 case 'send_command_to_node':
                     $command = $data['data']['command'];
                     $host = $data['data']['host'];
@@ -165,8 +184,158 @@ class SocketListener extends Listener {
                     break;
             }
         }
+//        Event::defer(function () use ($key, $lastUsage, $frame) {
+//            $usage = memory_get_usage();
+//            $usageMb = round($usage / 1048576, 2);
+//            if ($usageMb - $lastUsage >= 2) {
+//                Log::instance()->setModule("server")->info("{$key} [socket:{$frame->fd}]当前内存使用：{$usageMb}MB,较上次增长：" . round($usageMb - $lastUsage, 2) . "MB", false);
+//            }
+//            Runtime::instance()->set($key, $usageMb);
+//        });
     }
 
+    protected function callRoute(string $route, int $fd, string $event, string $message = "", ?Request $request = null, ?Server $server = null): bool {
+        $router = SocketRouteTable::instance()->get($route);
+        $cls = $router['class'];
+        try {
+            /** @var Connection $obj */
+            $obj = $cls::instance($server ?: Http::server(), $fd);
+        } catch (Throwable $e) {
+            Console::warning("Socket route instance error: {$e->getMessage()}");
+            return false;
+        }
+        try {
+            if ($event == Connection::EVENT_DISCONNECT) {
+                return $obj->onDisconnect();
+            } elseif ($event == Connection::EVENT_AUTH) {
+                return $obj->setRequest($request)->auth();
+            } elseif ($event == Connection::EVENT_CONNECT) {
+                return $obj->onConnect();
+            } elseif ($event == Connection::EVENT_MESSAGE) {
+                if ($message == "ping" || $message == "::ping") {
+                    $server = $server ?: Http::server();
+                    return $server->push($fd, "::pong");
+                }
+                $obj->setEvent($event);
+                return $obj->setMessage($message)->onMessage();
+            } else {
+                Console::warning("Socket route call {$cls} failed: unknow event");
+            }
+        } catch (Throwable $e) {
+            Console::warning("Socket route call {$cls} failed: {$e->getMessage()}");
+        }
+        return false;
+    }
+
+    /**
+     * 握手
+     * @param Request $request
+     * @param Response $response
+     * @return false|void
+     */
+    protected function onHandshake(Request $request, Response $response) {
+        $uri = $request->server['request_uri'] ?? '/';
+        if ($uri !== '/' && SocketRouteTable::instance()->has($uri)) {
+            if (!$this->callRoute($uri, $request->fd, Connection::EVENT_AUTH, request: $request)) {
+                $response->status(403);
+                goto end;
+            }
+            SocketConnectionTable::instance()->set($request->fd, [
+                'route' => $uri
+            ]);
+            Event::defer(function () use ($request, $uri) {
+                if (Http::server()->isEstablished($request->fd)) {
+                    $this->callRoute($uri, $request->fd, Connection::EVENT_CONNECT);
+                }
+            });
+            goto upgrade;
+        }
+        $password = $request->get['password'] ?? '';
+        $token = $request->get['token'] ?? '';
+        if ((!$password || $password != md5(App::authKey())) && !$token) {
+            $response->status(403);
+            goto end;
+        }
+        if ($token) {
+            $tokenDecode = Auth::decode($token);
+            if (!JsonHelper::is($tokenDecode)) {
+                $response->status(403);
+                goto end;
+            }
+            $tokenData = JsonHelper::recover($tokenDecode);
+            $expired = $tokenData['expired'] ?? 0;
+            if (time() > $expired) {
+                $response->status(403);
+                goto end;
+            }
+        }
+        upgrade:
+        //websocket握手连接算法验证
+        $secWebSocketKey = $request->header['sec-websocket-key'];
+        $patten = '#^[+/0-9A-Za-z]{21}[AQgw]==$#';
+        if (0 === preg_match($patten, $secWebSocketKey) || 16 !== strlen(base64_decode($secWebSocketKey))) {
+            $response->end();
+            return false;
+        }
+        $key = base64_encode(
+            sha1(
+                $request->header['sec-websocket-key'] . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11',
+                true
+            )
+        );
+        $headers = [
+            'Upgrade' => 'websocket',
+            'Connection' => 'Upgrade',
+            'Sec-WebSocket-Accept' => $key,
+            'Sec-WebSocket-Version' => '13',
+        ];
+        // WebSocket connection to 'ws://127.0.0.1:9502/'
+        // failed: Error during WebSocket handshake:
+        // Response must not include 'Sec-WebSocket-Protocol' header if not present in request: websocket
+        if (isset($request->header['sec-websocket-protocol'])) {
+            $headers['Sec-WebSocket-Protocol'] = $request->header['sec-websocket-protocol'];
+        }
+        foreach ($headers as $key => $val) {
+            $response->header($key, $val);
+        }
+        $response->status(101);
+        Counter::instance()->incr("worker:" . (Http::server()->worker_id + 1) . ":connection");
+        end:
+        $response->end();
+    }
+
+    /**
+     * WebSocket连接打开事件,只有未设置handshake回调时此回调才生效
+     * @param Server $server
+     * @param Request $request
+     * @return void
+     */
+    protected function onOpen(Server $server, Request $request): void {
+        $server->push($request->fd, "未授权的请求");
+        $server->close($request->fd);
+    }
+
+    public function onConnect(Server $server, $fd): void {
+
+    }
+
+    /**
+     * 连接关闭
+     * @param Server $server
+     * @param $fd
+     * @return void
+     */
+    protected function onClose(Server $server, $fd): void {
+        if ($server->isEstablished($fd)) {
+            if ($route = SocketConnectionTable::instance()->route($fd)) {
+                SocketConnectionTable::instance()->delete($fd);
+                $this->callRoute($route, $fd, Connection::EVENT_DISCONNECT);
+            }
+            Counter::instance()->decr("worker:" . ($server->worker_id + 1) . ":connection");
+            Manager::instance()->removeNodeClient($fd);
+            Manager::instance()->removeDashboardClient($fd);
+        }
+    }
 
     protected function subscribeServerStatus($fd, Server $server): void {
         Manager::instance()->addDashboardClient($fd);
@@ -207,101 +376,7 @@ class SocketListener extends Listener {
                 Manager::instance()->removeDashboardClient($fd);
                 Timer::clear($id);
             }
+            unset($status);
         });
-    }
-
-    /**
-     * 握手
-     * @param Request $request
-     * @param Response $response
-     * @return false|void
-     */
-    protected function onHandshake(Request $request, Response $response) {
-        $password = $request->get['password'] ?? '';
-        $token = $request->get['token'] ?? '';
-        if ((!$password || $password != md5(App::authKey())) && !$token) {
-            $response->status(403);
-        } else {
-            if ($token) {
-                $tokenDecode = Auth::decode($token);
-                if (!JsonHelper::is($tokenDecode)) {
-                    $response->status(403);
-                    goto end;
-                }
-                $tokenData = JsonHelper::recover($tokenDecode);
-                $expired = $tokenData['expired'] ?? 0;
-                if (time() > $expired) {
-                    $response->status(403);
-                    goto end;
-                }
-            }
-            //websocket握手连接算法验证
-            $secWebSocketKey = $request->header['sec-websocket-key'];
-            $patten = '#^[+/0-9A-Za-z]{21}[AQgw]==$#';
-            if (0 === preg_match($patten, $secWebSocketKey) || 16 !== strlen(base64_decode($secWebSocketKey))) {
-                $response->end();
-                return false;
-            }
-            $key = base64_encode(
-                sha1(
-                    $request->header['sec-websocket-key'] . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11',
-                    true
-                )
-            );
-            $headers = [
-                'Upgrade' => 'websocket',
-                'Connection' => 'Upgrade',
-                'Sec-WebSocket-Accept' => $key,
-                'Sec-WebSocket-Version' => '13',
-            ];
-            // WebSocket connection to 'ws://127.0.0.1:9502/'
-            // failed: Error during WebSocket handshake:
-            // Response must not include 'Sec-WebSocket-Protocol' header if not present in request: websocket
-            if (isset($request->header['sec-websocket-protocol'])) {
-                $headers['Sec-WebSocket-Protocol'] = $request->header['sec-websocket-protocol'];
-            }
-            foreach ($headers as $key => $val) {
-                $response->header($key, $val);
-            }
-            $response->status(101);
-            Counter::instance()->incr("worker:" . Http::server()->worker_id . ":connection");
-//            Event::defer(function () use ($fd) {
-//                Http::server()->push($fd, JsonHelper::toJson(['event' => 'welcome', 'data' => [
-//                    'time' => date('Y-m-d H:i:s'),
-//                    'host' => SERVER_HOST
-//                ]]));
-//            });
-        }
-        end:
-        $response->end();
-    }
-
-    /**
-     * WebSocket连接打开事件,只有未设置handshake回调时此回调才生效
-     * @param Server $server
-     * @param Request $request
-     * @return void
-     */
-    protected function onOpen(Server $server, Request $request): void {
-        $server->push($request->fd, "未授权的请求");
-        $server->close($request->fd);
-    }
-
-    public function onConnect(Server $server, $fd): void {
-
-    }
-
-    /**
-     *连接关闭
-     * @param Server $server
-     * @param $fd
-     * @return void
-     */
-    protected function onClose(Server $server, $fd): void {
-        if ($server->isEstablished($fd)) {
-            Counter::instance()->decr("worker:{$server->worker_id}:connection");
-            Manager::instance()->removeNodeClient($fd);
-            Manager::instance()->removeDashboardClient($fd);
-        }
     }
 }

@@ -9,7 +9,6 @@ use Scf\App\Installer;
 use Scf\App\Updater;
 use Scf\Client\Http;
 use Scf\Command\Color;
-use Scf\Core\Table\LogTable;
 use Scf\Database\Dao;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Log;
@@ -17,12 +16,9 @@ use Scf\Util\Dir;
 use Scf\Util\File;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
-use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Runtime;
 use Swoole\Timer;
-use Symfony\Component\Console\Helper\Table;
-use Symfony\Component\Console\Output\ConsoleOutput;
 use Symfony\Component\Yaml\Yaml;
 use Throwable;
 use function Swoole\Coroutine\run;
@@ -35,7 +31,8 @@ class App {
         MODE_CGI => [],
         MODE_RPC => [],
         MODE_CLI => [],
-        MODE_NATIVE => []
+        MODE_NATIVE => [],
+        MODE_SOCKET => []
     ];
     protected static ?string $appid = null;
     protected static string $path;

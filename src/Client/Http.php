@@ -5,7 +5,6 @@ namespace Scf\Client;
 use Scf\Core\Result;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
-use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
 
 class Http {
@@ -255,6 +254,10 @@ class Http {
      */
     public function setHeader($k, $v): void {
         $this->headers[$k] = $v;
+    }
+
+    public function setMethod($method): void {
+        $this->client->setMethod($method);
     }
 
     /**

@@ -43,6 +43,7 @@ const MODE_CGI = 'cgi';
 const MODE_RPC = 'rpc';
 const MODE_CLI = 'cli';
 const MODE_NATIVE = 'native';
+const MODE_SOCKET = 'socket';
 //主服务器,用于写入,或者单机读写
 const DBS_MASTER = 1;
 //从服务器,用于读取

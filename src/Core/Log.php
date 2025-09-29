@@ -117,7 +117,7 @@ class Log {
         try {
             SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
         } catch (\Exception $exception) {
-            Console::warning("机器人推送错误日志失败:" . $exception->getMessage());
+            Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
         }
     }
 
@@ -157,7 +157,7 @@ class Log {
                 $m['message'] = $msg;
                 SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
             } catch (\Exception $exception) {
-                Console::warning("机器人推送错误日志失败:" . $exception->getMessage());
+                Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
             }
         }
     }
@@ -317,7 +317,7 @@ class Log {
         $fileName = $dir . $day . '.log';
         $success = File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
         if ($success && $day == date('Y-m-d')) {
-            if (Counter::instance()->get(md5($fileName))) {
+            if (Counter::instance()->exist(md5($fileName))) {
                 Counter::instance()->incr(md5($fileName));
             } else {
                 Counter::instance()->set(md5($fileName), $this->count($type, $day, $message['task'] ?? null));
@@ -340,9 +340,8 @@ class Log {
             $dir = APP_LOG_PATH . '/' . $type . '/';
         }
         $fileName = $dir . $day . '.log';
-        $count = Counter::instance()->get(md5($fileName));
-        if ($day == date('Y-m-d') && $count !== false) {
-            return $count;
+        if ($day == date('Y-m-d') && Counter::instance()->exist(md5($fileName))) {
+            return Counter::instance()->get(md5($fileName));
         }
         $count = $this->countFileLines($fileName);
         $day == date('Y-m-d') and Counter::instance()->set(md5($fileName), $count);
@@ -393,7 +392,7 @@ class Log {
                 // 计算相差的天数
                 $diffDays = floor(($now - $timestamp) / 86400);
                 // 判断是否超过过期天数
-                if ($diffDays > $expireDays && unlink($log)) {
+                if ($diffDays > $expireDays && file_exists($log) && unlink($log)) {
                     $clearCount++;
                 }
             }

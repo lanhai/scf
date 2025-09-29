@@ -8,10 +8,12 @@ use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Table\RouteCache;
 use Scf\Core\Table\RouteTable;
+use Scf\Core\Table\SocketRouteTable;
 use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Native\Controller as NativeController;
+use Scf\Mode\Socket\Connection;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Route\AnnotationReader;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
@@ -191,6 +193,7 @@ class Router {
         $excludeFiles = [
             '_config.php',
             'config.php',
+            '_config_.php',
             '_module_.php',
             'service.php',
             '_service.php',
@@ -219,11 +222,19 @@ class Router {
             $namespace = App::buildControllerPath(...$maps);
             $reader = AnnotationReader::instance();
             try {
-                if (!is_subclass_of($namespace, Controller::class) && !is_subclass_of($namespace, NativeController::class)) {
+                if (!is_subclass_of($namespace, Controller::class) && !is_subclass_of($namespace, NativeController::class) && !is_subclass_of($namespace, Connection::class)) {
                     continue;
                 }
                 $cls = new ReflectionClass($namespace);
                 $methods = $cls->getMethods(ReflectionMethod::IS_PUBLIC);
+                // 支持类级别的 Socket('/path/') 注解：一个类作为一个入口
+                $classAnnotations = $reader->getClassAnnotations($cls);
+                if (isset($classAnnotations['Socket']) && $classAnnotations['Socket']) {
+                    SocketRouteTable::instance()->set($classAnnotations['Socket'], [
+                        'entrance' => $classAnnotations['Socket'],
+                        'class' => $namespace
+                    ]);
+                }
                 foreach ($methods as $method) {
                     $annotations = $reader->getAnnotations($method);
                     if (!str_starts_with($method->getName(), 'action') && !isset($annotations['Route'])) {
@@ -231,14 +242,17 @@ class Router {
                     }
                     $route = $annotations['Route'] ?? null;
                     if (!$route) {
-                        $route = explode("\\", substr($namespace . "\\" . substr($method->getName(), 6), strlen(APP_TOP_NAMESPACE) + 1));
-                        $route = "/" . join('/', array_map(
-                                '\Scf\Helper\StringHelper::camel2lower',
-                                array_filter($route, fn($v) => $v !== 'Controller')
-                            )) . "/";
+                        $parts = explode("\\", substr($namespace . "\\" . substr($method->getName(), 6), strlen(APP_TOP_NAMESPACE) + 1));
+                        $parts = array_filter($parts, fn($v) => $v !== 'Controller');
+                        $route = '/' . join('/', array_map('\\Scf\\Helper\\StringHelper::camel2lower', $parts)) . '/';
                     }
+                    // 规范化：前导/尾随/重复斜杠归一 + 去除多余空白
+                    $route = preg_replace('#/{2,}#', '/', trim($route));
+                    $route = '/' . trim($route, '/') . '/';
+
+                    // 去重：以规范化后的路径为键
                     if (isset($routes[$route])) {
-                        Console::warning("[{$method->getName()}@{$route}]已忽略重复的路由定义：" . $route);
+                        Console::warning("[{$method->getName()}@{$route}]已忽略重复的路由定义：{$route}");
                         continue;
                     }
                     $routes[$route] = $namespace . "\\" . $method->getName();

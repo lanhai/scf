@@ -12,6 +12,7 @@ use OSS\Http\RequestCore_Exception;
 use OSS\OssClient;
 use Scf\Client\Http;
 use Scf\Cloud\Aliyun;
+use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Database\Dao;
 use Scf\Helper\StringHelper;
@@ -40,6 +41,8 @@ class Oss extends Aliyun {
         'gif' => 'image',
         'bmp' => 'image',
         'ico' => 'image',
+        'webp' => 'image',
+        'heic' => 'image',
         'amr' => 'media',
         'mp3' => 'media',
         'wmv' => 'media',
@@ -347,6 +350,8 @@ class Oss extends Aliyun {
             'png' => 'image',
             'gif' => 'image',
             'bmp' => 'image',
+            'webp' => 'image',
+            'heic' => 'image',
             'mp3' => 'media',
             'wmv' => 'media',
             'wav' => 'video',
@@ -450,33 +455,43 @@ class Oss extends Aliyun {
     /**
      * 下载文件
      * @param $url
-     * @param string|null $object
+     * @param ?string $object
      * @param int $mode
      * @param ?string $app
      * @param int $appid
      * @param int $timeout
      * @return Result
      */
-    public function downloadFile($url, string $object = null, int $mode = 1, ?string $app = null, int $appid = 0, int $timeout = 600): Result {
+    public function downloadFile($url, ?string $object = null, int $mode = 1, ?string $app = null, int $appid = 0, int $timeout = 600): Result {
         if (is_null($object)) {
-            $arr = explode('.', $url);
-            $extension = array_pop($arr);
+            $extension = $this->guessExtensionFromUrl($url, 8);
             $object = '/download/' . Date::today() . '/' . Sn::create_guid() . '.' . $extension;
+        } else {
+            // If caller provided object but without/with invalid ext, try to guess
+            $pathExt = strtolower(pathinfo($object, PATHINFO_EXTENSION));
+            if ($pathExt && isset($this->allowTypes[$pathExt])) {
+                $extension = $pathExt;
+            } else {
+                $extension = $this->guessExtensionFromUrl($url, 8);
+                if (!$pathExt) {
+                    $object .= (str_ends_with($object, '.') ? '' : '.') . $extension;
+                }
+            }
         }
-        $extension = explode('.', $object);
-        $extension = array_pop($extension);
         $client = Http::create($url);
         $client->setHeader('Referer', $url);
-        $tmpFile = APP_TMP_PATH . '/' . md5($object) . '.' . $extension;
+        $tmpFile = APP_TMP_PATH . '/' . md5($object) . ($extension ? ('.' . $extension) : '');
         $downloadResult = $client->download($tmpFile, $timeout);
         $client->close();
-        if ($downloadResult->hasError() || !file_exists($tmpFile)) {
+        if ($downloadResult->hasError()) {
             file_exists($tmpFile) and unlink($tmpFile);
             if ((int)$client->statusCode() == 302) {
                 $playUrlHeaders = $client->getHeaders();
-                return $this->downloadFile($playUrlHeaders['location'], $object, $timeout);
+                return $this->downloadFile($playUrlHeaders['location'], $object, $mode, $app, $appid, $timeout);
             }
             return Result::error('源文件下载失败:' . $downloadResult->getMessage());
+        } elseif (!file_exists($tmpFile)) {
+            return Result::error('源文件保存失败');
         }
         $uploadResult = $this->uploadFile($tmpFile, $object);
         if ($uploadResult->hasError()) {
@@ -493,7 +508,7 @@ class Oss extends Aliyun {
             $pathArr = explode("/", $object);
             $ossAr = AttachmentTable::factory();
             $ossAr->file_original_name = array_pop($pathArr);
-            $ossAr->file_size = 0;
+            $ossAr->file_size = file_exists($tmpFile) ? ceil(filesize($tmpFile) / 1024) : 0;
             $ossAr->oss_server = $this->server['account'];
             $ossAr->oss_bucket = $this->server['BUCKET'];
             $ossAr->file_ext = strtolower($extension);
@@ -588,5 +603,110 @@ class Oss extends Aliyun {
      */
     public function getServer(): array {
         return $this->server;
+    }
+
+    /** Map common MIME types to file extensions (lowercase). */
+    private function mimeToExt(string $mime): ?string {
+        $map = [
+            'image/jpeg' => 'jpg',
+            'image/jpg' => 'jpg',
+            'image/png' => 'png',
+            'image/gif' => 'gif',
+            'image/bmp' => 'bmp',
+            'image/x-icon' => 'ico',
+            'image/webp' => 'webp',
+            'image/heic' => 'heic',
+            'image/heif' => 'heif',
+            'audio/amr' => 'amr',
+            'audio/mpeg' => 'mp3',
+            'audio/wav' => 'wav',
+            'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov',
+            'video/x-msvideo' => 'avi',
+            'application/pdf' => 'pdf',
+            'application/zip' => 'zip',
+            'application/x-rar-compressed' => 'rar',
+            'application/vnd.ms-excel' => 'xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+            'application/msword' => 'doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+            'application/vnd.ms-powerpoint' => 'ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
+            'text/plain' => 'txt',
+            'text/csv' => 'csv',
+        ];
+        $mime = strtolower(trim($mime));
+        return $map[$mime] ?? null;
+    }
+
+    /**
+     * Guess extension from URL path or HTTP headers.
+     * Priority: URL path extension (validated) -> HEAD Content-Type -> fallback 'bin'.
+     */
+    private function guessExtensionFromUrl(string $url, int $timeout = 10): string {
+        // 1) Try path extension from URL (safe; domain not considered)
+        $path = parse_url($url, PHP_URL_PATH) ?: '';
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        if ($ext && isset($this->allowTypes[$ext]) && strlen($ext) <= 5) {
+            return $ext;
+        }
+
+        // Helper to parse headers (case-insensitive) and derive ext from
+        // Content-Disposition filename or Content-Type
+        $extractExtFromHeaders = function(array $headers): ?string {
+            $h = array_change_key_case($headers, CASE_LOWER);
+            // 1) Content-Disposition: filename="..."
+            if (!empty($h['content-disposition'])) {
+                $cd = $h['content-disposition'];
+                // filename* (RFC5987) 优先，其次 filename
+                if (preg_match('/filename\*?=([^;]+)/i', $cd, $m)) {
+                    $fn = trim($m[1]);
+                    // 处理UTF-8''编码形式 filename*=UTF-8''...
+                    if (str_contains($fn, "''")) {
+                        $parts = explode("''", $fn, 2);
+                        $fn = urldecode($parts[1] ?? $fn);
+                    }
+                    $fn = trim($fn, "\"' ");
+                    $fe = strtolower(pathinfo($fn, PATHINFO_EXTENSION));
+                    if ($fe && isset($this->allowTypes[$fe])) return $fe;
+                }
+            }
+            // 2) Content-Type
+            if (!empty($h['content-type'])) {
+                $mime = strtolower(trim(explode(';', $h['content-type'])[0]));
+                $mExt = $this->mimeToExt($mime);
+                if ($mExt && isset($this->allowTypes[$mExt])) return $mExt;
+            }
+            return null;
+        };
+
+        // 2) Try HEAD first; if HEAD not allowed or inconclusive, try GET
+        try {
+            $client = Http::create($url);
+            $client->setHeader('Referer', $url);
+            // Attempt HEAD
+            $client->setMethod('HEAD');
+            $client->get($timeout); // some servers may still respond with headers
+            $headers = $client->getHeaders() ?: [];
+            $client->close();
+            $he = $extractExtFromHeaders($headers);
+            if ($he) return $he;
+        } catch (\Throwable $e) {
+            // ignore and fallback to GET
+        }
+        try {
+            $client = Http::create($url);
+            $client->setHeader('Referer', $url);
+            $client->get($timeout); // we only need headers; body will be read by real download
+            $headers = $client->getHeaders() ?: [];
+            $client->close();
+            $he = $extractExtFromHeaders($headers);
+            if ($he) return $he;
+        } catch (\Throwable $e) {
+            // ignore
+        }
+
+        // 3) Fallback
+        return 'bin';
     }
 }
