@@ -54,8 +54,8 @@ class Server implements CommandInterface {
 
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
+        Env::initialize(MODE_CGI);
         if ($action && method_exists($this, $action) && $action != 'help') {
-            Env::initialize(MODE_CGI);
             return $this->$action();
         }
         return Manager::instance()->displayCommandHelp($this->commandName());

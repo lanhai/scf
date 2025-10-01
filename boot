@@ -35,6 +35,7 @@ define('IS_PACK', in_array('-pack', $argv));//打包源码模式
 define('NO_PACK', in_array('-nopack', $argv));//非打包源码模式
 
 define('IS_HTTP_SERVER', in_array('server', $argv));
+define('IS_HTTP_SERVER_START', in_array('start', $argv));
 define('RUNNING_SERVER', in_array('server', $argv));//启动HTTP/SOCKET服务器
 define('RUNNING_BUILD', in_array('build', $argv));//源码构建
 define('RUNNING_INSTALL', in_array('install', $argv));//创建应用
@@ -196,6 +197,9 @@ if (!RUNNING_SERVER) {
         });
         $managerProcess->start();
         Process::wait();
+        if(!IS_HTTP_SERVER_START){
+            break;
+        }
         _UpdateFramework_();
         sleep(1);
     }

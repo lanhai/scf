@@ -7,6 +7,8 @@ use JetBrains\PhpStorm\Pure;
 
 /**
  * Date helper.
+ * @version 1.1
+ * @updated 2025-09-30 11:20:08
  */
 class Date {
 
@@ -49,9 +51,31 @@ class Date {
         $targetTimeStartOfDay = (clone $targetTime)->setTime(0, 0);
         $nowStartOfDay = (clone $now)->setTime(0, 0);
         if ($targetTime > $now) {
-            return '刚刚';
-            //$interval = $now->diff($targetTime);
-            //return $interval->format('%a 天 %h 小时 %i 分钟') . '后';
+            // 未来时间：
+            // - 今天之内：显示“x小时x分后”，不足1小时仅显示“x分后”；不足1分钟：返回“1分钟内”
+            // - 非今天：明天/后天 显示 “明天 HH:mm” / “后天 HH:mm”
+            // - 超过后天：返回 “Y-m-d H:i:s”
+            $isSameDay = $targetTime->format('Y-m-d') === $now->format('Y-m-d');
+            if ($isSameDay) {
+                $seconds = $targetTime->getTimestamp() - $now->getTimestamp();
+                if ($seconds < 60) {
+                    return '1分钟内';
+                }
+                $hours = intdiv($seconds, 3600);
+                $minutes = intdiv($seconds % 3600, 60);
+                if ($hours > 0) {
+                    return $hours . '小时' . $minutes . '分后';
+                }
+                return $minutes . '分后';
+            }
+            // 非同一天，计算天数差（正数）
+            $diffDaysFuture = $nowStartOfDay->diff($targetTimeStartOfDay)->days;
+            if ($diffDaysFuture === 1) {
+                return '明天 ' . $targetTime->format('H:i');
+            } elseif ($diffDaysFuture === 2) {
+                return '后天 ' . $targetTime->format('H:i');
+            }
+            return $targetTime->format('Y-m-d H:i:s');
         }
         $diffInMinutes = $now->getTimestamp() - $targetTime->getTimestamp();
         $diffInMinutes = floor($diffInMinutes / 60);

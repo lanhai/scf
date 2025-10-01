@@ -162,6 +162,7 @@ class Dashboard {
                     }
                 });
                 $this->_SERVER->on("AfterReload", function (Server $server) {
+                    MemoryMonitor::start('Server:Dashboard');
                     Console::info("【Dashboard】重启完成");
                 });
                 $this->_SERVER->on("BeforeShutdown", function (Server $server) {
