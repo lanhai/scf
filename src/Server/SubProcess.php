@@ -124,9 +124,8 @@ class SubProcess {
                                     if ($workerId !== null) {
                                         // 节流：120 秒内只触发一次，避免抖动
                                         if (time() - $processInfo['restart_ts'] >= 120) {
-                                            Log::instance()->setModule('system')->info("{$processName}内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
-                                            // 优雅停止：处理完当前请求后退出，由 Master 拉起新 Worker
-                                            $server->stop($processInfo['pid'], true);
+                                            Log::instance()->setModule('system')->info("{$processName}[PID:{$processInfo['pid']}]内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
+                                            $server->stop($workerId, true);
                                             $processInfo['restart_ts'] = time();
                                             $processInfo['restart_count']++;
                                         }
