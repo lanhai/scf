@@ -125,9 +125,12 @@ class SubProcess {
                                         // 节流：120 秒内只触发一次，避免抖动
                                         if (time() - $processInfo['restart_ts'] >= 120) {
                                             Log::instance()->setModule('system')->info("{$processName}[PID:{$processInfo['pid']}]内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
-                                            $server->stop($workerId, true);
+                                            $server->stop($workerId);
                                             $processInfo['restart_ts'] = time();
                                             $processInfo['restart_count']++;
+                                            if ($processInfo['restart_count'] >= 2) {
+                                                Process::kill($processInfo['pid'], SIGUSR2);
+                                            }
                                         }
                                     }
                                 }
