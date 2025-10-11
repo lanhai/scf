@@ -35,7 +35,6 @@ class SubProcess {
      */
     public static function createConsolePushProcess(Server $server): Process {
         return new Process(function (Process $process) use ($server) {
-            sleep(3);
             Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
             Runtime::instance()->serverIsAlive() and MemoryMonitor::start('ConsolePush');
             run(function () use ($server, $process) {
@@ -128,8 +127,8 @@ class SubProcess {
                                             $server->stop($workerId);
                                             $processInfo['restart_ts'] = time();
                                             $processInfo['restart_count']++;
-                                            if ($processInfo['restart_count'] >= 2) {
-                                                Process::kill($processInfo['pid'], SIGUSR2);
+                                            if ($processInfo['restart_count'] >= 3) {
+                                                Process::kill($processInfo['pid'], SIGKILL);
                                             }
                                         }
                                     }
