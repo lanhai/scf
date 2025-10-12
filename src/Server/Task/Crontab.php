@@ -420,6 +420,7 @@ class Crontab extends Struct {
             //Console::warning("【Crontab#{$this->running_version}】{$this->name} 协作超时取消:" . get_called_class());
         }
         $this->processingFinish(time() + $timeout);
+
         $this->timer = Timer::after($timeout * 1000, function () use ($timeout, $id) {
             $this->loop($timeout, $id);
         });

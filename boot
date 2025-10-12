@@ -31,8 +31,8 @@ run(function () use (&$envVariables) {
 Event::wait();
 define("ENV_VARIABLES", $envVariables);
 define('IS_DEV', (ENV_VARIABLES['app_env'] === 'dev') || in_array('-dev', $argv));//开发模式
-define('IS_PACK', in_array('-pack', $argv));//打包源码模式
-define('NO_PACK', in_array('-nopack', $argv));//非打包源码模式
+define('IS_PACK', in_array('-pack', $argv));//框架打包源码模式
+define('NO_PACK', (IS_DEV && !IS_PACK) || in_array('-nopack', $argv));//框架非打包源码模式
 
 define('IS_HTTP_SERVER', in_array('server', $argv));
 define('IS_HTTP_SERVER_START', in_array('start', $argv));
@@ -197,7 +197,7 @@ if (!RUNNING_SERVER) {
         });
         $managerProcess->start();
         Process::wait();
-        if(!IS_HTTP_SERVER_START){
+        if (!IS_HTTP_SERVER_START) {
             break;
         }
         _UpdateFramework_();

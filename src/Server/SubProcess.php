@@ -35,35 +35,35 @@ class SubProcess {
      */
     public static function createConsolePushProcess(Server $server): Process {
         return new Process(function (Process $process) use ($server) {
+
             Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
             Runtime::instance()->serverIsAlive() and MemoryMonitor::start('ConsolePush');
             run(function () use ($server, $process) {
-                $masterSocket = Manager::instance()->getMasterSocketConnection();
                 while (true) {
-                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                        Console::warning('【ConsolePush】管理进程退出,结束心跳', false);
-                        break;
-                    }
-                    $masterSocket->push('::ping');
-                    $reply = $masterSocket->recv(3);
-                    if ($reply === false || empty($reply->data)) {
-                        Console::warning('【ConsolePush】与master节点连接读错误，准备重连', false);
-                        $masterSocket->close();
-                        break;
-                    }
-                    $socket = $process->exportSocket();
-                    $msg = $socket->recv(timeout: 30);
-                    if ($msg && StringHelper::isJson($msg)) {
-                        $payload = JsonHelper::recover($msg);
-                        $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
-                            'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
-                            ...$payload
-                        ]]));
+                    $masterSocket = Manager::instance()->getMasterSocketConnection();
+                    while (true) {
+                        if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                            Console::error('【ConsolePush】管理进程退出,结束心跳', false);
+                            break 2;
+                        }
+                        $masterSocket->push('::ping');
+                        $reply = $masterSocket->recv(5);
+                        if ($reply === false || empty($reply->data)) {
+                            Console::warning('【ConsolePush】与master节点连接已断开', false);
+                            $masterSocket->close();
+                            break;
+                        }
+                        $socket = $process->exportSocket();
+                        $msg = $socket->recv(timeout: 30);
+                        if ($msg && StringHelper::isJson($msg)) {
+                            $payload = JsonHelper::recover($msg);
+                            $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
+                                'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
+                                ...$payload
+                            ]]));
+                        }
                     }
                 }
-                Coroutine::defer(function () {
-                    unset($masterSocket);
-                });
             });
             MemoryMonitor::stop();
         });
@@ -78,13 +78,13 @@ class SubProcess {
         return new Process(function (Process $process) use ($server) {
             Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
             Runtime::instance()->serverIsAlive() and MemoryMonitor::start('MemoryMonitor');
-            Coroutine\run(function () use ($server, $process) {
+            run(function () use ($server, $process) {
                 $schedule = null; // self-rescheduling closure
                 $schedule = function () use (&$schedule, $process, $server) {
                     // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         MemoryMonitor::stop();
-                        Console::warning("【MemoryMonitor】管理进程退出,结束统计");
+                        Console::error("【MemoryMonitor】管理进程退出,结束统计");
 //                        Process::kill($server->manager_pid, SIGTERM);
 //                        Process::kill($server->master_pid, SIGTERM);
                         return; // 不再重排
@@ -154,6 +154,7 @@ class SubProcess {
                 // 立即安排首轮；若希望立刻执行一次可改为 $schedule();
                 Timer::after(2000, $schedule);
             });
+            MemoryMonitor::stop();
         });
     }
 
@@ -164,7 +165,7 @@ class SubProcess {
      */
     public static function createHeartbeatProcess(Server $server): Process {
         return new Process(function (Process $process) use ($server) {
-            Console::info("【Heatbeat】主节点连接PID:" . $process->pid, false);
+            Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
             App::mount();
             run(function () use ($server) {
                 Runtime::instance()->serverIsAlive() and MemoryMonitor::start('Heatbeat');
@@ -189,7 +190,7 @@ class SubProcess {
                     // 主进程存活检测
                     if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
                         MemoryMonitor::stop();
-                        Console::warning('【Heatbeat】管理进程退出,结束心跳');
+                        Console::error('【Heatbeat】管理进程退出,结束心跳');
                         break;
                     }
                     $socket = Manager::instance()->getMasterSocketConnection();
@@ -211,7 +212,7 @@ class SubProcess {
                         $node->stack_useage = memory_get_usage(true);
                         $node->threads = count(Coroutine::list());
                         $node->thread_status = Coroutine::stats();
-                        $node->server_stats = $server->stats();
+                        $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: []; //$server->stats();
                         $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
                         $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
                         $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
@@ -295,13 +296,15 @@ class SubProcess {
                         // 周期性检测主进程是否还在
                         static $tick = 0;
                         if ((++$tick % 10) === 0 && !Process::kill($server->manager_pid, 0)) {
-                            Console::warning('【Heatbeat】主进程退出，断开并退出');
+                            Console::error('【Heatbeat】主进程退出，断开并退出');
                             $socket->close();
                             break 2; // 跳出两层循环
                         }
                     }
                 }
+
             });
+            MemoryMonitor::stop();
         });
     }
 
@@ -314,7 +317,8 @@ class SubProcess {
         return new Process(function (Process $process) use ($server) {
             Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
             App::mount();
-            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('LogBackup');
+            //Runtime::instance()->serverIsAlive() and
+            MemoryMonitor::start('LogBackup');
             $serverConfig = Config::server();
             $logger = Log::instance();
             $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
@@ -323,27 +327,28 @@ class SubProcess {
             if ($clearCount) {
                 Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
             }
-            Timer::tick(5000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
-                if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                    MemoryMonitor::stop();
-                    Console::warning("【LogBackup】管理进程退出,结束备份");
-                    Timer::clear($tid);
-                    return;
-                }
-                if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
-                    $clearCount = $logger->clear($logExpireDays);
-                    if ($clearCount) {
-                        Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+            run(function () use ($logger, $server, $process, $logExpireDays) {
+                Timer::tick(5000, function ($tid) use ($logger, $server, $process, $logExpireDays) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                        MemoryMonitor::stop();
+                        Console::error("【LogBackup】管理进程退出,结束备份");
+                        Timer::clear($tid);
+                        return;
                     }
-                    //清理过期请求统计
-                    $countKeyDay = Key::COUNTER_REQUEST . Date::leftday(2);
-                    if (Counter::instance()->get($countKeyDay)) {
-                        Counter::instance()->delete($countKeyDay);
+                    if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
+                        $clearCount = $logger->clear($logExpireDays);
+                        if ($clearCount) {
+                            Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+                        }
+                        //清理过期请求统计
+                        $countKeyDay = Key::COUNTER_REQUEST . Date::leftday(2);
+                        if (Counter::instance()->get($countKeyDay)) {
+                            Counter::instance()->delete($countKeyDay);
+                        }
                     }
-                }
-                $logger->backup();
+                    $logger->backup();
+                });
             });
-            \Swoole\Event::wait();
         });
     }
 
@@ -358,7 +363,8 @@ class SubProcess {
             Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
             sleep(1);
             App::mount();
-            Runtime::instance()->serverIsAlive() and MemoryMonitor::start('FileWatcher');
+            //Runtime::instance()->serverIsAlive() and
+            MemoryMonitor::start('FileWatcher');
             $scanDirectories = function () {
                 if (APP_SRC_TYPE == 'dir') {
                     $appFiles = Dir::scan(APP_PATH . '/src');
@@ -375,51 +381,54 @@ class SubProcess {
                     'md5' => md5_file($path)
                 ];
             }
-            while (true) {
-                if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
-                    MemoryMonitor::stop();
-                    Console::warning("【FileWatcher】管理进程退出,结束监听");
-                    break;
-                }
-                $changed = false;
-                $changedFiles = [];
-                $currentFiles = $scanDirectories();
-                $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
-                foreach ($currentFilePaths as $path) {
-                    if (!in_array($path, array_column($fileList, 'path'))) {
-                        $fileList[] = [
-                            'path' => $path,
-                            'md5' => md5_file($path)
-                        ];
-                        $changed = true;
-                        $changedFiles[] = $path;
+            run(function () use ($fileList, $server, $process, $scanDirectories) {
+                while (true) {
+                    if (!Process::kill($server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                        MemoryMonitor::stop();
+                        Console::error("【FileWatcher】管理进程退出,结束监听");
+                        break;
                     }
-                }
-                foreach ($fileList as $key => &$file) {
-                    if (!file_exists($file['path'])) {
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
-                        unset($fileList[$key]);
-                        continue;
+                    $changed = false;
+                    $changedFiles = [];
+                    $currentFiles = $scanDirectories();
+                    $currentFilePaths = array_map(fn($file) => $file, $currentFiles);
+                    foreach ($currentFilePaths as $path) {
+                        if (!in_array($path, array_column($fileList, 'path'))) {
+                            $fileList[] = [
+                                'path' => $path,
+                                'md5' => md5_file($path)
+                            ];
+                            $changed = true;
+                            $changedFiles[] = $path;
+                        }
                     }
-                    $getMd5 = md5_file($file['path']);
-                    if (strcmp($file['md5'], $getMd5) !== 0) {
-                        $file['md5'] = $getMd5;
-                        $changed = true;
-                        $changedFiles[] = $file['path'];
+                    foreach ($fileList as $key => &$file) {
+                        if (!file_exists($file['path'])) {
+                            $changed = true;
+                            $changedFiles[] = $file['path'];
+                            unset($fileList[$key]);
+                            continue;
+                        }
+                        $getMd5 = md5_file($file['path']);
+                        if (strcmp($file['md5'], $getMd5) !== 0) {
+                            $file['md5'] = $getMd5;
+                            $changed = true;
+                            $changedFiles[] = $file['path'];
+                        }
                     }
-                }
-                if ($changed) {
-                    Console::warning('---------以下文件发生变动,即将重启---------');
-                    foreach ($changedFiles as $f) {
-                        Console::write($f);
+                    if ($changed) {
+                        Console::warning('---------以下文件发生变动,即将重启---------');
+                        foreach ($changedFiles as $f) {
+                            Console::write($f);
+                        }
+                        Console::warning('-------------------------------------------');
+                        Http::instance()->reload();
                     }
-                    Console::warning('-------------------------------------------');
-                    Http::instance()->reload();
+                    sleep(3);
                 }
-                sleep(3);
-            }
-        }, false, 2, 1);
+            });
+            MemoryMonitor::stop();
+        });
     }
 
     /**

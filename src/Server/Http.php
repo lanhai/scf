@@ -298,6 +298,14 @@ class Http extends \Scf\Core\Server {
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             MemoryMonitor::start('Server:Master');
+            Timer::tick(1000 * 5, function ($tid) use ($server) {
+                if (!Runtime::instance()->serverIsAlive()) {
+                    Timer::clear($tid);
+                    return;
+                }
+                Runtime::instance()->set('SERVER_STATS', $server->stats());
+            });
+
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             define("SERVER_MASTER_PID", $masterPid);
@@ -305,7 +313,6 @@ class Http extends \Scf\Core\Server {
             File::write(SERVER_MANAGER_PID_FILE, $managerPid);
             File::write(SERVER_PORT_FILE, Runtime::instance()->dashboardPort());
             $scfVersion = SCF_VERSION;
-
             $role = SERVER_ROLE;
             $env = SERVER_RUN_ENV;
             $src = APP_SRC_TYPE;
@@ -359,17 +366,26 @@ INFO;
             //添加后台任务管理子进程
             $this->addCrontabProcess($serverConfig);
             //日志备份进程
-            $this->server->addProcess(SubProcess::createLogBackupProcess($this->server));
-            //心跳进程
-            $this->server->addProcess(SubProcess::createHeartbeatProcess($this->server));
+            $logBackupProcess = SubProcess::createLogBackupProcess($this->server);
+            //$this->server->addProcess($logBackupProcess);
+            $logBackupProcess->start();
             //内存统计
-            $this->server->addProcess(SubProcess::createMemoryUsageCountProcess($this->server));
+            $memoryUsageCountProcess = SubProcess::createMemoryUsageCountProcess($this->server);
+            //$this->server->addProcess($memoryUsageCountProcess);
+            $memoryUsageCountProcess->start();
             //控制台推送
             $this->consolePushProcess = SubProcess::createConsolePushProcess($this->server);
-            $this->server->addProcess($this->consolePushProcess);
+            //$this->server->addProcess($this->consolePushProcess);
+            $this->consolePushProcess->start();
+            //心跳进程
+            $heartbeatProcess = SubProcess::createHeartbeatProcess($this->server);
+            //$this->server->addProcess($heartbeatProcess);
+            $heartbeatProcess->start();
             //启动文件监听进程
             if ((Env::isDev() && APP_SRC_TYPE == 'dir') || Manager::instance()->issetOpt('watch')) {
-                $this->server->addProcess(SubProcess::createFileWatchProcess($this->server, $this->bindPort));
+                $fileWatchProcess = SubProcess::createFileWatchProcess($this->server);
+                //$this->server->addProcess($fileWatchProcess);
+                $fileWatchProcess->start();
             }
             $this->server->start();
         } catch (Throwable $exception) {
@@ -385,24 +401,23 @@ INFO;
     protected function addCrontabProcess($config): void {
         Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
         Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-        $crontabProcess = new Process(function (Process $process) use ($config) {
+        $this->crontabManagerProcess = new Process(function (Process $process) use ($config) {
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
                 if (!Runtime::instance()->serverIsReady()) {
                     sleep(1);
                     continue;
                 }
-                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                if (!Runtime::instance()->serverIsAlive()) {
-                    Console::warning("【Crontab】#{$managerId} 服务器已关闭,结束运行");
-                    sleep(5);
-                    continue;
+                if (!Process::kill($this->server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                    Console::error("【Crontab】服务器已关闭,结束运行");
+                    break;
                 }
+                $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                 if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive()) {
-                    Runtime::instance()->crontabProcessStatus(true);
+                    Console::info("【Crontab】#{$managerId} 开始创建任务进程");
                     $taskList = CrontabManager::start();
+                    Runtime::instance()->crontabProcessStatus(true);
                     if ($taskList) {
-                        Console::info("【Crontab】Crontab#{$managerId} 排程任务已创建");
                         while ($ret = Process::wait(false)) {
                             if ($t = CrontabManager::getTaskTableByPid($ret['pid'])) {
                                 CrontabManager::removeTaskTable($t['id']);
@@ -423,10 +438,10 @@ INFO;
                             CrontabManager::errorReport($processTask);
                         }
                         $taskInstance = CrontabManager::getTaskTableById($processTask['id']);
-                        if ($taskInstance['is_running'] == STATUS_OFF) {
+                        if ($taskInstance['process_is_alive'] == STATUS_OFF) {
                             sleep($processTask['retry_timeout'] ?? 60);
-                            if ($managerId == $processTask['manager_id']) {
-                                CrontabManager::createTaskProcess($processTask);
+                            if ($managerId == $processTask['manager_id']) {//重新创建发生致命错误的任务进程
+                                CrontabManager::createTaskProcess($processTask, $processTask['restart_num'] + 1);
                             } else {
                                 CrontabManager::removeTaskTable($processTask['id']);
                             }
@@ -435,20 +450,17 @@ INFO;
                         }
                     }
                 }
+
                 run(function () use ($process, $managerId) {
                     $socket = $process->exportSocket();
                     $msg = $socket->recv(timeout: 5);
                     if ($msg && StringHelper::isJson($msg)) {
                         $payload = JsonHelper::recover($msg);
                         $command = $payload['command'] ?? 'unknow';
+                        Console::log("【Crontab】#{$managerId} 收到命令:" . Color::cyan($command));
                         switch ($command) {
-                            case 'shutdown':
-                                Console::warning("【Crontab】#{$managerId} 收到结束命令，准备结束进程...");
-                                Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-                                Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                                break;
                             case 'upgrade':
-                                Console::warning("【Crontab】#{$managerId} 收到升级指令,管理器已迭代");
+                            case 'shutdown':
                                 Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
                                 Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
                                 break;
@@ -460,14 +472,15 @@ INFO;
                 });
             }
         });
-        $this->crontabManagerProcess = $crontabProcess;
-        $pid = $this->server->addProcess($crontabProcess);
+
+        $pid = $this->crontabManagerProcess->start();
+        //$pid =$this->server->addProcess($this->crontabManagerProcess);
         $this->log("Crontab 管理进程PID:{$pid}");
         //redis队列管理进程
         $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
         if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-            $redisQueueProcess = new Process(function (Process $process) use ($config) {
+            $redisQueueProcess = new Process(function () {
                 define('IS_REDIS_QUEUE_PROCESS', true);
                 while (true) {
                     if (!Runtime::instance()->serverIsReady()) {
@@ -475,37 +488,24 @@ INFO;
                         continue;
                     }
                     $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                    if (!Runtime::instance()->serverIsAlive()) {
-                        Console::warning("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
-                        sleep(5);
-                        continue;
-                    }
                     if (!Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive()) {
                         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                         Runtime::instance()->redisQueueProcessStatus(true);
                         RQueue::startProcess();
                     }
                     Runtime::instance()->redisQueueProcessStatus(false);
-                    Console::warning("【RedisQueue】#{$managerId}管理进程已迭代,重启队列进程");
-                    sleep(1);
+                    if (!Process::kill($this->server->manager_pid, 0) || !Runtime::instance()->serverIsAlive()) {
+                        Console::error("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
+                        break;
+                    } else {
+                        Console::warning("【RedisQueue】#{$managerId}管理进程已迭代,重新创建进程");
+                        sleep(1);
+                    }
                 }
             });
-            $pid = $this->server->addProcess($redisQueueProcess);
+            $pid = $redisQueueProcess->start();//$this->server->addProcess($redisQueueProcess);
             $this->log("RedisQueue 管理进程PID:{$pid}");
         }
-    }
-
-    /**
-     * 停止服务器
-     * @return void
-     */
-    public function shutdown(): void {
-        Runtime::instance()->serverIsReady(false);
-        Runtime::instance()->serverIsAlive(false);
-        $this->sendCommandToCrontabManager('shutdown');
-        Timer::after(1000, function () {
-            $this->server->shutdown();
-        });
     }
 
     /**
@@ -537,6 +537,20 @@ INFO;
             'command' => $cmd,
             'params' => $params,
         ]));
+    }
+
+    /**
+     * 停止服务器
+     * @return void
+     */
+    public function shutdown(): void {
+        Runtime::instance()->serverIsReady(false);
+        Runtime::instance()->serverIsAlive(false);
+        $this->sendCommandToCrontabManager('shutdown');
+        Timer::after(1000, function () {
+            Timer::clearAll();
+            $this->server->shutdown();
+        });
     }
 
     /**

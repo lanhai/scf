@@ -143,41 +143,21 @@ class CrontabManager {
             ->setHeaders([Color::cyan('任务名称'), Color::cyan('任务脚本'), Color::cyan('运行模式'), Color::cyan('间隔时间(秒)'), Color::cyan('进程ID')])
             ->setRows($renderData);
         $table->render();
-//        while (true) {
-//            $tasks = static::getTaskTable();
-//            if (!$tasks) {
-//                break;
-//            }
-//            foreach ($tasks as $processTask) {
-//                if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
-//                    static::errorReport($processTask);
-//                }
-//                $status = static::getTaskTableById($processTask['id']);
-//                if ($status['is_running'] == STATUS_OFF) {
-//                    sleep($processTask['retry_timeout'] ?? 5);
-//                    if (Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) == $processTask['manager_id']) {
-//                        static::createTaskProcess($processTask);
-//                    } else {
-//                        static::removeTaskTable($processTask['id']);
-//                    }
-//                }
-//            }
-//            sleep(5);
-//        }
         return $taskList;
     }
 
     /**
      * 创建任务进程
      * @param $task
+     * @param int $restartNum
      * @return bool|int|array
      */
-    public static function createTaskProcess($task): bool|int|array {
+    public static function createTaskProcess($task, int $restartNum = 0): bool|int|array {
         $process = new Process(function (Process $process) use ($task) {
             App::mount();
             register_shutdown_function(function () use ($task) {
                 $error = error_get_last();
-                if ($error && $error['type'] === E_ERROR) {
+                if ($error && $error['type'] === E_ERROR) {//标记致命错误
                     Counter::instance()->incr('CRONTAB_' . $task['id'] . '_ERROR');
                     Runtime::instance()->set('CRONTAB_' . $task['id'] . '_ERROR_INFO', $error['message']);
                 }
@@ -193,18 +173,19 @@ class CrontabManager {
                     Event::wait();
                 }
             }
-            //static::removeTaskTable($task['id']);
             Event::exit();
             $process->exit();
             // 注意：exit 后面的代码不会被执行
-        });
+        }, false, 0, true);
         $pid = $process->start();
         self::updateTaskTable($task['id'], [
             'namespace' => $task['namespace'],
             'pid' => $pid,
-            'is_running' => STATUS_ON,
+            'process_is_alive' => STATUS_ON,
+            'restart_num' => $restartNum,
             'manager_id' => $task['manager_id']
         ]);
+        Process::wait(false);
         return $pid;
     }
 
@@ -290,7 +271,7 @@ class CrontabManager {
     public static function errorReport($processTask): void {
         $errorInfo = Runtime::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR_INFO') ?: "未知错误";
         static::updateTaskTable($processTask['id'], [
-            'is_running' => STATUS_OFF,
+            'process_is_alive' => STATUS_OFF,
             'remark' => $errorInfo,
             'error_count' => 1
         ]);

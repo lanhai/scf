@@ -17,7 +17,6 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
-use Swoole\Event;
 use Swoole\Process;
 use Swoole\Timer;
 use Throwable;
@@ -36,24 +35,20 @@ class RQueue {
             App::mount();
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
-                Console::warning("【RedisQueue#{$managerId}】Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
+                Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
                 MemoryMonitor::start('redis:queue');
                 self::instance()->watch($config['redis_queue_mc'] ?? 32);
-                Event::wait();
             }
-        });
+        }, false, 0, true);
         $pid = $process->start();
+        Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        Console::info("【RedisQueue#{$managerId}】队列管理进程已启动,PID:" . $pid);
         Process::wait();
-        Console::warning("【RedisQueue#{$managerId}】队列管理进程已结束,PID:" . $pid);
         MemoryMonitor::stop();
         return $managerId;
     }
-
-
     public static function startByWorker(): void {
         $pool = Redis::pool();
         if ($pool instanceof NullPool) {
