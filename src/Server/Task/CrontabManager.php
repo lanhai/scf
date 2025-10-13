@@ -170,11 +170,11 @@ class CrontabManager {
                     Console::error($task['namespace'] . ':任务脚本必须实现 run 方法');
                 } else {
                     $taskInstance->start();
-                    Event::wait();
+                    //Event::wait();
                 }
             }
-            Event::exit();
-            $process->exit();
+            //Event::exit();
+            //$process->exit();
             // 注意：exit 后面的代码不会被执行
         }, false, 0, true);
         $pid = $process->start();

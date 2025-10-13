@@ -79,7 +79,7 @@ class SubProcess {
         }
     }
 
-    public function sendCommandToCrontabManager($cmd, array $params = []): void {
+    public function sendCommand($cmd, array $params = []): void {
         foreach ($this->process as $process) {
             /** @var Process $process */
             $socket = $process->exportSocket();
@@ -271,7 +271,7 @@ class SubProcess {
             Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
             MemoryMonitor::start('MemoryMonitor');
             run(function () use ($process) {
-                $schedule = null; // self-rescheduling closure
+                $schedule = null;
                 $schedule = function () use (&$schedule, $process) {
                     // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
                     $socket = $process->exportSocket();
@@ -293,7 +293,7 @@ class SubProcess {
                                 $limitMb = $processInfo['limit_memory_mb'] ?? 1024;
                                 $pid = $processInfo['pid'];
                                 if (!Process::kill($pid, 0)) {
-                                    Console::warning("【MemoryMonitor】{$processName} PID:{$pid}进程不存在,结束统计", false);
+                                    Console::warning("【MemoryMonitor】{$processName} PID:{$pid}进程不存在", false);
                                     return;
                                 }
                                 // 根据PID查询 PSS/RSS（KB）
@@ -424,15 +424,17 @@ class SubProcess {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
                             // 读错误：断开
-                            Console::warning('【Heatbeat】与master节点连接读错误，准备重连', false);
+                            Console::warning('【Heatbeat】已断开master节点连接', false);
                             $socket->close();
-                            break;
-                        }
-                        if ($reply && empty($reply->data)) {
-                            Timer::clear($pingTimerId);
-                            unset($pingTimerId);
-                            Console::warning("【Heatbeat】已断开master节点连接", false);
-                            $socket->close();
+                            $processSocket = $process->exportSocket();
+                            $cmd = $processSocket->recv(timeout: 0.1);
+                            if ($cmd == 'shutdown') {
+                                Console::error('【Heatbeat】服务器已关闭,终止心跳');
+                                $socket->close();
+                                MemoryMonitor::stop();
+                                Process::kill($process->pid, SIGTERM);
+                                //break 2; // 跳出两层循环
+                            }
                             break;
                         }
                         if ($reply && !empty($reply->data) && $reply->data !== "::pong") {
@@ -474,18 +476,6 @@ class SubProcess {
                             } else {
                                 Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
                             }
-                        } else {
-                            // 无数据可读（非阻塞场景）
-                            usleep(100 * 1000); // 100ms，避免 Coroutine::sleep 在非协程环境的问题
-                        }
-                        $processSocket = $process->exportSocket();
-                        $cmd = $processSocket->recv(timeout: 0.1);
-                        if ($cmd == 'shutdown') {
-                            Console::error('【Heatbeat】服务器已关闭,终止心跳');
-                            $socket->close();
-                            MemoryMonitor::stop();
-                            Process::kill($process->pid, SIGTERM);
-                            //break 2; // 跳出两层循环
                         }
                         // 周期性检测主进程是否还在
 //                        static $tick = 0;

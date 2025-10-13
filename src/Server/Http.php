@@ -413,7 +413,7 @@ INFO;
             }
         });
         $channel->pop($countdown + 1);
-        $this->subProcess->sendCommandToCrontabManager('upgrade');
+        $this->subProcess->sendCommand('upgrade');
         $this->server->reload();
         //重启控制台
         if (App::isMaster()) {
