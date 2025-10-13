@@ -226,6 +226,7 @@ class SubProcess {
      */
     private function createConsolePushProcess(): Process {
         return new Process(function (Process $process) {
+            App::mount();
             Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
             MemoryMonitor::start('ConsolePush');
             run(function () use ($process) {
@@ -356,8 +357,10 @@ class SubProcess {
      */
     private function createHeartbeatProcess(): Process {
         return new Process(function (Process $process) {
-            Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
             App::mount();
+            //Config::init();
+            //var_dump(Config::get('app'));
+            Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
             run(function () use ($process) {
                 MemoryMonitor::start('Heatbeat');
                 $node = Node::factory();

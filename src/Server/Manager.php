@@ -44,10 +44,7 @@ class Manager extends Component {
     public function getMasterHost(): string {
         $host = Runtime::instance()->get('_MASTER_HOST_');
         if (!$host) {
-            $host = Config::get('app')['master_host'] ?? '127.0.0.1';
-            if (App::isMaster()) {
-                $host = '127.0.0.1';
-            }
+            $host = App::isMaster() ? '127.0.0.1' : (Config::get('app')['master_host'] ?? '127.0.0.1');
             if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
                 $port = MASTER_PORT ?: Runtime::instance()->httpPort();
                 $host = $host . ':' . $port;
