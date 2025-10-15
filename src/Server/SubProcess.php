@@ -512,8 +512,8 @@ class SubProcess {
                 Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
             }
             run(function () use ($logger, $process, $logExpireDays) {
-                Timer::tick(5000, function ($tid) use ($logger, $process, $logExpireDays) {
-                    $sock = $process->exportSocket();
+                $sock = $process->exportSocket();
+                Timer::tick(5000, function ($tid) use ($logger, $sock, $process, $logExpireDays) {
                     $cmd = $sock->recv(timeout: 0.1);
                     if ($cmd == 'shutdown') {
                         MemoryMonitor::stop();

@@ -5,6 +5,7 @@ namespace Scf\Database\Statistics;
 use Co\Channel;
 use JetBrains\PhpStorm\ArrayShape;
 use Scf\Cache\Redis;
+use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Log;
@@ -75,17 +76,8 @@ class StatisticModel {
             $scene = strtolower($scene);
             $today = Date::today();
             $hour = date('H', time());
-            //查询是否记录当前用户当天的访问记录
+            //查询是否记录当前用户当天的记录
             $userKey = md5($mchID . $scene . $dataId . $uid);
-//            if ($uid) {
-//                $userKey = md5($mchID . $scene . $dataId . $uid);
-//            } else {
-//                if (!$guestId = Request::cookie('_USR_GUEST')) {
-//                    $guestId = Sn::create_uuid();
-//                    Response::instance()->setCookie('_USR_GUEST', $guestId);
-//                }
-//                $userKey = md5($mchID . $scene . $dataId . $guestId);
-//            }
             $key = md5($userKey . Date::today());
             $recordTable = $this->_table_record . '_' . $today;
             $tablePrefix = Pdo::master('history')->getConfig('prefix');
@@ -94,14 +86,9 @@ class StatisticModel {
             $requestKey = $completeTable . '_' . $key;
             if (!$userRecordId = Redis::pool()->get($requestKey)) {
                 //防并发
-                $saveKey = '_SAVED_' . md5($recordTable . '_' . $key);
-                if (Runtime::instance()->get($saveKey)) {
+                if (!Redis::pool()->lock($requestKey, 10)) {
                     return false;
                 }
-                Runtime::instance()->set($saveKey, time());
-                Timer::after(10000, function () use ($saveKey) {
-                    Runtime::instance()->delete($saveKey);
-                });
                 $sql = "SHOW TABLES LIKE '{$completeTable}'";
                 $tableToday = Runtime::instance()->get('statistics_record_day');
                 if (!$tableToday || $tableToday != Date::today()) {
@@ -234,13 +221,17 @@ class StatisticModel {
         $finished = 0;
         if ($count) {
             for ($i = 0; $i < $count; $i++) {
-                $params = Redis::pool()->rPop(APP_ID . '_STATISTIC_QUEUE_');
+                $params = Redis::pool()->rPop('_STATISTIC_QUEUE_');
                 if ($params) {
-                    $this->excute(...$params) and $finished++;
+                    if (!$this->excute(...$params)) {
+                        Redis::pool()->rPush('_STATISTIC_QUEUE_', $params);
+                    } else {
+                        $finished++;
+                    }
                 }
             }
         }
-        //Console::success('本次执行完成统计:' . $finished);
+        (App::isDevEnv() && $finished > 0) and Console::success('本次执行完成统计:' . $finished);
         return $finished;
     }
 
@@ -249,7 +240,7 @@ class StatisticModel {
      */
     public function countQueue(): int {
         try {
-            return Redis::pool()->lLength(APP_ID . '_STATISTIC_QUEUE_');
+            return Redis::pool()->lLength('_STATISTIC_QUEUE_');
         } catch (Throwable $err) {
             Console::warning('查询统计队列失败:' . $err->getMessage());
             return 0;
@@ -267,13 +258,7 @@ class StatisticModel {
      * @return bool|int
      */
     public function record(string $scene, int|string $dataId = 0, int $uid = 0, float $incValue = 0, int $mchID = 1): bool|int {
-        return Redis::pool()->lPush(APP_ID . '_STATISTIC_QUEUE_', compact('scene', 'dataId', 'uid', 'incValue', 'mchID'));
-//        $task = Statistic::add(compact('scene', 'dataId', 'uid', 'incValue', 'mchID'));
-//        return $task->getTaskId();
-
-//        return Coroutine::create(function () use ($scene, $dataId, $uid, $incValue, $mchID) {
-//
-//        });
+        return Redis::pool()->lPush('_STATISTIC_QUEUE_', compact('scene', 'dataId', 'uid', 'incValue', 'mchID'));
     }
 
     /**
