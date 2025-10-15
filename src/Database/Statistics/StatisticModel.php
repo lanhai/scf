@@ -2260,7 +2260,7 @@ class StatisticModel {
             $where->and(['mch_id' => $mchId]);
         }
         if ($dataId) {
-            $where->and(['data_id' => $mchId]);
+            $where->and(['data_id' => $dataId]);
         }
         try {
             $build = $where->build();
