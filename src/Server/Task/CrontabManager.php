@@ -272,7 +272,7 @@ class CrontabManager {
         $errorInfo = Runtime::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR_INFO') ?: "未知错误";
         static::updateTaskTable($processTask['id'], [
             'process_is_alive' => STATUS_OFF,
-            'remark' => $errorInfo,
+            'remark' => "致命错误",
             'error_count' => 1
         ]);
         $sendError = new Process(function () use ($processTask, $errorInfo) {

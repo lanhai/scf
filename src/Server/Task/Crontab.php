@@ -210,7 +210,7 @@ class Crontab extends Struct {
                         Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                         $this->log("任务执行失败:" . $throwable->getMessage());
                         Timer::after(1000 * 2, function () use ($throwable) {
-                            CrontabManager::updateTaskTable($this->id, ['status' => 0, 'remark' => $throwable->getMessage(), 'error_count' => 1]);
+                            CrontabManager::updateTaskTable($this->id, ['status' => 0, 'remark' => "任务执行失败", 'error_count' => 1]);
                         });
                     }
                     break;
