@@ -7,7 +7,7 @@ use Swoole\Table;
 class RouteCache extends ATable {
 
     /**
-     * 配置项
+     * 路由缓存
      * @var array
      */
     protected array $_config = [

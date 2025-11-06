@@ -118,6 +118,8 @@ class CrontabManager {
             //没有任务返回空等待下一轮查询
             return [];
         }
+        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
+        Console::info("【Crontab】#{$managerId} 开始创建任务进程");
         foreach ($taskList as &$task) {
             $task['pid'] = static::createTaskProcess($task);
         }

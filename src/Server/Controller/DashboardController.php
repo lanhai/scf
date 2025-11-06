@@ -14,6 +14,7 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Log;
 use Scf\Core\Result;
+use Scf\Core\Table\RouteTable;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Dao;
 use Scf\Helper\ArrayHelper;
@@ -28,9 +29,10 @@ use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
 use Scf\Util\Auth;
 use Scf\Util\Date;
+use Scf\Util\Des;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
-use Swoole\Coroutine\Http\Client;
+use Scf\Util\Random;
 use Throwable;
 
 class DashboardController extends Controller {
@@ -44,7 +46,7 @@ class DashboardController extends Controller {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
             Response::interrupt("应用尚未完成初始化安装", 'APP_NOT_INSTALL_YET', status: 200);
         }
-        $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes', '/update_dashboard'];
+        $publisPaths = ['/install', '/install_check', '/login', '/memory', '/nodes', '/update_dashboard', '/ws_document', '/ws_sign_debug'];
         if (!in_array($path, $publisPaths) && !$this->isLogin()) {
             Response::interrupt("未授权的访问: " . $path, 'NOT_LOGIN', status: 200);
         }
@@ -564,6 +566,48 @@ class DashboardController extends Controller {
     }
 
     /**
+     * 调试签名
+     * @return Result
+     */
+    public function actionWsSignDebug(): Result {
+        Request::post([
+            'appid',
+            'appkey',
+            'path',
+            'query',
+            'body'
+        ])->assign($appid, $appkey, $path, $query, $body);
+        if (!$appid || !$appkey) {
+            return Result::success([
+                'sign' => '',
+                'rand' => '',
+                'timestamp' => '',
+                'appid' => '',
+            ]);
+        }
+        if (strlen($appkey) !== 32) {
+            return Result::error('秘钥长度不合法');
+        }
+        $rand = Random::character(16);
+        $timestamp = time();
+        if ($query) {
+            $queryString = ArrayHelper::toQueryMap($query);
+            $path .= '?' . $queryString;
+        }
+        $signStr = $appid . ":" . $timestamp . ":" . $path;
+        if ($body) {
+            $signStr .= ":" . ArrayHelper::toQueryMap($body);
+        }
+        $sign = Des::encrypt($signStr, $appkey, 'AES-256-CBC', $rand);
+        return Result::success([
+            'sign' => $sign,
+            'rand' => $rand,
+            'timestamp' => $timestamp,
+            'appid' => $appid
+        ]);
+    }
+
+    /**
      * 文档
      * @return Result
      */
@@ -573,7 +617,20 @@ class DashboardController extends Controller {
             'mode' => MODE_CGI,
             'module'
         ])->assign($action, $mode, $module);
-        $appStyle = Config::get('app')['module_style'];
+        if (!file_exists(APP_TMP_PATH . '/route_document.json')) {
+            return Result::success([
+                'modules' => [],
+                'debug' => []
+            ]);
+        }
+        $debug = Config::get('simple_webservice');
+        unset($debug['apps']);
+        return Result::success([
+            'modules' => File::readJson(APP_TMP_PATH . '/route_document.json'),
+            'debug' => $debug
+        ]);
+        return Result::success(RouteTable::instance()->rows());
+        $appStyle = APP_MODULE_STYLE;
         switch ($action) {
             case 'init':
                 return Result::success([
@@ -581,7 +638,7 @@ class DashboardController extends Controller {
                     'debug_appkey' => Config::get('simple_webservice')['debug_appkey'],
                     'debug_mpappid' => Config::get('simple_webservice')['debug_mpappid'],
                     'gate_way' => Config::get('simple_webservice')['gateway'],
-                    'modules' => $mode == MODE_CGI ? App::getModules() : \Scf\Mode\Rpc\App::loadModules($mode)
+                    'modules' => App::getModules($mode)
                 ]);
             default:
                 $apis = [];
@@ -589,7 +646,7 @@ class DashboardController extends Controller {
                 if ($mode == MODE_CGI && $module != 'Ws') {
                     //公共接口
                     try {
-                        $c = $appStyle == APP_MODULE_STYLE_MICRO ? DocumentComponent::create("\\App\\Controller\\Ws\\Common") : DocumentComponent::create("\\App\\Common\\Controller\\Ws");
+                        $c = $appStyle == APP_MODULE_STYLE_SINGLE ? DocumentComponent::create("\\App\\Controller\\Ws\\Common") : DocumentComponent::create("\\App\\Common\\Controller\\Ws");
                         $apis[] = array_merge(['name' => 'common'], $c);
                     } catch (\Exception $exception) {
                         //Response::interrupt('生成文档数据失败:' . $exception->getMessage());
@@ -597,7 +654,7 @@ class DashboardController extends Controller {
                 }
                 //请求的模块
                 $dirName = $mode == MODE_CGI ? 'Controller' : 'Service';
-                $dir = $appStyle == APP_MODULE_STYLE_MICRO ? (APP_LIB_PATH . '/' . $dirName . '/' . $module) : (APP_LIB_PATH . '/' . $module . '/' . $dirName);
+                $dir = $appStyle == APP_MODULE_STYLE_SINGLE ? (APP_LIB_PATH . '/' . $dirName . '/' . $module) : (APP_LIB_PATH . '/' . $module . '/' . $dirName);
                 if (!file_exists($dir)) {
                     Response::interrupt('服务模块不存在:' . $dir, status: 200);
                 }
@@ -617,7 +674,7 @@ class DashboardController extends Controller {
                     }
                     try {
                         $document = ['name' => StringHelper::camel2lower($item)];
-                        $c = $appStyle == APP_MODULE_STYLE_MICRO ? DocumentComponent::create("\\App\\{$dirName}\\" . $module . "\\" . $item) : DocumentComponent::create("\\App\\{$module}\\{$dirName}\\" . $item);
+                        $c = $appStyle == APP_MODULE_STYLE_SINGLE ? DocumentComponent::create("\\App\\{$dirName}\\" . $module . "\\" . $item) : DocumentComponent::create("\\App\\{$module}\\{$dirName}\\" . $item);
                         if (!$c['desc']) {
                             continue;
                         }
@@ -662,27 +719,15 @@ class DashboardController extends Controller {
                 ]
             ],
             [
-                'path' => '/',
-                'name' => 'System',
+                'path' => '/document/ws',
+                'name' => 'Document',
                 'component' => 'Layout',
                 'meta' => [
-                    'title' => '备用',
-                    'icon' => 'computer-line',
+                    'title' => '文档',
+                    'icon' => 'file-list-line',
                     'levelHidden' => true,
-                    'breadcrumbHidden' => true
-                ],
-                'children' => [
-                    [
-                        'path' => '/platform/setting',
-                        'name' => 'PlatformSetting',
-                        'component' => '/@/views/nodes/index.vue',
-                        'meta' => [
-                            'title' => '平台配置',
-                            'icon' => 'global-line',
-                            'noColumn' => true,
-                            'noClosable' => true
-                        ],
-                    ]
+                    'breadcrumbHidden' => true,
+                    'target' => '_blank'
                 ]
             ]
         ];

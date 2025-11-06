@@ -62,8 +62,8 @@ class App {
         $app = $this->_apps[$appNum];
         $module = $app['module'];
         $controller = $app['controller'];
-        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-        if ($moduleStyle == APP_MODULE_STYLE_LARGE) {
+        $moduleStyle = APP_MODULE_STYLE;
+        if ($moduleStyle == APP_MODULE_STYLE_MULTI) {
             $ctrlClass = \Scf\Core\App::buildControllerPath(StringHelper::lower2camel($module), 'Controller', $controller);
         } else {
             $ctrlClass = \Scf\Core\App::buildControllerPath('Cli', $controller);

@@ -11,6 +11,7 @@ use Scf\Core\Table\RouteTable;
 use Scf\Core\Table\SocketRouteTable;
 use Scf\Core\Traits\CoroutineSingleton;
 use Scf\Helper\ArrayHelper;
+use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Native\Controller as NativeController;
 use Scf\Mode\Socket\Connection;
@@ -18,6 +19,7 @@ use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Route\AnnotationReader;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Util\Dir;
+use Scf\Util\File;
 use Throwable;
 
 class Router {
@@ -210,6 +212,7 @@ class Router {
             array_map([$routeCacheTable, 'delete'], array_keys($routeCache));
         }
         $routes = [];
+        $routeDoument = [];
         foreach ($entryScripts as $entryScript) {
             $arr = explode(DIRECTORY_SEPARATOR, $entryScript);
             $fileName = array_pop($arr);
@@ -265,11 +268,44 @@ class Router {
                         'controller' => $maps[count($maps) - 1],
                         'space' => $namespace,
                     ]);
+                    if (isset($classAnnotations['module']) && isset($classAnnotations['moduleName']) && isset($classAnnotations['controllerName'])) {
+                        $module = $classAnnotations['module'];
+                        $moduleName = $classAnnotations['moduleName'];
+                        $controller = $maps[count($maps) - 1];
+                        $controllerName = $classAnnotations['controllerName'];
+                        $moduleIndex = array_search($module, array_column($routeDoument, 'module'));
+                        if ($moduleIndex === false) {
+                            $routeDoument[] = [
+                                'name' => $moduleName,
+                                'module' => $module,
+                                'children' => []
+                            ];
+                            $moduleIndex = count($routeDoument) - 1;
+                        }
+                        $ctrlIndex = array_search($controller, array_column($routeDoument[$moduleIndex]['children'], 'controller'));
+                        $document = [
+                            'route' => preg_replace('#\{([^}:]+)(:[^}]*)?\}#', '{$1}', $route),
+                            'method' => !empty($annotations['post']) ? 'POST' : 'GET',
+                            ...$annotations
+                        ];
+                        if ($ctrlIndex === false) {
+                            $routeDoument[$moduleIndex]['children'][] = [
+                                'name' => $controllerName,
+                                'controller' => $controller,
+                                'routes' => [
+                                    $document
+                                ]
+                            ];
+                        } else {
+                            $routeDoument[$moduleIndex]['children'][$ctrlIndex]['routes'][] = $document;
+                        }
+                    }
                 }
             } catch (Throwable $exception) {
                 Console::error($exception->getMessage());
             }
         }
+        File::write(APP_TMP_PATH . '/route_document.json', JsonHelper::toJson($routeDoument));
     }
 
     public function matchNormalRoute() {
@@ -332,7 +368,7 @@ class Router {
         $pathinfo = $pathinfo ? explode('/', trim($pathinfo, '/')) : [];
         $map = [];
         $this->_partitions = [];
-        $this->_module = APP_MODULE_STYLE == APP_MODULE_STYLE_MICRO ? 'Controller' : StringHelper::lower2camel($pathinfo[0] ?? 'Index');
+        $this->_module = APP_MODULE_STYLE == APP_MODULE_STYLE_SINGLE ? 'Controller' : StringHelper::lower2camel($pathinfo[0] ?? 'Index');
         //检查模块是否存在
         $module = ArrayHelper::findColumn($modules, 'name', $this->_module);
         if (!$module) {

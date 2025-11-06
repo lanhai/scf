@@ -24,8 +24,8 @@ class App {
         }
         $serviceManager = Manager::instance();
         foreach ($modules as $conf) {
-            $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-            if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            $moduleStyle = APP_MODULE_STYLE;
+            if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                 $cls = \Scf\Core\App::buildControllerPath('Rpc', 'service');
             } else {
                 $cls = \Scf\Core\App::buildControllerPath($conf['name'], 'service');
@@ -61,9 +61,9 @@ class App {
 
     private static function getControllers($service): array {
         //注册加载器
-        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+        $moduleStyle = APP_MODULE_STYLE;
         $entryScripts = [];
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+        if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
             $serviceDir = \Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', 'Rpc');
             is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
         } else {
@@ -77,8 +77,8 @@ class App {
                 if ($name == 'service') {
                     continue;
                 }
-                $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-                if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+                $moduleStyle = APP_MODULE_STYLE;
+                if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                     $cls = \Scf\Core\App::buildControllerPath('Rpc', $name);
                 } else {
                     $cls = \Scf\Core\App::buildControllerPath($service, 'Service', $name);

@@ -88,7 +88,7 @@ class CpCreater extends Base {
      * @return mixed
      */
     protected function createController(): mixed {
-        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
+        $moduleStyle = APP_MODULE_STYLE;
 
         $input = $this->receive();
         if (!$input) {
@@ -199,7 +199,7 @@ class CpCreater extends Base {
             }
             $apiModuleName = StringHelper::lower2camel($this->getConfig('module_name'));
             $apiControllerName = StringHelper::lower2camel($apiControllerName);
-            if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                 $apiControllerPath = APP_LIB_PATH . '/Controller/Admin/' . StringHelper::lower2camel($apiModuleName);
             } else {
                 $apiControllerPath = APP_LIB_PATH . '/Admin/Controller/' . StringHelper::lower2camel($apiModuleName);
@@ -208,7 +208,7 @@ class CpCreater extends Base {
             $dirName = $this->receive();
             if ($dirName) {
                 $apiModuleName = $dirName;
-                if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+                if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                     $apiControllerPath = APP_LIB_PATH . '/Controller/Admin/' . StringHelper::lower2camel($dirName);
                 } else {
                     $apiControllerPath = APP_LIB_PATH . '/Admin/Controller/' . StringHelper::lower2camel($dirName);
@@ -270,8 +270,8 @@ class CpCreater extends Base {
      * @return mixed
      */
     protected function createAuthNode(): mixed {
-        $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+        $moduleStyle = APP_MODULE_STYLE;
+        if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
             $result = \App\Model\Admin\CpNodeModel::instance()->all(['parent' => 0]);
         } else {
             $result = \App\Admin\Model\CpNodeModel::instance()->all(['parent' => 0]);
@@ -295,7 +295,7 @@ class CpCreater extends Base {
             return $this->createAuthNode();
         }
         $parent = $result[$num - 1]['id'];
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+        if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
             $node = \App\Model\Admin\CpNodeAR::factory();
         } else {
             $node = \App\Admin\Model\CpNodeAR::factory();
@@ -339,7 +339,7 @@ class CpCreater extends Base {
             $this->print("权限节点创建失败:" . $node->getError());
             return $this->createAuthNode();
         }
-        if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+        if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
             \App\Model\ConfigModel::instance()->update(\App\Model\ConfigModel::KEY_AUTH_NODES_VERSION, time());
         } else {
             \App\Common\Model\ConfigModel::instance()->update(\App\Common\Model\ConfigModel::KEY_AUTH_NODES_VERSION, time());

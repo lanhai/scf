@@ -7,7 +7,7 @@ use Swoole\Table;
 class RouteTable extends ATable {
 
     /**
-     *  路由表
+     * 路由表
      * @var array
      */
     protected array $_config = [

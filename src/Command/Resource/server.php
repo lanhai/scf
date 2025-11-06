@@ -1,6 +1,6 @@
 <?php
 return [
-    'module_style' => 1,//模块风格 1:微应用;2:大型应用
+    'module_style' => APP_MODULE_STYLE_MULTI,//模块风格 1:单模块;2:多模块
     'port' => 9580,
     'rpc_port' => 9680,
     'worker_num' => 8,

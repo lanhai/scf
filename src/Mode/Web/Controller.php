@@ -120,10 +120,11 @@ abstract class Controller {
      * @param $error
      * @param string $code
      * @param mixed $data
+     * @param int $statusCode
      * @return void
      */
-    #[NoReturn] protected function error($error, string $code = 'SERVICE_ERROR', mixed $data = ''): void {
-        Response::interrupt($error, $code, $data);
+    #[NoReturn] protected function error($error, string $code = 'SERVICE_ERROR', mixed $data = '', int $statusCode = 503): void {
+        Response::interrupt($error, $code, $data, $statusCode);
     }
 
     /**

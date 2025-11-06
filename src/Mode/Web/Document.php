@@ -48,8 +48,8 @@ class Document extends Component {
         foreach ($methods as $k => $method) {
             $annotations = $reader->getAnnotations($method);
             $comment = $method->getDocComment();
-            $moduleStyle = Config::get('app')['module_style'] ?? APP_MODULE_STYLE_LARGE;
-            if ($moduleStyle == APP_MODULE_STYLE_MICRO) {
+            $moduleStyle = APP_MODULE_STYLE;
+            if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                 $path = '/' . StringHelper::camel2lower($classArr[3]) . '/' . StringHelper::camel2lower($classArr[4]) . '/' . StringHelper::camel2lower(str_replace('action', '', $method->getName())) . '/';
             } else {
                 $path = '/' . StringHelper::camel2lower($classArr[2]) . '/' . StringHelper::camel2lower($classArr[4]) . '/' . StringHelper::camel2lower(str_replace('action', '', $method->getName())) . '/';

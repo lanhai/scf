@@ -3,8 +3,7 @@
 return [
     // 应用配置,在运行时赋值
     'app' => [
-        'master_host' => 'localhost',
-        'module_style' => APP_MODULE_STYLE_MICRO
+        'master_host' => 'localhost'
     ],
     // 默认主题名
     'default_theme' => 'default',
@@ -130,8 +129,8 @@ return [
         'mysql' => [
             'default' => [
                 'name' => '',
-                'master' => [],
-                'slave' => [],
+                'master' => '',
+                'slave' => '',
                 'port' => 3306,
                 'username' => '',
                 'password' => '',

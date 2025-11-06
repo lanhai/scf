@@ -148,7 +148,6 @@ class SubProcess {
                 }
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
                 if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive()) {
-                    Console::info("【Crontab】#{$managerId} 开始创建任务进程");
                     $taskList = CrontabManager::start();
                     Runtime::instance()->crontabProcessStatus(true);
                     if ($taskList) {
@@ -390,7 +389,7 @@ class SubProcess {
                     // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, &$node) {
                         $profile = App::profile();
-                        $node->role = $profile->role;
+                        $node->role = SERVER_ROLE;
                         $node->app_version = $profile->version;
                         $node->public_version = $profile->public_version ?: '--';
                         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;

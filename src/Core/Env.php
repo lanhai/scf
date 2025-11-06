@@ -16,7 +16,6 @@ class Env {
     public static function initialize(string $mode = MODE_CLI): void {
         $commandManager = Manager::instance();
         $options = $commandManager->getOpts();
-        !defined('SCF_APPS_ROOT') and define("SCF_APPS_ROOT", ($options['apps'] ?? dirname(SCF_ROOT)) . '/apps');
         !defined('OS_ENV') and define('OS_ENV', file_exists('/.dockerenv') ? 'docker' : PHP_OS);
         !defined('ENV_MODE') and define('ENV_MODE', $mode);
         if (RUNNING_INSTALL) {
@@ -122,7 +121,7 @@ class Env {
         }
         if (App::isReady()) {
             $serverConfig = Config::server();
-            define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_LARGE);
+            define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_MULTI);
         }
     }
 

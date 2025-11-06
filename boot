@@ -9,6 +9,8 @@ use function Co\run;
 version_compare(PHP_VERSION, '8.1.0', '<') and die('运行此应用需PHP8.1(含)以上版本, 当前环境版本: ' . PHP_VERSION);
 //系统路径
 const SCF_ROOT = __DIR__;
+define("SCF_APPS_ROOT", dirname(SCF_ROOT) . '/apps');
+
 //读取系统环境参数
 $envVariables = [];
 run(function () use (&$envVariables) {
@@ -107,7 +109,6 @@ function _UpdateFramework_($boot = false): string {
                     exit(2);
                 }
             } else {
-                $updated = true;
                 echo "框架源码包已更新\n";
                 flush();
                 clearstatcache();

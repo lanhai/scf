@@ -56,6 +56,7 @@ class Installer extends Struct {
     public ?string $updated;
     /**
      * @var string|null
+     * @default string:master
      */
     public ?string $role = null;
     /**

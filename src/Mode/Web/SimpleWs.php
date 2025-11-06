@@ -3,6 +3,7 @@
 namespace Scf\Mode\Web;
 
 use Scf\Core\Config;
+use Scf\Core\Env;
 use Scf\Util\Sn;
 
 /**
@@ -54,7 +55,7 @@ class SimpleWs extends Controller {
         }
         $this->appConfig = $this->clientApps[$appid];
         if ($sign != $this->_getSign($appid, $timestamp, $randStr)) {
-            if (Lifetime::isDevEnv()) {
+            if (Env::isDev()) {
                 $this->error('签名错误', 'SIGN_ERROR', [
                     'appid' => $appid,
                     'timestamp' => $timestamp,

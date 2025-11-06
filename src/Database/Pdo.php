@@ -99,6 +99,10 @@ class Pdo {
      */
     public function createDatabaseIfNotExists(string $name = 'default'): bool {
         $config = $this->_config['mysql'][$name];
+        if (empty($config['master'])) {
+            Console::error("【Database】检查数据库失败:未配置数据库连接信息");
+            return false;
+        }
         $dbName = $config['name'];
         $charset = $config['charset'] ?? 'utf8mb4';
         try {
