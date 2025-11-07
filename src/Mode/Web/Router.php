@@ -245,6 +245,7 @@ class Router {
                         $parts = array_filter($parts, fn($v) => $v !== 'Controller');
                         $route = '/' . join('/', array_map('\\Scf\\Helper\\StringHelper::camel2lower', $parts)) . '/';
                     }
+
                     // 规范化：前导/尾随/重复斜杠归一 + 去除多余空白
                     $route = preg_replace('#/{2,}#', '/', trim($route));
 //                    if ($route !== '/') {
