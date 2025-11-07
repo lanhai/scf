@@ -17,9 +17,9 @@ class App {
     protected static self $instance;
 
     public static function addService(int $workerId = 0): void {
-        \Scf\Core\App::loadModules(MODE_RPC);
-        $modules = \Scf\Core\App::getModules(MODE_RPC);
+        $modules = \Scf\Core\App::loadModules(MODE_RPC);
         if (!$modules) {
+            Console::warning("【Server】未发现RPC服务");
             return;
         }
         $serviceManager = Manager::instance();
@@ -77,7 +77,6 @@ class App {
                 if ($name == 'service') {
                     continue;
                 }
-                $moduleStyle = APP_MODULE_STYLE;
                 if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
                     $cls = \Scf\Core\App::buildControllerPath('Rpc', $name);
                 } else {

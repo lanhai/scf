@@ -10,12 +10,10 @@ use Scf\Core\Table\RouteCache;
 use Scf\Core\Table\RouteTable;
 use Scf\Core\Table\SocketRouteTable;
 use Scf\Core\Traits\CoroutineSingleton;
-use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Native\Controller as NativeController;
 use Scf\Mode\Socket\Connection;
-use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Route\AnnotationReader;
 use Scf\Mode\Web\Route\AnnotationRouteRegister;
 use Scf\Util\Dir;
@@ -35,9 +33,7 @@ class Router {
         // 允许的模块
         'modules' => [],
         // action方法前缀
-        'method_prefix' => 'action',
-        // url分区
-        'url_partition' => '{module}/{controller}/{action}'
+        'method_prefix' => 'action'
     ];
 
     /**
@@ -251,8 +247,9 @@ class Router {
                     }
                     // 规范化：前导/尾随/重复斜杠归一 + 去除多余空白
                     $route = preg_replace('#/{2,}#', '/', trim($route));
-                    $route = '/' . trim($route, '/') . '/';
-
+                    if ($route !== '/') {
+                        $route = '/' . trim($route, '/') . '/';
+                    }
                     // 去重：以规范化后的路径为键
                     if (isset($routes[$route])) {
                         Console::warning("[{$method->getName()}@{$route}]已忽略重复的路由定义：{$route}");
@@ -308,6 +305,17 @@ class Router {
         File::write(APP_TMP_PATH . '/route_document.json', JsonHelper::toJson($routeDoument));
     }
 
+    protected function init($route): void {
+        $this->_module = StringHelper::lower2camel($route['module']);
+        $this->_controller = StringHelper::lower2camel($route['controller']);
+        $action = StringHelper::lower2camel($route['action']);
+        $this->_action = str_starts_with($action, 'Action') ? str_replace('Action', '', $action) : $action;
+        $this->_partitions['module'] = $this->_module;
+        $this->_partitions['controller'] = $this->_controller;
+        $this->_partitions['action'] = $this->_action;
+        $this->_path = $route['route'];
+    }
+
     public function matchNormalRoute() {
         //匹配路由
         $routes = RouteTable::instance()->rows();
@@ -334,9 +342,17 @@ class Router {
             }
             $matched and RouteCache::instance()->set(md5($route), $matched);
         }
+        if ($matched) {
+            $this->init($matched);
+        }
         return $matched;
     }
 
+    /**
+     * 匹配注解路由
+     * @param $server
+     * @return bool
+     */
     public function matchAnnotationRoute($server): bool {
         $this->_getPath($server);
         if (!$annotationRoute = AnnotationRouteRegister::instance()->match($server['request_method'], $server['path_info'])) {
@@ -345,62 +361,18 @@ class Router {
         $this->isAnnotationRoute = true;
         $this->annotationRoute = $annotationRoute;
         $route = $annotationRoute['route'];
-        $this->_module = StringHelper::lower2camel($route['module']);
-        $this->_controller = StringHelper::lower2camel($route['controller']);
-        $this->_action = StringHelper::lower2camel($route['action']);
-        $this->_partitions['module'] = $this->_module;
-        $this->_partitions['controller'] = $this->_controller;
-        $this->_partitions['action'] = $this->_action;
+        $this->init($route);
         $this->_params = $annotationRoute['params'];
-        $this->_path = $route['route'];
         return true;
     }
 
     /**
      * 路由调度
-     * @param array $server
-     * @param array $modules
      * @return void
-     * @throws NotFoundException
      */
-    public function dispatch(array $server, array $modules): void {
-        $pathinfo = $this->_getPath($server);
-        $pathinfo = $pathinfo ? explode('/', trim($pathinfo, '/')) : [];
-        $map = [];
-        $this->_partitions = [];
-        $this->_module = APP_MODULE_STYLE == APP_MODULE_STYLE_SINGLE ? 'Controller' : StringHelper::lower2camel($pathinfo[0] ?? 'Index');
-        //检查模块是否存在
-        $module = ArrayHelper::findColumn($modules, 'name', $this->_module);
-        if (!$module) {
-            throw new NotFoundException($this->_path);
-        }
-        $urlPartition = $module['url_partition'] ?? $this->_config['url_partition'];
-        $this->_defaultController = $module['default_controller'] ?? $this->_config['default_controller'];
-        $this->_defaultAction = $module['default_action'] ?? $this->_config['default_action'];
-        $defaultPartition = [
-            'controller' => $this->_defaultController,
-            'action' => $this->_defaultAction
-        ];
-        foreach (explode('/', $urlPartition) as $i => $partition) {
-            $partition = substr($partition, 1, -1);
-            $map[$partition] = $i;
-            $this->_partitions[$partition] = isset($pathinfo[$i]) ? StringHelper::lower2camel($pathinfo[$i]) : ($defaultPartition[$partition] ?? 'Index');
-        }
-        // 通过pathinfo判断模块
-        $this->_controller = !empty($pathinfo[$map['controller']]) ? strip_tags(StringHelper::lower2camel($pathinfo[$map['controller']])) : StringHelper::lower2camel($this->_defaultController);
-        $this->_action = !empty($pathinfo[$map['action']]) ? strip_tags(StringHelper::lower2camel($pathinfo[$map['action']])) : StringHelper::lower2camel($this->_defaultAction);
-        if (count($pathinfo) <= 3) {
-            $this->_path = "/" . join('/', array_map(
-                    '\Scf\Helper\StringHelper::camel2lower',
-                    $this->_partitions
-                )) . "/";
-            //$this->_path = "/" . StringHelper::camel2lower($this->_module) . "/" . StringHelper::camel2lower($this->_controller) . "/" . StringHelper::camel2lower($this->_action) . "/";
-        } else {
-            $this->_path = "/" . join('/', array_map(
-                    '\Scf\Helper\StringHelper::camel2lower',
-                    $pathinfo
-                )) . "/";
-        }
+    public function dispatch(): void {
+        $this->_path = Request::path();
+
     }
 
     public function getDefaultController(): string {

@@ -530,7 +530,7 @@ class App {
                 if (!in_array($fileName, $allowFiles) || ($mode == MODE_CGI && in_array($fileName, ['service.php', '_service_.php']))) {
                     continue;
                 }
-                $config = require_once($file);
+                $config = require($file);
                 if (is_bool($config) || is_numeric($config)) {
                     continue;
                 }
