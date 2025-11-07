@@ -76,8 +76,8 @@ class App extends Lifetime {
         $path = $router->getRoute();
         $matched = $router->matchNormalRoute();
         if (!$matched) {
-            Response::instance()->setHeader('Error-Info', 'controller not exist:' . $path);
-            throw new NotFoundException('控制器不存在: ' . $path);
+            Response::instance()->setHeader('Error-Info', 'route not match:' . $path);
+            throw new NotFoundException('访问的页面不存在');
         }
         $ctrlPath = $router->getController() . '/' . $router->getAction();
         $router->setCtrlPath($ctrlPath);

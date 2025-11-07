@@ -510,10 +510,6 @@ class App {
         spl_autoload_register([__CLASS__, 'autoload']);
         $entryScripts = [];
         $entryScripts = Dir::scan(APP_LIB_PATH, (is_dir(APP_LIB_PATH . '/Controller') || is_dir(APP_LIB_PATH . '/Cli') || is_dir(APP_LIB_PATH . '/Crontab') || is_dir(APP_LIB_PATH . '/Rpc')) ? 3 : 2);
-//        is_dir(APP_LIB_PATH . '/Controller') and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Controller', 2)];
-//        is_dir(APP_LIB_PATH . '/Cli') and $mode == MODE_CLI and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Cli', 2)];
-//        is_dir(APP_LIB_PATH . '/Rpc') and $mode == MODE_RPC and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Rpc', 2)];
-//        is_dir(APP_LIB_PATH . '/Crontab') and $entryScripts = [...$entryScripts, ...Dir::scan(APP_LIB_PATH . '/Crontab', 2)];
         //去除重复的
         $entryScripts = array_unique($entryScripts);
         $modules = [];

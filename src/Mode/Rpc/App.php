@@ -19,7 +19,6 @@ class App {
     public static function addService(int $workerId = 0): void {
         $modules = \Scf\Core\App::loadModules(MODE_RPC);
         if (!$modules) {
-            Console::warning("【Server】未发现RPC服务");
             return;
         }
         $serviceManager = Manager::instance();

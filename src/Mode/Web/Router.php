@@ -247,9 +247,9 @@ class Router {
                     }
                     // 规范化：前导/尾随/重复斜杠归一 + 去除多余空白
                     $route = preg_replace('#/{2,}#', '/', trim($route));
-                    if ($route !== '/') {
-                        $route = '/' . trim($route, '/') . '/';
-                    }
+//                    if ($route !== '/') {
+//                        $route = '/' . trim($route, '/') . '/';
+//                    }
                     // 去重：以规范化后的路径为键
                     if (isset($routes[$route])) {
                         Console::warning("[{$method->getName()}@{$route}]已忽略重复的路由定义：{$route}");
@@ -372,7 +372,6 @@ class Router {
      */
     public function dispatch(): void {
         $this->_path = Request::path();
-
     }
 
     public function getDefaultController(): string {
