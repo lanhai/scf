@@ -3,9 +3,7 @@
 namespace Scf\Helper;
 
 use Scf\Cloud\Ali\Oss;
-use Scf\Core\Console;
 use Scf\Core\Result;
-use Scf\Util\Sn;
 use Vtiful\Kernel\Excel;
 
 class ExcelHelper {

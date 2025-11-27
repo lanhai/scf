@@ -79,6 +79,10 @@ class Request {
         return Assigner::factory($map)->setMedhod('post');
     }
 
+    public static function files(): array {
+        return static::instance()->_files();
+    }
+
     /**
      * @param array $map
      * @return Assigner
@@ -248,6 +252,11 @@ class Request {
      */
     public function _isPost(): bool {
         return strtoupper($this->server('request_method')) == 'POST';
+
+    }
+
+    public function _files(): array {
+        return $this->_FILES;
 
     }
 

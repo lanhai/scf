@@ -293,7 +293,7 @@ class SubProcess {
                                 $limitMb = $processInfo['limit_memory_mb'] ?? 1024;
                                 $pid = $processInfo['pid'];
                                 if (!Process::kill($pid, 0)) {
-                                    Console::warning("【MemoryMonitor】{$processName} PID:{$pid}进程不存在", false);
+                                    //Console::warning("【MemoryMonitor】{$processName} PID:{$pid}进程不存在", false);
                                     return;
                                 }
                                 // 根据PID查询 PSS/RSS（KB）
