@@ -187,19 +187,22 @@ class Pdo {
             $hosts = explode(',', $this->serverConfig['master']);
         }
         $host = $hosts[rand(0, count($hosts) - 1)];
-        $this->database = new DB("mysql:host={$host};port={$this->serverConfig['port']};charset={$this->serverConfig['charset']};dbname={$this->serverConfig['name']}", $this->serverConfig['username'], $this->serverConfig['password'], [\PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC], $this->actor);//, \PDO::ATTR_PERSISTENT => true, \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true
+        $this->database = new DB("mysql:host={$host};port={$this->serverConfig['port']};charset={$this->serverConfig['charset']};dbname={$this->serverConfig['name']}", $this->serverConfig['username'], $this->serverConfig['password'], [
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true     // ★ 关键配置
+        ], $this->actor);//\PDO::ATTR_PERSISTENT => true 启用持久化连接，但只适合 FPM
         $this->database->setConfig($this->serverConfig);
         $isTaskWorker = RUNNING_SERVER && Http::server()->taskworker;
-        if ($isTaskWorker) {
-            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? false;
-        }
+//        if ($isTaskWorker) {
+//            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? false;
+//        }
         if ($this->enablePool) {
-            if (!$isTaskWorker) {
-                $maxOpen = $this->serverConfig['pool']['max_open'] ?? $this->_config['pool']['max_open'];
-                $maxIdle = $this->serverConfig['pool']['max_idle'] ?? $this->_config['pool']['max_idle'];
-            } else {
-                $maxOpen = $this->serverConfig['pool']['task_worker_max_open'] ?? $this->_config['pool']['task_worker_max_open'];
-                $maxIdle = $this->serverConfig['pool']['task_worker_max_idle'] ?? $this->_config['pool']['task_worker_max_idle'];
+            $maxOpen = $this->serverConfig['pool']['max_open'] ?? $this->_config['pool']['max_open'];
+            $maxIdle = $this->serverConfig['pool']['max_idle'] ?? $this->_config['pool']['max_idle'];
+            if ($isTaskWorker) {
+                $maxOpen = $this->serverConfig['pool']['task_worker_max_open'] ?? $maxOpen;
+                $maxIdle = $this->serverConfig['pool']['task_worker_max_idle'] ?? $maxIdle;
             }
             $maxLifetime = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['max_lifetime'] : $this->_config['pool']['max_lifetime'];
             $waitTimeout = isset($this->serverConfig['pool']) ? $this->serverConfig['pool']['wait_timeout'] : $this->_config['pool']['wait_timeout'];

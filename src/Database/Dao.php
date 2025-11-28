@@ -93,6 +93,7 @@ class Dao extends Struct {
     protected bool $_arExist = false;
     protected Transaction $transaction;
     private string|null $whereSql = null;
+    protected bool $enablePool = true;
 
 
     /**
@@ -977,7 +978,7 @@ class Dao extends Struct {
     protected function slave(): DB {
         $cid = Coroutine::getCid();
         if (!isset(self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid])) {
-            self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid] = Pdo::slave($this->_dbName)->getDatabase();
+            self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid] = Pdo::slave($this->_dbName, $this->enablePool)->getDatabase();
             if ($cid > 0) {
                 Coroutine::defer(function () use ($cid) {
                     unset(self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid]);
@@ -994,7 +995,7 @@ class Dao extends Struct {
     protected function master(): DB {
         $cid = Coroutine::getCid();
         if (!isset(self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid])) {
-            self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid] = Pdo::master($this->_dbName)->getDatabase();
+            self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid] = Pdo::master($this->_dbName, $this->enablePool)->getDatabase();
             if ($cid > 0) {
                 Coroutine::defer(function () use ($cid) {
                     unset(self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid]);

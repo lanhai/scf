@@ -7,6 +7,7 @@ use JetBrains\PhpStorm\ArrayShape;
 use JetBrains\PhpStorm\Pure;
 use PDOException;
 use PDOStatement;
+use Scf\Core\Console;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Tools\Expr;
 use Scf\Database\Tools\QueryBuilder;
@@ -99,6 +100,7 @@ abstract class AConnection implements IConnection {
     protected array $config = [
         'prefix' => ''
     ];
+    protected bool $needReleaseAfterFetch = false;
 
     /**
      * AbstractConnection constructor.
@@ -198,6 +200,7 @@ abstract class AConnection implements IConnection {
         return $this->raw($sql, ...$values);
     }
 
+
     /**
      * @return IConnection
      * @throws Throwable
@@ -206,8 +209,8 @@ abstract class AConnection implements IConnection {
         if ($this->executed) {
             throw new \RuntimeException('The Connection::class cannot be executed repeatedly, please use the Database::class call');
         }
+        $this->needReleaseAfterFetch = false;
         $beginTime = microtime(true);
-
         $isBeginTransactions = false;
         $transactionsManager = null;
         $pointId = null;
@@ -293,14 +296,20 @@ abstract class AConnection implements IConnection {
 
         // 事务还是要复用 Connection 清理依然需要
         // 抛出异常时不清理，因为需要重连后重试
+        $isSelect = stripos(ltrim($this->sql), 'select') === 0;
         $this->clear();
-
         // 执行完立即回收
         // 抛出异常时不回收，重连那里还需要验证是否在事务中
         // 事务除外，事务在 commit rollback __destruct 中回收
         if ($this->driver->pool && !$this instanceof Transaction) {
-            $this->driver->__return();
-            $this->driver = new EmptyDriver();
+            if ($isSelect) {
+                // SELECT：标记，等 fetch 后再归还
+                $this->needReleaseAfterFetch = true;
+            } else {
+                // 非 SELECT：直接归还连接
+                $this->driver->__return();
+                $this->driver = new EmptyDriver();
+            }
         }
         return $this;
     }
@@ -476,7 +485,13 @@ abstract class AConnection implements IConnection {
      */
     public function queryOne(int $fetchStyle = null): object|bool|array {
         $fetchStyle = $fetchStyle ?: $this->options[\PDO::ATTR_DEFAULT_FETCH_MODE];
-        return $this->statement->fetch($fetchStyle);
+        //return $this->statement->fetch($fetchStyle);
+        // 建议这里用 fetchAll + 取第一行，更保险
+        $rows = $this->statement->fetchAll($fetchStyle);
+        $result = $rows[0] ?? false;
+
+        $this->releaseConnectionIfNeeded();
+        return $result;
     }
 
     /**
@@ -486,7 +501,18 @@ abstract class AConnection implements IConnection {
      */
     public function queryAll(int $fetchStyle = null): array {
         $fetchStyle = $fetchStyle ?: $this->options[\PDO::ATTR_DEFAULT_FETCH_MODE];
-        return $this->statement->fetchAll($fetchStyle);
+        $rows = $this->statement->fetchAll($fetchStyle);
+
+        $this->releaseConnectionIfNeeded();
+        return $rows;
+    }
+
+    protected function releaseConnectionIfNeeded(): void {
+        if ($this->needReleaseAfterFetch && $this->driver->pool && !$this instanceof Transaction) {
+            $this->driver->__return();
+            $this->driver = new EmptyDriver();
+            $this->needReleaseAfterFetch = false;
+        }
     }
 
     /**

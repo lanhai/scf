@@ -10,7 +10,6 @@ use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Pool\ConnectionPool;
 use Scf\Database\Pool\Dialer;
 use Scf\Mode\Web\Log;
-use Scf\Server\Http;
 use Swoole\Timer;
 use Throwable;
 
