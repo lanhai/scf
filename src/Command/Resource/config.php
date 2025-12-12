@@ -3,7 +3,8 @@
 return [
     // 应用配置,在运行时赋值
     'app' => [
-        'master_host' => 'localhost'
+        'master_host' => 'localhost',
+        'worker_limit_mb' => 256//单个worker内存占用限制(MB),超过设置值会重启worker进程
     ],
     // 默认主题名
     'default_theme' => 'default',
@@ -117,8 +118,8 @@ return [
             'max_open' => 32,// 最大开启连接数
             'max_idle' => 8,// 最大闲置连接数
             'task_worker_enable' => false,// 任务进程启用连接池
-            'task_worker_max_open' => 1,
-            'task_worker_max_idle' => 1,
+            'task_worker_max_open' => 8,
+            'task_worker_max_idle' => 4,
             'max_lifetime' => 3600,//连接的最长生命周期
             'wait_timeout' => 0.0,// 从池获取连接等待的时间, 0为一直等待
             'connection_auto_ping_interval' => 60,//自动ping间隔时间

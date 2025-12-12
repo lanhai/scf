@@ -48,21 +48,22 @@ class MemoryMonitor {
             $usageMb = round($usage / 1048576, 2);
             $realMb = round($real / 1048576, 2);
             $peakMb = round($peak / 1048576, 2);
-            MemoryMonitorTable::instance()->set($processName, [
+            $processInfo = MemoryMonitorTable::instance()->get($processName) ?: [
                 'process' => $processName,
-                'usage_mb' => $usageMb,
-                'real_mb' => $realMb,
-                'peak_mb' => $peakMb,
-                'pid' => posix_getpid(),
-                'time' => date('Y-m-d H:i:s'),
-                'rss_mb' => 0,
-                'pss_mb' => 0,
-                'os_actual' => 0,
                 'limit_memory_mb' => $limitMb,
                 'auto_restart' => $autoRestart ? 1 : 0,
                 'restart_ts' => 0,
                 'restart_count' => 0
-            ]);
+            ];
+            $processInfo['pid'] = posix_getpid();
+            $processInfo['usage_mb'] = $usageMb;
+            $processInfo['real_mb'] = $realMb;
+            $processInfo['peak_mb'] = $peakMb;
+            $processInfo['time'] = date('Y-m-d H:i:s');
+            $processInfo['rss_mb'] = 0;
+            $processInfo['pss_mb'] = 0;
+            $processInfo['os_actual'] = 0;
+            MemoryMonitorTable::instance()->set($processName, $processInfo);
         };
         // 启动第一次
         $run();
