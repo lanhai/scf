@@ -34,8 +34,9 @@ class Config {
                 'port' => 9580,
                 'enable_coroutine' => true,
                 'worker_num' => 8,
+                'worker_memory_limit' => 256,
                 'max_wait_time' => 60,
-                'task_worker_num' => 8,
+                'task_worker_num' => 4,
                 'max_connection' => 4096,//最大连接数
                 'max_coroutine' => 10240,//最多启动多少个携程
                 'max_concurrency' => 2048,//最高并发

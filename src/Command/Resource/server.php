@@ -4,8 +4,9 @@ return [
     'port' => 9580,
     'rpc_port' => 9680,
     'worker_num' => 8,
+    'worker_memory_limit' => 256,//单worker内存使用限制(MB),超过设置定值将重启
     'max_wait_time' => 30,
-    'task_worker_num' => 8,
+    'task_worker_num' => 4,
     'static_handler_locations' => ['/cp'],
     'enable_coroutine' => true,
     'max_connection' => 1024,//最大连接数

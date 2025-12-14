@@ -114,7 +114,7 @@ return [
     //数据库连接配置
     'database' => [
         'driver' => 'mysql',
-        'pool' => [
+        'pool' => [//对单进程(worker)生效
             'max_open' => 32,// 最大开启连接数
             'max_idle' => 8,// 最大闲置连接数
             'task_worker_enable' => false,// 任务进程启用连接池

@@ -32,7 +32,7 @@ class WorkerListener extends Listener {
         });
         Counter::instance()->set("worker:" . ($workerId + 1) . ":connection", 0);
         //监控内存使用
-        $limitMb = Config::get('app')['worker_limit_mb'] ?? 256;
+        $limitMb = Config::server()['worker_memory_limit'] ?? 256;
         MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
         //        Process::signal(SIGUSR2, function () use ($workerId) {
 //            try {
