@@ -8,8 +8,10 @@ use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
+use Scf\Mode\Web\Log;
 use Scf\Mode\Web\Router;
 use Scf\Util\MemoryMonitor;
 use Swoole\Process;
@@ -26,6 +28,31 @@ class WorkerListener extends Listener {
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
                 Process::kill($server->worker_pid, SIGKILL);
+            }
+        });
+        Counter::instance()->set("worker:" . ($workerId + 1) . ":connection", 0);
+        //监控内存使用
+        $limitMb = Config::get('app')['worker_limit_mb'] ?? 256;
+        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
+        //        Process::signal(SIGUSR2, function () use ($workerId) {
+//            try {
+//                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
+//                MemoryMonitor::stop();
+//                Timer::clearAll();
+//            } catch (Throwable $e) {
+//                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
+//            }
+//        });
+        //记录致命错误
+        register_shutdown_function(function () use ($workerId) {
+            $error = error_get_last();
+            switch ($error['type'] ?? null) {
+                case E_ERROR :
+                case E_PARSE :
+                case E_CORE_ERROR :
+                case E_COMPILE_ERROR :
+                    Log::instance()->error("Worker#" . ($workerId + 1) . " 发生致命错误" . $error['message']);
+                    break;
             }
         });
         //要使用app命名空间必须先加载模块
@@ -64,18 +91,8 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
-        //监控内存使用
-        $limitMb = Config::get('app')['worker_limit_mb'] ?? 256;
-        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
-//        Process::signal(SIGUSR2, function () use ($workerId) {
-//            try {
-//                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
-//                MemoryMonitor::stop();
-//                Timer::clearAll();
-//            } catch (Throwable $e) {
-//                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
-//            }
-//        });
+
+
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {

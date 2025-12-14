@@ -575,6 +575,7 @@ class Crontab extends Struct {
         }
         $app->run();
         unset($app);
+        MemoryMonitor::updateUsage('crontab:' . $this->name);
         return time();
     }
 

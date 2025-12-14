@@ -53,20 +53,38 @@ class MemoryMonitor {
                 'limit_memory_mb' => $limitMb,
                 'auto_restart' => $autoRestart ? 1 : 0,
                 'restart_ts' => 0,
-                'restart_count' => 0
+                'restart_count' => 0,
             ];
             $processInfo['pid'] = posix_getpid();
             $processInfo['usage_mb'] = $usageMb;
             $processInfo['real_mb'] = $realMb;
             $processInfo['peak_mb'] = $peakMb;
-            $processInfo['time'] = date('Y-m-d H:i:s');
             $processInfo['rss_mb'] = 0;
             $processInfo['pss_mb'] = 0;
             $processInfo['os_actual'] = 0;
+            $processInfo['usage_updated'] = time();
+            $processInfo['updated'] = time();
             MemoryMonitorTable::instance()->set($processName, $processInfo);
         };
         // 启动第一次
         $run();
+    }
+
+    public static function updateUsage($processName): void {
+        $usage = memory_get_usage(true);
+        $real = memory_get_usage();
+        $peak = memory_get_peak_usage(true);
+        $usageMb = round($usage / 1048576, 2);
+        $realMb = round($real / 1048576, 2);
+        $peakMb = round($peak / 1048576, 2);
+        $processInfo = MemoryMonitorTable::instance()->get($processName);
+        if ($processInfo) {
+            $processInfo['usage_mb'] = $usageMb;
+            $processInfo['real_mb'] = $realMb;
+            $processInfo['peak_mb'] = $peakMb;
+            $processInfo['usage_updated'] = time();
+            MemoryMonitorTable::instance()->set($processName, $processInfo);
+        }
     }
 
     /**
@@ -128,7 +146,6 @@ class MemoryMonitor {
                     if ($osActualMb !== null) {
                         $osActualTotal += $osActualMb;
                     }
-                    $time = date('H:i:s', strtotime($data['time'])) ?? date('H:i:s');
                     $status = Color::green('正常');
                     $online++;
                     if (str_starts_with($process, 'worker:')) {
@@ -139,14 +156,14 @@ class MemoryMonitor {
                     $rows[] = [
                         'name' => $process,
                         'pid' => $pid,
-                        'time' => strtotime($data['time']),
                         'usage' => number_format($usage, 2) . ' MB',
                         'real' => number_format($real, 2) . ' MB',
                         'peak' => number_format($peak, 2) . ' MB',
                         'os_actual' => $osActualMb === null ? '-' : (number_format($osActualMb, 2) . ' MB'),
                         'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
                         'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
-                        'updated' => $time,
+                        'updated' => $data['updated'],
+                        'usage_updated' => $data['usage_updated'],
                         'status' => $status,
                         'connection' => $connection,
                         'os_actual_num' => $osActualMb ?? null,

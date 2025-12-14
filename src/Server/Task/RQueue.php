@@ -9,6 +9,7 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Table\Counter;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
 use Scf\Service\Enum\QueueStatus;
@@ -102,6 +103,12 @@ class RQueue {
                         }
                     });
                     Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
+                }
+                $latestUsageUpdated = Runtime::instance()->get("redis:queue.memory.usage.updated") ?: 0;
+                if (time() - $latestUsageUpdated >= 5) {
+                    $processName = "redis:queue";
+                    MemoryMonitor::updateUsage($processName);
+                    Runtime::instance()->set("redis:queue.memory.usage.updated", time());
                 }
                 $this->loop($mc);
             }

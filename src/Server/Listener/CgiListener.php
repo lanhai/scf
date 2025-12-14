@@ -3,7 +3,6 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
-use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
@@ -20,11 +19,10 @@ use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Http as Server;
-use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
+use Scf\Util\MemoryMonitor;
 use Scf\Util\Sn;
-use Scf\Util\Time;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Timer;
@@ -39,19 +37,6 @@ class CgiListener extends Listener {
      * @throws Exception
      */
     public function onRequest(\Swoole\Http\Request $request, \Swoole\Http\Response $response): void {
-        register_shutdown_function(function () use ($response) {
-            $error = error_get_last();
-            switch ($error['type'] ?? null) {
-                case E_ERROR :
-                case E_PARSE :
-                case E_CORE_ERROR :
-                case E_COMPILE_ERROR :
-                    Log::instance()->error($error['message']);
-                    $response->status(500);
-                    $response->end($error['message']);
-                    break;
-            }
-        });
         // 设置CORS响应头
         if (defined('SERVER_ALLOW_CROSS_ORIGIN') && SERVER_ALLOW_CROSS_ORIGIN) {
             $response->header('Access-Control-Allow-Origin', '*'); // 允许所有源
@@ -84,11 +69,7 @@ class CgiListener extends Listener {
         }
         Response::instance()->register($response);
         Request::instance()->register($request);
-        //内存使用
         $workerId = Server::server()->worker_id + 1;
-        $key = 'WORKER_MEMORY_USAGE:' . $workerId + 1;
-        //$lastUsage = Runtime::instance()->get($key) ?: 0;
-        Counter::instance()->incr("worker:" . $workerId . ":connection");
         //等待响应
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         //并发请求
@@ -99,12 +80,12 @@ class CgiListener extends Listener {
                 Counter::instance()->delete($currentRequestKey);
             });
         }
-
         if (!$this->dashboradTakeover($request, $response)) {
             //今日请求
             $requestTodayCountKey = Key::COUNTER_REQUEST . Date::today();
             Counter::instance()->incr($requestTodayCountKey);
             if (!Runtime::instance()->serverIsReady()) {
+                Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
                 $response->header("Content-Type", "application/json;charset=utf-8");
                 $response->status(503);
                 $response->end(JsonHelper::toJson([
@@ -112,7 +93,7 @@ class CgiListener extends Listener {
                     'message' => "服务暂不可用,请稍后重试",
                     'data' => ""
                 ]));
-                return;
+                goto Done;
             }
             $logger = Log::instance();
             $app = App::instance();
@@ -169,14 +150,13 @@ class CgiListener extends Listener {
         }
         Done:
         Event::defer(function () use ($workerId, $request) {
-            Counter::instance()->decr("worker:" . $workerId . ":connection");
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
-//            $usage = memory_get_usage();
-//            $usageMb = round($usage / 1048576, 2);
-//            if ($usageMb - $lastUsage >= 2) {
-//                \Scf\Core\Log::instance()->setModule("server")->info("{$key} [http:{$request->server['path_info']}]当前内存使用：{$usageMb}MB,较上次增长：" . round($usageMb - $lastUsage, 2) . "MB", false);
-//            }
-//            Runtime::instance()->set($key, $usageMb);
+            $latestUsageUpdated = Runtime::instance()->get("worker.memory.usage.updated:{$workerId}") ?: 0;
+            if (time() - $latestUsageUpdated >= 5) {
+                $processName = "worker:{$workerId}";
+                MemoryMonitor::updateUsage($processName);
+                Runtime::instance()->set("worker.memory.usage.updated:{$workerId}", time());
+            }
         });
     }
 

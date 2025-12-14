@@ -256,6 +256,7 @@ class SubProcess {
                                 //break 2;
                             }
                         }
+                        MemoryMonitor::updateUsage('ConsolePush');
                     }
                 }
             });
@@ -305,7 +306,7 @@ class SubProcess {
                                 $processInfo['rss_mb'] = $rss;
                                 $processInfo['pss_mb'] = $pss;
                                 $processInfo['os_actual'] = $osActualMb;
-                                $processInfo['time'] = date('Y-m-d H:i:s');
+                                $processInfo['updated'] = time();
                                 //更新占用
                                 if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
                                     // 解析 workerId
@@ -342,6 +343,7 @@ class SubProcess {
                     } else {
                         Console::warning("【MemoryMonitor】无进程", false);
                     }
+                    MemoryMonitor::updateUsage('MemoryMonitor');
                     // 3) 统计完成后再安排下一轮，避免 tick 重叠
                     Timer::after(5000, $schedule);
                 };
@@ -418,6 +420,7 @@ class SubProcess {
                                 'status' => $node->asArray()
                             ]]));
                         }
+                        MemoryMonitor::updateUsage('Heatbeat');
                     });
                     // 读循环：直到断开
                     while (true) {
@@ -534,6 +537,7 @@ class SubProcess {
                         }
                     }
                     $logger->backup();
+                    MemoryMonitor::start('LogBackup');
                 });
             });
         });
@@ -611,6 +615,7 @@ class SubProcess {
                         Console::warning('-------------------------------------------');
                         Http::instance()->reload();
                     }
+                    MemoryMonitor::updateUsage('FileWatcher');
                     sleep(3);
                 }
             });
