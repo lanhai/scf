@@ -314,27 +314,27 @@ class SubProcess {
                                 $processInfo['os_actual'] = $osActualMb;
                                 $processInfo['updated'] = time();
                                 //重启占用超过阈值的worker
-//                                $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
-//                                if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
-//                                    // 解析 workerId
-//                                    $workerId = null;
-//                                    if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
-//                                        $workerId = (int)$mWid[1];
-//                                    }
-//                                    if ($workerId !== null) {
-//                                        // 节流：120 秒内只触发一次，避免抖动
-//                                        if (time() - $processInfo['restart_ts'] >= 120) {
-//                                            Log::instance()->setModule('system')->info("{$processName}[PID:{$processInfo['pid']}]内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
-//                                            Process::kill($processInfo['pid'], SIGTERM);
-//                                            $processInfo['restart_ts'] = time();
-//                                            $processInfo['restart_count']++;
-////                                            $this->server->stop($workerId - 1);
-////                                            if ($processInfo['restart_count'] >= 3) {
-////                                                Process::kill($processInfo['pid'], SIGTERM);
-////                                            }
-//                                        }
-//                                    }
-//                                }
+                                $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
+                                if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
+                                    // 解析 workerId
+                                    $workerId = null;
+                                    if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
+                                        $workerId = (int)$mWid[1];
+                                    }
+                                    if ($workerId !== null) {
+                                        // 节流：120 秒内只触发一次，避免抖动
+                                        if (time() - $processInfo['restart_ts'] >= 120) {
+                                            Log::instance()->setModule('system')->info("{$processName}[PID:{$processInfo['pid']}]内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
+                                            Process::kill($processInfo['pid'], SIGTERM);
+                                            $processInfo['restart_ts'] = time();
+                                            $processInfo['restart_count']++;
+//                                            $this->server->stop($workerId - 1);
+//                                            if ($processInfo['restart_count'] >= 3) {
+//                                                Process::kill($processInfo['pid'], SIGTERM);
+//                                            }
+                                        }
+                                    }
+                                }
                                 //更新占用
                                 $curr = MemoryMonitorTable::instance()->get($processName);
                                 if ($curr['pid'] !== $processInfo['pid']) {
