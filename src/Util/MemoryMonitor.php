@@ -88,6 +88,90 @@ class MemoryMonitor {
     }
 
     /**
+     * 获取进程内存占用（PSS/RSS）
+     * 返回单位：KB；若不可得则为 null
+     */
+    public static function getPssRssByPid(int $pid): array {
+        $rssKb = null;
+        $pssKb = null;
+        // 优先 Linux /proc 读取（容器&宿主机通用）
+        $smapsRollup = "/proc/{$pid}/smaps_rollup";
+        $smaps = "/proc/{$pid}/smaps";
+        $status = "/proc/{$pid}/status";
+        if (is_readable($smapsRollup)) {
+            [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
+            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+        }
+        if (is_readable($smaps)) {
+            [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
+            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+        }
+        // 尝试从 /proc/<pid>/status 读取 RSS（VmRSS）
+        if (is_readable($status)) {
+            $content = @file($status) ?: [];
+            foreach ($content as $line) {
+                if (str_starts_with($line, 'VmRSS:')) {
+                    if (preg_match('/(\d+)/', $line, $m)) {
+                        $rssKb = (int)$m[1];
+                    }
+                    break;
+                }
+            }
+        }
+        // 非 Linux（如 macOS）或受限环境：使用命令行兜底
+        if ($rssKb === null) {
+            $psOut = @shell_exec("ps -o rss= -p " . (int)$pid);
+            if ($psOut !== null) {
+                $rssKb = (int)trim($psOut) ?: null;
+            }
+        }
+        // macOS 近似 PSS：使用 vmmap -summary 的 Physical footprint
+        if ($pssKb === null && PHP_OS_FAMILY === 'Darwin') {
+            $vmmap = @shell_exec("vmmap " . (int)$pid . " -summary 2>/dev/null");
+            if ($vmmap) {
+                // 兼容不同本地化：匹配 Physical footprint / PhysFootprint
+                if (preg_match('/(Physical footprint|PhysFootprint):\s*([0-9\.]+)\s*(KB|MB|GB)/i', $vmmap, $m)) {
+                    $val = (float)$m[2];
+                    $unit = strtoupper($m[3]);
+                    $kb = $val * ($unit === 'GB' ? 1048576 : ($unit === 'MB' ? 1024 : 1));
+                    $pssKb = (int)round($kb);
+                }
+            }
+        }
+        return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+    }
+
+    /**
+     * 解析 smaps/smaps_rollup：汇总 Pss/Rss
+     * 返回 [pssKb, rssKb]
+     */
+    private static function parseSmapsLike(string $file): array {
+        $pss = 0;
+        $rss = 0;
+        $hasPss = false;
+        $hasRss = false;
+        // 使用 @file 读取，避免在进程退出时 fgets 报错
+        $lines = @file($file);
+        if ($lines === false) {
+            return [null, null];
+        }
+        foreach ($lines as $line) {
+            if (strncmp($line, 'Pss:', 4) === 0) {
+                if (preg_match('/(\d+)/', $line, $m)) {
+                    $pss += (int)$m[1];
+                    $hasPss = true;
+                }
+            } elseif (strncmp($line, 'Rss:', 4) === 0) {
+                if (preg_match('/(\d+)/', $line, $m)) {
+                    $rss += (int)$m[1];
+                    $hasRss = true;
+                }
+            }
+        }
+        return [$hasPss ? $pss : null, $hasRss ? $rss : null];
+    }
+
+    /**
      * 占用统计
      * @param $filter
      * @return array

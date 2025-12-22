@@ -64,10 +64,10 @@ class App {
         $entryScripts = [];
         if ($moduleStyle == APP_MODULE_STYLE_SINGLE) {
             $serviceDir = \Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', 'Rpc');
-            is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
         } else {
-            $entryScripts = Dir::scan(\Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', $service, 'Service'), 1);
+            $serviceDir = \Scf\Core\App::buildPath(\Scf\Core\App::src(), 'lib', $service, 'Service');
         }
+        is_dir($serviceDir) and $entryScripts = Dir::scan($serviceDir, 1);
         $modules = [];
         if ($entryScripts) {
             foreach ($entryScripts as $file) {
