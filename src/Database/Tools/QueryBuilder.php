@@ -232,7 +232,17 @@ trait QueryBuilder {
         if ($index == 'SELECT') {
             if ($this->select) {
                 foreach ($this->select as &$k) {
-                    !str_starts_with($k, '`') and $k = "`{$k}`";
+                    //修改成判断如果是 MIN或者MAX函数,则替换成 $k as 函数里的字段
+                    if (str_starts_with($k, 'MIN') || str_starts_with($k, 'MAX')) {
+                        // 提取函数里的字段名
+                        preg_match('/\((.*?)\)/', $k, $matches);
+                        if (isset($matches[1])) {
+                            $field = trim($matches[1], '`');
+                            $k = "{$k} AS {$field}";
+                        }
+                    } else {
+                        !str_starts_with($k, '`') and $k = "`{$k}`";
+                    }
                 }
                 $select = implode(', ', $this->select);
                 $sqls[] = "SELECT {$select}";

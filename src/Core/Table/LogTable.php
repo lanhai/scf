@@ -11,7 +11,7 @@ class LogTable extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 256,
+        'size' => 1024,
         'colums' => [
             'type' => ['type' => Table::TYPE_STRING, 'size' => 32],
             'log' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 300]

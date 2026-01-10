@@ -8,6 +8,7 @@ use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Key;
+use Scf\Core\Log;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Traits\Singleton;
@@ -27,13 +28,24 @@ class RQueue {
 
     protected int $managerId = 0;
 
-    public static function startProcess(): int {
+    public static function startProcess(): void {
         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
         if (!App::isReady()) {
-            return $managerId;
+            sleep(1);
+            return;
         }
         $process = new Process(function () use ($managerId) {
             App::mount();
+            register_shutdown_function(function () use ($managerId) {
+                $error = error_get_last();
+                if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE])) {
+                    Console::error("【RedisQueue】#{$managerId} 致命错误: {$error['message']} ({$error['file']}:{$error['line']})");
+                    // 确保所有定时器停止
+                    Timer::clearAll();
+                    // 主动退出子进程，让外部管理进程重新拉起
+                    Process::kill(posix_getpid(), SIGTERM);
+                }
+            });
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
                 Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
@@ -48,8 +60,8 @@ class RQueue {
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
         Process::wait();
         MemoryMonitor::stop();
-        return $managerId;
     }
+
     public static function startByWorker(): void {
         $pool = Redis::pool();
         if ($pool instanceof NullPool) {
@@ -102,7 +114,7 @@ class RQueue {
                             $successed++;
                         }
                     });
-                    Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行成功:' . $successed);
+                    Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行完成:' . $successed);
                 }
                 $latestUsageUpdated = Runtime::instance()->get("redis:queue.memory.usage.updated") ?: 0;
                 if (time() - $latestUsageUpdated >= 5) {
@@ -122,7 +134,11 @@ class RQueue {
     public function pop(): bool {
         if ($queue = Redis::pool()->rPop(QueueStatus::IN->key())) {
             $queue = QueueStruct::factory($queue);
-            return call_user_func('\\' . $queue->handler . '::start', $queue);
+            try {
+                return call_user_func('\\' . $queue->handler . '::start', $queue);
+            } catch (Throwable $e) {
+                Log::instance()->setModule('RQueue')->error($e->getMessage());
+            }
         }
         return false;
     }

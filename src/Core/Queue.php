@@ -2,7 +2,6 @@
 
 namespace Scf\Core;
 
-use JetBrains\PhpStorm\Pure;
 use Scf\Cache\Redis;
 use Scf\Helper\JsonHelper;
 use Scf\Service\Enum\QueueStatus;
@@ -11,16 +10,17 @@ use Scf\Util\Date;
 use Scf\Util\Sn;
 use Scf\Util\Time;
 use Swoole\Timer;
+use Throwable;
 
 abstract class Queue {
 
     protected QueueStruct $queue;
+    protected int $queryExpired = 0;
     protected mixed $data;
 
     /**
      * @param QueueStruct $queue
      */
-    #[Pure]
     public function __construct(QueueStruct $queue) {
         $this->queue = $queue;
         $this->queue->start = Time::millisecond();
@@ -34,7 +34,17 @@ abstract class Queue {
      */
     public static function start(QueueStruct $queue): bool {
         $handler = new $queue->handler($queue);
-        return $handler->end($handler->run());
+        try {
+            $result = $handler->run();
+        } catch (Throwable $e) {
+            Log::instance()->setModule('RQueue')->error($e->getMessage());
+            $result = new Result([
+                'errCode' => 'TASK_EXECUTION_FAILED',
+                'message' => '系统繁忙,请稍后重试',
+                'data' => $queue->asArray()
+            ]);
+        }
+        return $handler->end($result);
     }
 
     /**
@@ -67,11 +77,20 @@ abstract class Queue {
                     }
                 });
                 return (bool)$timerId;
+            } else {
+                $this->queue->finished = time();
             }
         } else {
             $this->queue->remark = 'SUCCESS';
             $this->queue->finished = time();
             $this->queue->status = QueueStatus::FINISHED->get();
+        }
+        if ($this->queryExpired) {
+            Redis::pool()->set(
+                'queue:status:' . $this->queue->id,
+                $this->queue->asArray(),
+                $this->queryExpired
+            );
         }
         return (bool)Redis::pool()->lPush(QueueStatus::matchKey($this->queue->status) . '_' . Date::today('Y-m-d'), $this->queue->toArray());
     }
@@ -80,16 +99,28 @@ abstract class Queue {
      * @return bool|int
      */
     protected function reAdd(): bool|int {
+        if ($this->queryExpired) {
+            Redis::pool()->set(
+                'queue:status:' . $this->queue->id,
+                $this->queue->asArray(),
+                $this->queryExpired
+            );
+        }
         return Redis::pool()->lPush(QueueStatus::IN->key(), $this->queue->toArray());
+    }
+
+    public static function query(string $taskId): ?QueueStruct {
+        $data = Redis::pool()->get('queue:status:' . $taskId);
+        return $data ? QueueStruct::factory($data) : null;
     }
 
     /**
      * @param $data
      * @param int $retry
      * @param int $tryLimit
-     * @return int|bool
+     * @return array|bool
      */
-    public static function add($data, int $retry = STATUS_ON, int $tryLimit = 3): int|bool {
+    public static function add($data, int $retry = STATUS_ON, int $tryLimit = 3): array|bool {
         $queue = QueueStruct::factory();
         $queue->id = Sn::create_uuid();
         $queue->handler = static::class;
@@ -101,8 +132,14 @@ abstract class Queue {
         $queue->updated = 0;
         $queue->finished = 0;
         $queue->status = QueueStatus::IN->get();
-        return Redis::pool()->lPush(QueueStatus::IN->key(), $queue->toArray());
+        $queue->end = 0;
+        $count = Redis::pool()->lPush(QueueStatus::IN->key(), $queue->toArray());
+        if ($count === false) {
+            return false;
+        }
+        return [
+            'id' => $queue->id,
+            'count' => $count
+        ];
     }
-
-
 }

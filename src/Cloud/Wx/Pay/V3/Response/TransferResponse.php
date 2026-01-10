@@ -6,31 +6,31 @@ namespace Scf\Cloud\Wx\Pay\V3\Response;
 class TransferResponse extends Base {
 
     /**
-     * @var string
+     * @var ?string
      * @required true|商户单号为空
      * @rule string,max:32|商户单号长度大于32位
      */
-    public string $out_bill_no;
+    public ?string $out_bill_no;
 
     /**
-     * @var string
+     * @var ?string
      * @required true|微信单号为空
      * @rule string,max:64|微信单号长度大于64位
      */
-    public string $transfer_bill_no;
+    public ?string $transfer_bill_no;
     /**
-     * @var string
+     * @var ?string
      * @required true|转账状态为空
      * @rule string,max:32|转账状态长度大于32位
      */
-    public string $state;
+    public ?string $state;
 
     /**
-     * @var string
+     * @var ?string
      * @required true|转账时间为空
      * @rule string,max:32|转账时间长度大于32位
      */
-    public string $create_time;
+    public ?string $create_time;
 
     /**
      * @var ?string

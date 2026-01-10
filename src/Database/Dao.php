@@ -85,6 +85,8 @@ class Dao extends Struct {
      * @var string|array|null
      */
     protected string|array|null $_group = null;
+    protected string $_groupAggregateFunction = 'min';
+    protected ?string $_groupAggregateField = null;
     protected string $_customPrimaryKey = '';
     protected null|string|int $_primaryVal = null;
 
@@ -94,7 +96,6 @@ class Dao extends Struct {
     protected Transaction $transaction;
     private string|null $whereSql = null;
     protected bool $enablePool = true;
-
 
     /**
      * @param mixed ...$fields
@@ -151,13 +152,71 @@ class Dao extends Struct {
     }
 
     /**
+     * 获取第一条数据
+     * @param bool $format
+     * @return array|null
+     */
+    public function first(bool $format = true): ?array {
+        if (!is_null($this->_primaryVal)) {
+            $this->_where = WhereBuilder::create([$this->getPrimaryKey() => $this->_primaryVal]);
+        }
+        $connection = $this->connection();
+        try {
+            if ($result = $connection->first()) {
+                if ($format) {
+                    $result = $this->format($result);
+                }
+                return $result;
+            }
+        } catch (PDOException $exception) {
+            $this->addError($this->_table . '_AR', $exception->getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * @return NullAR|static
+     */
+    public function ar(): static|NullAR {
+        $primaryVal = $this->_primaryVal ?: $this->queryPrimaryVal();
+        if (is_null($primaryVal)) {
+            return new NullAR(static::class, $this->whereSql);
+        }
+        //获取缓存数据
+        if (!$result = Cache::instance()->get($this->getArCacheKey($primaryVal))) {
+            try {
+                if (!$result = $this->first()) {
+                    return new NullAR(static::class, $this->whereSql);
+                }
+                Cache::instance()->set($this->getArCacheKey($primaryVal), $result, $this->cacheLifeTime);
+            } catch (PDOException $exception) {
+                $this->addError($this->_table . '_AR', $exception->getMessage());
+                Log::instance()->error($exception->getMessage());
+                return new NullAR(static::class, $this->whereSql);
+            }
+        }
+        $this->_arExist = true;
+        $this->install($result);
+        $this->snapshot = $this->toArray();
+        return $this;
+    }
+
+    /**
      * 获取所有数据
      * @param bool $format
      * @return array
      */
     public function all(bool $format = true): array {
-        $connection = $this->connection();
+        $connection = $this->connection(resetParams: is_null($this->_group));
         $list = $connection->get();
+        if (!is_null($this->_group)) {
+            $this->_group = null;
+            $indexes = [];
+            foreach ($list as $item) {
+                $indexes[] = $item[$this->_groupAggregateField];
+            }
+            return $this->where([$this->_groupAggregateField => $indexes])->all($format);
+        }
         if ($list && $format) {
             foreach ($list as &$item) {
                 $item = $this->format($item);
@@ -253,56 +312,6 @@ class Dao extends Struct {
     }
 
     /**
-     * 获取第一条数据
-     * @param bool $format
-     * @return array|null
-     */
-    public function first(bool $format = true): ?array {
-        if (!is_null($this->_primaryVal)) {
-            $this->_where = WhereBuilder::create([$this->getPrimaryKey() => $this->_primaryVal]);
-        }
-        $connection = $this->connection();
-        try {
-            if ($result = $connection->first()) {
-                if ($format) {
-                    $result = $this->format($result);
-                }
-                return $result;
-            }
-        } catch (PDOException $exception) {
-            $this->addError($this->_table . '_AR', $exception->getMessage());
-        }
-        return null;
-    }
-
-    /**
-     * @return NullAR|static
-     */
-    public function ar(): static|NullAR {
-        $primaryVal = $this->_primaryVal ?: $this->queryPrimaryVal();
-        if (is_null($primaryVal)) {
-            return new NullAR(static::class, $this->whereSql);
-        }
-        //获取缓存数据
-        if (!$result = Cache::instance()->get($this->getArCacheKey($primaryVal))) {
-            try {
-                if (!$result = $this->first()) {
-                    return new NullAR(static::class, $this->whereSql);
-                }
-                Cache::instance()->set($this->getArCacheKey($primaryVal), $result, $this->cacheLifeTime);
-            } catch (PDOException $exception) {
-                $this->addError($this->_table . '_AR', $exception->getMessage());
-                Log::instance()->error($exception->getMessage());
-                return new NullAR(static::class, $this->whereSql);
-            }
-        }
-        $this->_arExist = true;
-        $this->install($result);
-        $this->snapshot = $this->toArray();
-        return $this;
-    }
-
-    /**
      * 获取列表
      * @param bool $format
      * @param int $total
@@ -335,10 +344,14 @@ class Dao extends Struct {
      * @param int $pn
      * @param int $total
      * @param bool $format
+     * @param bool $forUpdate
      * @return array
      */
-    public function top(int $size = 10, int $pn = 1, int $total = 0, bool $format = true): array {
-        $connection = $this->connection();
+    public function top(int $size = 10, int $pn = 1, int $total = 0, bool $format = true, bool $forUpdate = false): array {
+        $connection = $this->connection(resetParams: is_null($this->_group));
+        if ($forUpdate && is_null($this->_group)) {
+            $connection->lockForUpdate();
+        }
         if ($total) {
             $totalPage = ceil($total / $size);
             $pn = min($pn, $totalPage) ?: 1;
@@ -351,6 +364,19 @@ class Dao extends Struct {
         $list = $connection->get();
         $primaryKeys = [];
         if ($list) {
+            if (!is_null($this->_group)) {
+                $this->_group = null;
+                $indexes = [];
+                foreach ($list as $item) {
+                    $indexes[] = $item[$this->_groupAggregateField];
+                }
+                $where = $this->_where;
+                if (!$where) {
+                    $where = WhereBuilder::create();
+                }
+                $where->and([$this->_groupAggregateField => $indexes]);
+                return $this->where($where)->top($size, $pn, $total, $format, $forUpdate);
+            }
             foreach ($list as &$item) {
                 $primaryKeys[] = $item[$this->_primaryKey] ?? 0;
                 if ($format) {
@@ -388,25 +414,48 @@ class Dao extends Struct {
 
     /**
      * 获取主键合集
+     * @param int $size
      * @return array
      */
-    public function primaryKeys(): array {
-        return $this->pluck($this->_primaryKey);
+    public function primaryKeys(int $size = 0): array {
+        return $this->pluck($this->_primaryKey, $size);
     }
 
     /**
      * 取一列的值
      * @param string|null $key
+     * @param int $size
+     * @param bool $forUpdate
      * @return array
      */
-    public function pluck(string $key = null): array {
+    public function pluck(string $key = null, int $size = 0, bool $forUpdate = false): array {
         $connection = $this->connection();
+        if ($forUpdate && is_null($this->_group)) {
+            $connection->lockForUpdate();
+        }
+        if ($size) {
+            $connection->offset(0);
+            $connection->limit($size);
+        }
         $key = !is_null($key) ? $key : $this->_primaryKey;
         $connection->select($key);
         $column = [];
         try {
-            if ($result = $connection->get()) {
-                foreach ($result as $item) {
+            if ($list = $connection->get()) {
+                if (!is_null($this->_group)) {
+                    $ids = [];
+                    $this->_group = null;
+                    foreach ($list as $item) {
+                        $ids[] = $item[$this->_groupAggregateField];
+                    }
+                    $where = $this->_where;
+                    if (!$where) {
+                        $where = WhereBuilder::create();
+                    }
+                    $where->and([$this->_groupAggregateField => $ids]);
+                    return $this->where($where)->pluck($key, $size, $forUpdate);
+                }
+                foreach ($list as $item) {
                     $column[] = $item[$key];
                 }
             }
@@ -444,13 +493,17 @@ class Dao extends Struct {
     /**
      * 批量更新
      * @param $datas
+     * @param int $size
      * @return int
      */
-    public function update($datas): int {
+    public function update($datas, int $size = 0): int {
         if (is_null($this->_where) && !is_null($this->_primaryVal)) {
             $this->where([$this->_primaryKey => $this->_primaryVal]);
         }
         $connection = $this->connection(DBS_MASTER, false);
+        if ($size) {
+            $connection->limit($size);
+        }
         $row = $connection->updates($datas)->rowCount();
         if ($row) {
             $priIds = $this->primaryKeys();
@@ -463,9 +516,10 @@ class Dao extends Struct {
 
     /**
      * 删除数据
+     * @param int $size
      * @return int
      */
-    public function delete(): int {
+    public function delete(int $size = 0): int {
         $uniqueKey = $this->getPrimaryKey();
         $uniqueVal = $this->getPrimaryVal();
         if (!is_null($uniqueVal)) {
@@ -477,8 +531,12 @@ class Dao extends Struct {
                 if (!empty($this->$uniqueKey)) unset($this->$uniqueKey);
             }
         } else {
-            $row = $this->connection(DBS_MASTER, false)->delete()->rowCount();
-            $priIds = $this->primaryKeys();
+            $connection = $this->transaction ?? $this->connection(DBS_MASTER, false);
+            if ($size) {
+                $connection->limit($size);
+            }
+            $priIds = $this->primaryKeys($size);
+            $row = $connection->delete()->rowCount();
             if ($row && $priIds) {
                 $this->deleteArCache($priIds);
             }
@@ -918,10 +976,14 @@ class Dao extends Struct {
 
     /**
      * @param $group
+     * @param null $field
+     * @param string $af
      * @return $this
      */
-    public function group($group): static {
+    public function group($group, $field = null, string $af = 'MIN'): static {
         $this->_group = $group;
+        $this->_groupAggregateFunction = $af;
+        $this->_groupAggregateField = $field ?: $this->_primaryKey;
         return $this;
     }
 
@@ -962,8 +1024,8 @@ class Dao extends Struct {
         if (!is_null($this->_group)) {
             $group = is_array($this->_group) ? $this->_group : [$this->_group];
             $connection->group(...$group);
-        }
-        if (!is_null($this->_fields)) {
+            $connection->select(strtoupper($this->_groupAggregateFunction) == 'MIN' ? 'MIN(' . ($this->_groupAggregateField ?: $this->_primaryKey) . ')' : 'MAX(' . ($this->_groupAggregateField ?: $this->_primaryKey) . ')');
+        } elseif (!is_null($this->_fields)) {
             $connection->select(...$this->_fields);
         }
         $this->whereSql = $this->getWhereSql();
@@ -1066,19 +1128,23 @@ class Dao extends Struct {
         }
         $data = is_null($data) ? $this->toArray(true) : $data;
         foreach ($this->_validate as $f => $v) {
-            if (isset($data[$f]) && isset($v['format'])) {
-                $dataType = $v['format'][0]['type'];
-                if ($dataType == 'json') {
-                    if (is_string($data[$f])) {
+            if (isset($data[$f])) {
+                if (isset($v['format'])) {
+                    $dataType = $v['format'][0]['type'];
+                    if ($dataType == 'json') {
+                        if (is_string($data[$f])) {
+                            $data[$f] = htmlspecialchars_decode($data[$f]);
+                        }
+                        if (JsonHelper::is($data[$f])) {
+                            $data[$f] = ArrayHelper::integer(JsonHelper::recover($data[$f]));
+                        } else {
+                            $data[$f] = JsonHelper::toJson(ArrayHelper::integer($data[$f]));
+                        }
+                    } elseif ($dataType == 'code' || $dataType == 'url') {
                         $data[$f] = htmlspecialchars_decode($data[$f]);
                     }
-                    if (JsonHelper::is($data[$f])) {
-                        $data[$f] = ArrayHelper::integer(JsonHelper::recover($data[$f]));
-                    } else {
-                        $data[$f] = JsonHelper::toJson(ArrayHelper::integer($data[$f]));
-                    }
-                } elseif ($dataType == 'code' || $dataType == 'url') {
-                    $data[$f] = htmlspecialchars_decode($data[$f]);
+                } elseif (is_numeric($data[$f]) && !is_int($data[$f]) && !is_float($data[$f]) && strlen($data[$f]) < 10) {
+                    $data[$f] = (float)$data[$f];
                 }
             }
         }
@@ -1165,5 +1231,7 @@ class Dao extends Struct {
         $this->_fields = null;
         $this->_where = null;
         $this->_group = null;
+        $this->_groupAggregateField = null;
+        $this->_groupAggregateFunction = 'min';
     }
 }

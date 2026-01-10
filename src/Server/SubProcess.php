@@ -524,14 +524,13 @@ class SubProcess {
             }
             run(function () use ($logger, $process, $logExpireDays) {
                 $sock = $process->exportSocket();
-                Timer::tick(5000, function ($tid) use ($logger, $sock, $process, $logExpireDays) {
+                while (true) {
                     $cmd = $sock->recv(timeout: 0.1);
                     if ($cmd == 'shutdown') {
                         MemoryMonitor::stop();
                         Console::error("【LogBackup】管理进程退出,结束备份");
-                        Timer::clear($tid);
                         Process::kill($process->pid, SIGTERM);
-                        return;
+                        break;
                     }
                     if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
                         $clearCount = $logger->clear($logExpireDays);
@@ -545,8 +544,9 @@ class SubProcess {
                         }
                     }
                     $logger->backup();
-                    MemoryMonitor::start('LogBackup');
-                });
+                    MemoryMonitor::updateUsage('LogBackup');
+                    Coroutine::sleep(5);
+                }
             });
         });
     }
@@ -624,7 +624,7 @@ class SubProcess {
                         Http::instance()->reload();
                     }
                     MemoryMonitor::updateUsage('FileWatcher');
-                    sleep(3);
+                    Coroutine::sleep(3);
                 }
             });
             MemoryMonitor::stop();

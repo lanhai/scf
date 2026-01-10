@@ -4,7 +4,7 @@ namespace Scf\Cloud\Wx\Pay\V3;
 
 use RuntimeException;
 use Scf\Client\Http;
-use Scf\Core\App;
+use Scf\Core\Env;
 use Scf\Core\Result;
 use Scf\Core\Struct;
 use Scf\Helper\JsonHelper;
@@ -45,7 +45,7 @@ abstract class Api extends Struct {
         if (!$this->validate()) {
             return Result::error("请求参数验证失败:" . $this->getError(), 'REQUEST_VALIDATE_ERROR');
         }
-        $gateway = App::isDevEnv() ? 'https://api.weixin.lkyapp.com/pay' : $this->gateway;
+        $gateway = Env::isDev() ? 'https://api.weixin.lkyapp.com/pay' : $this->gateway;
         try {
             $auth = $this->createSign();
         } catch (Throwable $e) {

@@ -31,10 +31,10 @@ class WxaCrypt extends Component {
         $result = openssl_decrypt($aesCipher, "AES-128-CBC", $aesKey, 1, $aesIV);
         $dataObj = json_decode($result);
         if (empty($dataObj)) {
-            return Result::error('aes 解密失败:数据为空', 'DECRYPT_ERROR_DATA_EMPTY');
+            return Result::error('数据解密失败:数据为空', 'DECRYPT_ERROR_DATA_EMPTY');
         }
         if ($dataObj->watermark->appid != $this->appid) {
-            return Result::error('aes 解密失败:appid不匹配', 'DECRYPT_ERROR_APPID_NOT_MATCH');
+            return Result::error('数据解密失败:appid不匹配', 'DECRYPT_ERROR_APPID_NOT_MATCH');
         }
         return Result::success(JsonHelper::recover($result));
     }
