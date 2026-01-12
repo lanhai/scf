@@ -31,7 +31,7 @@ class PdoLogger implements ILogger {
             if (is_null($in)) {
                 $in = 'NULL';
             }
-            $executeSql = preg_replace("/\?/", "$in", $executeSql, 1);
+            $executeSql = preg_replace("/\?/", is_numeric($in) ? $in : "'{$in}'", $executeSql, 1);
         }
         if (str_starts_with($executeSql, 'INSERT') && count($bindings)) {
             preg_match('/(VALUES \((.*)\)\s*)/i', $executeSql, $match);

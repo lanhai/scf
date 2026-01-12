@@ -356,10 +356,8 @@ class Dao extends Struct {
             $totalPage = ceil($total / $size);
             $pn = min($pn, $totalPage) ?: 1;
             $offset = ($pn - 1) * $size;
-        } else {
-            $offset = 0;
+            $connection->offset($offset);
         }
-        $connection->offset($offset);
         $connection->limit($size);
         $list = $connection->get();
         $primaryKeys = [];
@@ -752,6 +750,15 @@ class Dao extends Struct {
             $cls->setFields(...$fields);
         }
         return $cls;
+    }
+
+    /**
+     * 开启事务
+     * @return Transaction
+     * @throws Throwable
+     */
+    public static function transaction(): Transaction {
+        return static::select()->master()->beginTransaction();
     }
 
 
