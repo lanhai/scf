@@ -356,9 +356,19 @@ INFO;
             //自动更新
             APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
-        $this->subProcess = new SubProcess($this->server, $serverConfig);
+
         try {
-            $this->subProcess->start();
+            $this->subProcess = new SubProcess($this->server, $serverConfig);
+            $subProcess = new Process(function () {
+                while (true) {
+                    if (Runtime::instance()->serverIsReady()) {
+                        break;
+                    }
+                    sleep(1);
+                }
+                $this->subProcess->start();
+            });
+            $subProcess->start();
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -398,20 +408,24 @@ INFO;
      * @return void
      */
     public function reload(): void {
-        $countdown = App::isDevEnv() ? 1 : 3;
         Runtime::instance()->serverIsReady(false);
-        Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
-        $channel = new Coroutine\Channel(1);
-        Timer::tick(1000, function ($id) use (&$countdown, $channel) {
-            $countdown--;
-            if ($countdown == 0) {
-                Timer::clear($id);
-                $channel->push(true);
-            } else {
-                Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
-            }
-        });
-        $channel->pop($countdown + 1);
+        if (!Env::isDev()) {
+            $countdown = 3;
+            Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
+            $channel = new Coroutine\Channel(1);
+            Timer::tick(1000, function ($id) use (&$countdown, $channel) {
+                $countdown--;
+                if ($countdown == 0) {
+                    Timer::clear($id);
+                    $channel->push(true);
+                } else {
+                    Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
+                }
+            });
+            $channel->pop($countdown + 1);
+        } else {
+            Console::info('【Server】' . Color::yellow('正在重启服务器'));
+        }
         $this->subProcess->sendCommand('upgrade');
         $this->server->reload();
         //重启控制台

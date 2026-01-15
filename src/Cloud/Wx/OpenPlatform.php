@@ -4,15 +4,12 @@ namespace Scf\Cloud\Wx;
 
 
 use App\Common\Model\ConfigModel;
-use App\Db\Wx\WxAccountTable;
 use Scf\Client\Http;
 use Scf\Cloud\Wx\Util\MsgCrypt;
-use Scf\Core\Config;
 use Scf\Core\Result;
 use Scf\Core\Traits\ComponentTrait;
 use Scf\Core\Traits\Singleton;
 use Scf\Helper\ArrayHelper;
-use WxAccountAR;
 
 class OpenPlatform {
     use Singleton, ComponentTrait;
@@ -34,90 +31,9 @@ class OpenPlatform {
     }
 
     /**
-     * 发布小程序
-     * @return Result
-     */
-    public function releaseWxa(): Result {
-        $appid = Config::get('demo_wxa_appid');
-        $review = ConfigModel::instance()->get_value(ConfigModel::KEY_WXA_VERSION_UNDER_REVIEW);
-        if (!$review) {
-            return Result::error('暂无过审版本');
-        }
-        $account = WxAccountAR::lookup($appid);
-        $account->ar()->audit_version = $review;
-        $account->ar()->save();
-        $result = $account->release();
-        if ($result->hasError()) {
-            return $result;
-        }
-        $last = ConfigModel::instance()->get_value(ConfigModel::KEY_WXA_VERSION_RELEASE);
-        $review['release_date'] = date('Y-m-d H:i:s');
-        $review['release_info'] = $result->getData('release_info');
-        $review['last'] = $last ? $last['release_info'] : '';
-        ConfigModel::instance()->update(ConfigModel::KEY_WXA_VERSION_RELEASE, $review);
-        ConfigModel::instance()->reset(ConfigModel::KEY_WXA_VERSION_UNDER_REVIEW);
-        return Result::success($review);
-    }
-
-    /**
-     * 设置小程序用户隐私保护指引
-     * @param array $setting
-     * @return Result
-     */
-    public function setPrivacySetting(array $setting): Result {
-        $appid = Config::get('demo_wxa_appid');
-        $result = WxAccountAR::lookup($appid)->setPrivacySetting($setting);
-        if ($result->hasError()) {
-            return $result;
-        }
-        return Result::success();
-    }
-
-    /**
-     * 提交审核
-     * @return Result
-     */
-    public function undoAudit(): Result {
-        $appid = Config::get('demo_wxa_appid');
-        $result = WxAccountAR::lookup($appid)->undoAudit();
-        if ($result->hasError()) {
-            return $result;
-        }
-        ConfigModel::instance()->reset(ConfigModel::KEY_WXA_VERSION_UNDER_REVIEW);
-        return Result::success();
-    }
-
-    /**
-     * 查询审核状态
-     * @param string $auditId
-     * @return Result
-     */
-    public function getAuditStatus(string $auditId): Result {
-        $appid = Config::get('demo_wxa_appid');
-        return WxAccountAR::lookup($appid)->getAuditStatus($auditId);
-    }
-
-    /**
-     * 提交审核
-     * @return Result
-     */
-    public function submitAudit(): Result {
-        $appid = Config::get('demo_wxa_appid');
-        $demo = ConfigModel::instance()->get_value(ConfigModel::KEY_WXA_VERSION_DEMO);
-        if (!$demo) {
-            return Result::error('暂无体验版本');
-        }
-        $result = WxAccountAR::lookup($appid)->submitAudit();
-        if ($result->hasError()) {
-            return $result;
-        }
-        ConfigModel::instance()->update(ConfigModel::KEY_WXA_VERSION_UNDER_REVIEW, $result->getData());
-        return Result::success($result->getData());
-    }
-
-    /**
      * 获取模板列表
      * @return Result
+     * @throws \Exception
      */
     public function wxaGetTemplateList(): Result {
         $token = $this->getAccessToken();

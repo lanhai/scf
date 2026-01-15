@@ -33,6 +33,7 @@ use function Co\run;
 class SubProcess {
 
     protected array $process = [];
+    protected array $pidList = [];
     protected Server $server;
     protected array $serverConfig;
     protected Process $consolePushProcess;
@@ -41,20 +42,20 @@ class SubProcess {
         $this->server = $server;
         $this->serverConfig = $serverConfig;
 
-        $this->process[] = $this->createMemoryUsageCountProcess();
-        $this->process[] = $this->createHeartbeatProcess();
-        $this->process[] = $this->createLogBackupProcess();
-        $this->process[] = $this->createCrontabManagerProcess();
+        $this->process['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
+        $this->process['Heartbeat'] = $this->createHeartbeatProcess();
+        $this->process['LogBackup'] = $this->createLogBackupProcess();
+        $this->process['CrontabManager'] = $this->createCrontabManagerProcess();
 
         $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
         //redis队列
         if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-            $this->process[] = $this->createRedisQueueProcess();
+            $this->process['RedisQueue'] = $this->createRedisQueueProcess();
         }
         //文件监听
         if ((Env::isDev() && APP_SRC_TYPE == 'dir') || CommandManager::instance()->issetOpt('watch')) {
-            $this->process[] = $this->createFileWatchProcess();
+            $this->process['FileWatch'] = $this->createFileWatchProcess();
         }
         //控制台日志推送
         $this->consolePushProcess = $this->createConsolePushProcess();
@@ -62,9 +63,56 @@ class SubProcess {
 
     public function start(): void {
         $this->consolePushProcess->start();
-        foreach ($this->process as $process) {
+        foreach ($this->process as $name => $process) {
             /** @var Process $process */
             $process->start();
+            $this->pidList[$process->pid] = $name;
+        }
+        while (true) {
+            if (!Runtime::instance()->serverIsAlive()) {
+                break;
+            }
+            if ($ret = Process::wait()) {
+                $pid = $ret['pid'];
+                if (isset($this->pidList[$pid])) {
+                    $oldProcessName = $this->pidList[$pid];
+                    unset($this->pidList[$pid]);
+                    Console::warning("子进程#{$pid}[{$oldProcessName}]退出，准备重启");
+                    switch ($oldProcessName) {
+                        case 'MemoryUsageCount':
+                            $newProcess = $this->createMemoryUsageCountProcess();
+                            $this->process['MemoryUsageCount'] = $newProcess;
+                            break;
+                        case 'Heartbeat':
+                            $newProcess = $this->createHeartbeatProcess();
+                            $this->process['Heartbeat'] = $newProcess;
+                            break;
+                        case 'LogBackup':
+                            $newProcess = $this->createLogBackupProcess();
+                            $this->process['LogBackup'] = $newProcess;
+                            break;
+                        case 'CrontabManager':
+                            $newProcess = $this->createCrontabManagerProcess();
+                            $this->process['CrontabManager'] = $newProcess;
+                            break;
+                        case 'FileWatch':
+                            $newProcess = $this->createFileWatchProcess();
+                            $this->process['FileWatch'] = $newProcess;
+                            break;
+                        case 'RedisQueue':
+                            $newProcess = $this->createRedisQueueProcess();
+                            $this->process['RedisQueue'] = $newProcess;
+                            break;
+                        default:
+                            Console::warning("子进程 {$pid} 退出，未知进程");
+                    }
+                    if (!empty($newProcess)) {
+                        $newProcess->start();
+                        $this->pidList[$newProcess->pid] = $oldProcessName;
+                    }
+                }
+            }
+            sleep(1);
         }
     }
 
@@ -557,6 +605,13 @@ class SubProcess {
      */
     private function createFileWatchProcess(): Process {
         return new Process(function (Process $process) {
+            register_shutdown_function(function () use ($process) {
+                $err = error_get_last();
+                if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+                    Console::error("【FileWatcher】子进程致命错误，退出: " . $err['message']);
+                    Process::kill($process->pid, SIGTERM);
+                }
+            });
             Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
             sleep(1);
             App::mount();
@@ -574,7 +629,8 @@ class SubProcess {
             foreach ($files as $path) {
                 $fileList[] = [
                     'path' => $path,
-                    'md5' => md5_file($path)
+                    'mtime' => filemtime($path),
+                    'size'  => filesize($path),
                 ];
             }
             run(function () use ($fileList, $process, $scanDirectories) {
@@ -595,7 +651,8 @@ class SubProcess {
                         if (!in_array($path, array_column($fileList, 'path'))) {
                             $fileList[] = [
                                 'path' => $path,
-                                'md5' => md5_file($path)
+                                'mtime' => filemtime($path),
+                                'size'  => filesize($path),
                             ];
                             $changed = true;
                             $changedFiles[] = $path;
@@ -608,9 +665,11 @@ class SubProcess {
                             unset($fileList[$key]);
                             continue;
                         }
-                        $getMd5 = md5_file($file['path']);
-                        if (strcmp($file['md5'], $getMd5) !== 0) {
-                            $file['md5'] = $getMd5;
+                        $mtime = filemtime($file['path']);
+                        $size  = filesize($file['path']);
+                        if ($file['mtime'] !== $mtime || $file['size'] !== $size) {
+                            $file['mtime'] = $mtime;
+                            $file['size']  = $size;
                             $changed = true;
                             $changedFiles[] = $file['path'];
                         }
@@ -624,7 +683,7 @@ class SubProcess {
                         Http::instance()->reload();
                     }
                     MemoryMonitor::updateUsage('FileWatcher');
-                    Coroutine::sleep(3);
+                    Coroutine::sleep(2);
                 }
             });
             MemoryMonitor::stop();

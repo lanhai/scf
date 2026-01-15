@@ -398,14 +398,6 @@ class DB {
         return $this->borrow()->beginTransaction();
     }
 
-    public function rollback(): void {
-        $this->borrow()->rollback();
-    }
-
-    public function commit(): void {
-        $this->borrow()->commit();
-    }
-
     public function setConfig($config): void {
         $this->config = $config;
     }
