@@ -101,7 +101,8 @@ class Log {
             'file' => $error['file'] . ':' . $error['line'],
             'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
             'module' => $this->_module,
-            'backtrace' => $this->formatBackTrace($backTrace)
+            'backtrace' => $this->formatBackTrace($backTrace),
+            'host' => SERVER_HOST,
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
@@ -137,7 +138,8 @@ class Log {
             'message' => $msg,
             'file' => $m['file'] . ':' . $m['line'],
             'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
-            'module' => $this->_module
+            'module' => $this->_module,
+            'host' => SERVER_HOST,
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
@@ -173,7 +175,8 @@ class Log {
             'message' => $message,
             'file' => $message['path'],
             'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
-            'module' => 'Request'
+            'module' => 'Request',
+            'host' => SERVER_HOST
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
@@ -269,8 +272,8 @@ class Log {
             //TODO 日志推送到master节点
             $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
             if ($masterDB instanceof NullPool) {
+                //非server 日志本地化
                 if (!RUNNING_SERVER) {
-                    //非server 日志本地化
                     if ($type == 'crontab') {
                         $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
                         $content = $log['message'];

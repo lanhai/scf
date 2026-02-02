@@ -5,7 +5,6 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
-use Scf\Core\Log;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;

@@ -28,37 +28,40 @@ use Swoole\Coroutine;
 use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
+use Throwable;
 use function Co\run;
 
 class SubProcess {
 
     protected array $process = [];
     protected array $pidList = [];
-    protected Server $server;
     protected array $serverConfig;
+    protected Server $server;
     protected Process $consolePushProcess;
 
     public function __construct(Server $server, $serverConfig) {
         $this->server = $server;
         $this->serverConfig = $serverConfig;
-
+        $runQueueInMaster = $serverConfig['redis_queue_in_master'] ?? true;
+        $runQueueInSlave = $serverConfig['redis_queue_in_slave'] ?? false;
+        //内存使用情况统计
         $this->process['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
+        //心跳检测
         $this->process['Heartbeat'] = $this->createHeartbeatProcess();
+        //日志备份
         $this->process['LogBackup'] = $this->createLogBackupProcess();
+        //定时任务
         $this->process['CrontabManager'] = $this->createCrontabManagerProcess();
-
-        $runQueueInMaster = $config['redis_queue_in_master'] ?? true;
-        $runQueueInSlave = $config['redis_queue_in_slave'] ?? false;
+        //控制台日志推送
+        $this->consolePushProcess = $this->createConsolePushProcess();
         //redis队列
         if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
             $this->process['RedisQueue'] = $this->createRedisQueueProcess();
         }
-        //文件监听
+        //文件变更监听
         if ((Env::isDev() && APP_SRC_TYPE == 'dir') || CommandManager::instance()->issetOpt('watch')) {
             $this->process['FileWatch'] = $this->createFileWatchProcess();
         }
-        //控制台日志推送
-        $this->consolePushProcess = $this->createConsolePushProcess();
     }
 
     public function start(): void {
@@ -77,7 +80,7 @@ class SubProcess {
                 if (isset($this->pidList[$pid])) {
                     $oldProcessName = $this->pidList[$pid];
                     unset($this->pidList[$pid]);
-                    Console::warning("子进程#{$pid}[{$oldProcessName}]退出，准备重启");
+                    Console::warning("【{$oldProcessName}】子进程#{$pid}退出，准备重启");
                     switch ($oldProcessName) {
                         case 'MemoryUsageCount':
                             $newProcess = $this->createMemoryUsageCountProcess();
@@ -153,6 +156,50 @@ class SubProcess {
             ]));
         }
         return false;
+    }
+
+    /**
+     * 控制台消息推送socket
+     * @return Process
+     */
+    private function createConsolePushProcess(): Process {
+        return new Process(function (Process $process) {
+            App::mount();
+            Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
+            MemoryMonitor::start('ConsolePush');
+            run(function () use ($process) {
+                while (true) {
+                    $masterSocket = Manager::instance()->getMasterSocketConnection();
+                    while (true) {
+                        $masterSocket->push('::ping');
+                        $reply = $masterSocket->recv(5);
+                        if ($reply === false || empty($reply->data)) {
+                            $masterSocket->close();
+                            Console::warning('【ConsolePush】与master节点连接已断开', false);
+                            break;
+                        }
+                        $processSocket = $process->exportSocket();
+                        $msg = $processSocket->recv(timeout: 30);
+                        if ($msg) {
+                            if (StringHelper::isJson($msg)) {
+                                $payload = JsonHelper::recover($msg);
+                                $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
+                                    'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
+                                    ...$payload
+                                ]]));
+                            } elseif ($msg == 'shutdown') {
+                                $masterSocket->close();
+                                Console::error('【ConsolePush】管理进程退出,结束推送', false);
+                                MemoryMonitor::stop();
+                                Process::kill($process->pid, SIGTERM);
+                                //break 2;
+                            }
+                        }
+                        MemoryMonitor::updateUsage('ConsolePush');
+                    }
+                }
+            });
+        });
     }
 
     /**
@@ -275,49 +322,6 @@ class SubProcess {
         });
     }
 
-    /**
-     * 心跳和状态推送
-     * @return Process
-     */
-    private function createConsolePushProcess(): Process {
-        return new Process(function (Process $process) {
-            App::mount();
-            Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
-            MemoryMonitor::start('ConsolePush');
-            run(function () use ($process) {
-                while (true) {
-                    $masterSocket = Manager::instance()->getMasterSocketConnection();
-                    while (true) {
-                        $masterSocket->push('::ping');
-                        $reply = $masterSocket->recv(5);
-                        if ($reply === false || empty($reply->data)) {
-                            $masterSocket->close();
-                            Console::warning('【ConsolePush】与master节点连接已断开', false);
-                            break;
-                        }
-                        $processSocket = $process->exportSocket();
-                        $msg = $processSocket->recv(timeout: 30);
-                        if ($msg) {
-                            if (StringHelper::isJson($msg)) {
-                                $payload = JsonHelper::recover($msg);
-                                $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
-                                    'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
-                                    ...$payload
-                                ]]));
-                            } elseif ($msg == 'shutdown') {
-                                $masterSocket->close();
-                                Console::error('【ConsolePush】管理进程退出,结束推送', false);
-                                MemoryMonitor::stop();
-                                Process::kill($process->pid, SIGTERM);
-                                //break 2;
-                            }
-                        }
-                        MemoryMonitor::updateUsage('ConsolePush');
-                    }
-                }
-            });
-        });
-    }
 
     /**
      * 内存占用统计
@@ -325,86 +329,102 @@ class SubProcess {
      */
     private function createMemoryUsageCountProcess(): Process {
         return new Process(function (Process $process) {
+            register_shutdown_function(function () use ($process) {
+                $err = error_get_last();
+                if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+                    Console::error(
+                        "【MemoryMonitor】致命错误退出 [{$err['type']}]: {$err['message']} @ {$err['file']}:{$err['line']}"
+                    );
+                    // 必须显式退出，让 master 的 wait() 感知
+                    Process::kill($process->pid, SIGTERM);
+                }
+            });
             Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
             MemoryMonitor::start('MemoryMonitor');
             run(function () use ($process) {
-                $schedule = null;
                 $schedule = function () use (&$schedule, $process) {
-                    // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
-                    $socket = $process->exportSocket();
-                    $msg = $socket->recv(timeout: 0.1);
-                    if ($msg == 'shutdown') {
-                        MemoryMonitor::stop();
-                        Console::error("【MemoryMonitor】管理进程退出,结束统计");
-                        Process::kill($process->pid, SIGTERM);
-                        return; // 不再重排
-                    }
-                    // 2) 执行一次完整统计
-                    $processList = MemoryMonitorTable::instance()->rows();
-                    if ($processList) {
-                        $barrier = Coroutine\Barrier::make();
-                        foreach ($processList as $processInfo) {
-                            Coroutine::create(function () use ($barrier, $processInfo, $process) {
-                                $processName = $processInfo['process'];
-                                $limitMb = $processInfo['limit_memory_mb'] ?? 300;
-                                $pid = $processInfo['pid'];
-                                if (!Process::kill($pid, 0)) {
-                                    return;
-                                }
-                                // 根据PID查询 PSS/RSS（KB）
-                                $mem = MemoryMonitor::getPssRssByPid((int)$pid);
-                                $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;    // MB
-                                $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;    // MB
-                                // 实际用于阈值判断的 OS 占用：优先 PSS，没有则回落到 RSS
-                                $osActualMb = $pss ?? $rss;
-                                $processInfo['rss_mb'] = $rss;
-                                $processInfo['pss_mb'] = $pss;
-                                $processInfo['os_actual'] = $osActualMb;
-                                $processInfo['updated'] = time();
-                                //重启占用超过阈值的worker
-                                $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
-                                if ($autoRestart == STATUS_ON && str_starts_with($processName, 'worker:') && $osActualMb > $limitMb) {
-                                    // 解析 workerId
-                                    $workerId = null;
-                                    if (preg_match('/^worker:(\d+)/', $processName, $mWid)) {
-                                        $workerId = (int)$mWid[1];
-                                    }
-                                    if ($workerId !== null) {
-                                        // 节流：120 秒内只触发一次，避免抖动
-                                        if (time() - $processInfo['restart_ts'] >= 120) {
-                                            Log::instance()->setModule('system')->info("{$processName}[PID:{$processInfo['pid']}]内存过高 {$osActualMb}MB ≥ {$limitMb}MB，触发重启", true);
-                                            Process::kill($processInfo['pid'], SIGTERM);
-                                            $processInfo['restart_ts'] = time();
-                                            $processInfo['restart_count']++;
-//                                            $this->server->stop($workerId - 1);
-//                                            if ($processInfo['restart_count'] >= 3) {
-//                                                Process::kill($processInfo['pid'], SIGTERM);
-//                                            }
+                    try {
+                        // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
+                        $socket = $process->exportSocket();
+                        $msg = $socket->recv(timeout: 0.1);
+                        if ($msg === 'shutdown') {
+                            MemoryMonitor::stop();
+                            Console::error("【MemoryMonitor】收到 shutdown，安全退出");
+                            Process::kill($process->pid, SIGTERM);
+                        }
+                        // 2) 执行一次完整统计
+                        $processList = MemoryMonitorTable::instance()->rows();
+                        if ($processList) {
+                            $isDarwin = (PHP_OS_FAMILY === 'Darwin');
+                            $barrier = Coroutine\Barrier::make();
+                            foreach ($processList as $processInfo) {
+                                Coroutine::create(function () use ($barrier, $processInfo, $process, $isDarwin) {
+                                    try {
+                                        $processName = $processInfo['process'];
+                                        $limitMb = $processInfo['limit_memory_mb'] ?? 300;
+                                        $pid = (int)$processInfo['pid'];
+
+                                        if (PHP_OS_FAMILY !== 'Darwin' && !Process::kill($pid, 0)) {
+                                            return;
                                         }
+
+                                        $mem = MemoryMonitor::getPssRssByPid($pid);
+                                        $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;
+                                        $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;
+                                        $osActualMb = $pss ?? $rss;
+
+                                        $processInfo['rss_mb'] = $rss;
+                                        $processInfo['pss_mb'] = $pss;
+                                        $processInfo['os_actual'] = $osActualMb;
+                                        $processInfo['updated'] = time();
+
+                                        $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
+                                        if (
+                                            $autoRestart == STATUS_ON
+                                            && PHP_OS_FAMILY !== 'Darwin'
+                                            && str_starts_with($processName, 'worker:')
+                                            && $osActualMb !== null
+                                            && $osActualMb > $limitMb
+                                        ) {
+                                            if (preg_match('/^worker:(\d+)/', $processName, $m)) {
+                                                if (time() - ($processInfo['restart_ts'] ?? 0) >= 120) {
+                                                    Log::instance()->setModule('system')
+                                                        ->error("{$processName}[PID:$pid] 内存 {$osActualMb}MB ≥ {$limitMb}MB，强制重启");
+                                                    Process::kill($pid, SIGTERM);
+                                                    $processInfo['restart_ts'] = time();
+                                                    $processInfo['restart_count'] = ($processInfo['restart_count'] ?? 0) + 1;
+                                                }
+                                            }
+                                        }
+                                        $curr = MemoryMonitorTable::instance()->get($processName);
+                                        if ($curr && $curr['pid'] !== $processInfo['pid']) {
+                                            $processInfo['pid'] = $curr['pid'];
+                                        }
+                                        MemoryMonitorTable::instance()->set($processName, $processInfo);
+                                    } catch (Throwable $e) {
+                                        Log::instance()->error("【MemoryMonitor】统计发生错误：" . $e->getMessage());
+                                        Process::kill($process->pid, SIGTERM);
                                     }
-                                }
-                                //更新占用
-                                $curr = MemoryMonitorTable::instance()->get($processName);
-                                if ($curr['pid'] !== $processInfo['pid']) {
-                                    $processInfo['pid'] = $curr['pid'];
-                                }
-                                MemoryMonitorTable::instance()->set($processName, $processInfo);
-                            });
+                                });
+                            }
+                            try {
+                                Coroutine\Barrier::wait($barrier);
+                            } catch (Throwable $throwable) {
+                                Log::instance()->error("内存统计错误:" . $throwable->getMessage());
+                            }
+                        } else {
+                            Console::warning("【MemoryMonitor】暂无待统计进程", false);
                         }
-                        try {
-                            Coroutine\Barrier::wait($barrier);
-                        } catch (\Throwable $throwable) {
-                            Log::instance()->error("内存统计错误:" . $throwable->getMessage());
-                        }
-                    } else {
-                        Console::warning("【MemoryMonitor】无进程", false);
+                        MemoryMonitor::updateUsage('MemoryMonitor');
+                        // 3) 统计完成后再安排下一轮，避免 tick 重叠
+                        Timer::after(5000, $schedule);
+                    } catch (Throwable $e) {
+                        Log::instance()->error("【MemoryMonitor】调度异常:" . $e->getMessage());
+                        Process::kill($process->pid, SIGTERM);
                     }
-                    MemoryMonitor::updateUsage('MemoryMonitor');
-                    // 3) 统计完成后再安排下一轮，避免 tick 重叠
-                    Timer::after(5000, $schedule);
                 };
-                // 立即安排首轮；若希望立刻执行一次可改为 $schedule();
-                Timer::after(1000, $schedule);
+                // 启动即执行一次，避免首轮 5 秒空窗
+                $schedule();
             });
         });
     }
@@ -630,7 +650,7 @@ class SubProcess {
                 $fileList[] = [
                     'path' => $path,
                     'mtime' => filemtime($path),
-                    'size'  => filesize($path),
+                    'size' => filesize($path),
                 ];
             }
             run(function () use ($fileList, $process, $scanDirectories) {
@@ -652,7 +672,7 @@ class SubProcess {
                             $fileList[] = [
                                 'path' => $path,
                                 'mtime' => filemtime($path),
-                                'size'  => filesize($path),
+                                'size' => filesize($path),
                             ];
                             $changed = true;
                             $changedFiles[] = $path;
@@ -666,10 +686,10 @@ class SubProcess {
                             continue;
                         }
                         $mtime = filemtime($file['path']);
-                        $size  = filesize($file['path']);
+                        $size = filesize($file['path']);
                         if ($file['mtime'] !== $mtime || $file['size'] !== $size) {
                             $file['mtime'] = $mtime;
-                            $file['size']  = $size;
+                            $file['size'] = $size;
                             $changed = true;
                             $changedFiles[] = $file['path'];
                         }

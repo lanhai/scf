@@ -167,7 +167,7 @@ class CgiListener extends Listener {
      * @return bool
      */
     public function dashboradTakeover(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/~',)) {
+        if (str_starts_with($request->server['path_info'], '/~')) {
             $isIndex = $request->server['path_info'] == '/~/' || $request->server['path_info'] == '/~';
             $path = str_replace("/~", "", $request->server['path_info']);
             $response->status(200);
@@ -211,9 +211,9 @@ class CgiListener extends Listener {
                 $client->setHeader('Cookie', File::read($cookieFile));
             }
             if ($request->server['request_method'] == 'GET') {
-                $result = $client->get();
+                $result = $client->get(600);
             } else {
-                $result = $client->post(Request::post()->pack());
+                $result = $client->post(Request::post()->pack(), 600);
             }
             $response->header('Content-Type', 'application/json');
             if ($result->hasError()) {

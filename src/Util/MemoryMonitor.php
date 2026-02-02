@@ -92,53 +92,71 @@ class MemoryMonitor {
      * 返回单位：KB；若不可得则为 null
      */
     public static function getPssRssByPid(int $pid): array {
+        // 默认返回
         $rssKb = null;
         $pssKb = null;
-        // 优先 Linux /proc 读取（容器&宿主机通用）
-        $smapsRollup = "/proc/{$pid}/smaps_rollup";
-        $smaps = "/proc/{$pid}/smaps";
-        $status = "/proc/{$pid}/status";
-        if (is_readable($smapsRollup)) {
-            [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
-            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
-        }
-        if (is_readable($smaps)) {
-            [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
-            return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
-        }
-        // 尝试从 /proc/<pid>/status 读取 RSS（VmRSS）
-        if (is_readable($status)) {
-            $content = @file($status) ?: [];
-            foreach ($content as $line) {
-                if (str_starts_with($line, 'VmRSS:')) {
-                    if (preg_match('/(\d+)/', $line, $m)) {
-                        $rssKb = (int)$m[1];
+
+        // ===== Linux：优先使用 /proc（高精度、低开销）=====
+        if (PHP_OS_FAMILY === 'Linux') {
+            $smapsRollup = "/proc/{$pid}/smaps_rollup";
+            $smaps = "/proc/{$pid}/smaps";
+            $status = "/proc/{$pid}/status";
+
+            // 优先 smaps_rollup（O(1)）
+            if (is_readable($smapsRollup)) {
+                [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
+                return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+            }
+
+            // 次选 smaps（可能较慢，但仍可靠）
+            if (is_readable($smaps)) {
+                [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
+                return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+            }
+
+            // 兜底：status 里的 VmRSS
+            if (is_readable($status)) {
+                $lines = @file($status);
+                if (is_array($lines)) {
+                    foreach ($lines as $line) {
+                        if (str_starts_with($line, 'VmRSS:') && preg_match('/(\d+)/', $line, $m)) {
+                            $rssKb = (int)$m[1];
+                            break;
+                        }
                     }
-                    break;
                 }
             }
+
+            return ['pss_kb' => null, 'rss_kb' => $rssKb];
         }
-        // 非 Linux（如 macOS）或受限环境：使用命令行兜底
-        if ($rssKb === null) {
-            $psOut = @shell_exec("ps -o rss= -p " . (int)$pid);
-            if ($psOut !== null) {
-                $rssKb = (int)trim($psOut) ?: null;
-            }
-        }
-        // macOS 近似 PSS：使用 vmmap -summary 的 Physical footprint
-        if ($pssKb === null && PHP_OS_FAMILY === 'Darwin') {
-            $vmmap = @shell_exec("vmmap " . (int)$pid . " -summary 2>/dev/null");
-            if ($vmmap) {
-                // 兼容不同本地化：匹配 Physical footprint / PhysFootprint
-                if (preg_match('/(Physical footprint|PhysFootprint):\s*([0-9\.]+)\s*(KB|MB|GB)/i', $vmmap, $m)) {
-                    $val = (float)$m[2];
-                    $unit = strtoupper($m[3]);
-                    $kb = $val * ($unit === 'GB' ? 1048576 : ($unit === 'MB' ? 1024 : 1));
-                    $pssKb = (int)round($kb);
+
+        // ===== macOS（Darwin）：轻量 & 稳定优先 =====
+        if (PHP_OS_FAMILY === 'Darwin') {
+            // 1) RSS：使用 ps（最快、最稳定）
+            $psOut = @shell_exec("ps -o rss= -p " . (int)$pid . " 2>/dev/null");
+            if (is_string($psOut)) {
+                $val = (int)trim($psOut);
+                if ($val > 0) {
+                    $rssKb = $val;
                 }
             }
+
+            // 2) PSS：macOS 无原生 PSS，默认不计算（避免 vmmap 阻塞/权限问题）
+            // 如确实需要，可在生产 Linux 环境使用 PSS，macOS 仅显示 RSS
+
+            return ['pss_kb' => null, 'rss_kb' => $rssKb];
         }
-        return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+
+        // ===== 其他系统：尽力而为 =====
+        $psOut = @shell_exec("ps -o rss= -p " . (int)$pid . " 2>/dev/null");
+        if (is_string($psOut)) {
+            $val = (int)trim($psOut);
+            if ($val > 0) {
+                $rssKb = $val;
+            }
+        }
+
+        return ['pss_kb' => null, 'rss_kb' => $rssKb];
     }
 
     /**

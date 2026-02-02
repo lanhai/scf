@@ -2,7 +2,6 @@
 
 namespace Scf\Cloud\Wx;
 
-
 use App\Common\Model\ConfigModel;
 use Scf\Client\Http;
 use Scf\Cloud\Wx\Util\MsgCrypt;
