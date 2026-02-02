@@ -3,7 +3,7 @@
 namespace Scf\Command;
 
 
-use Scf\Command\DefaultCommand\Package;
+use Scf\Command\DefaultCommand\Framework;
 use Scf\Core\Traits\Singleton;
 use Scf\Command\DefaultCommand\Bot;
 use Scf\Command\DefaultCommand\Build;
@@ -25,7 +25,7 @@ class Runner {
         Manager::instance()->addCommand(new Toolbox());//cli工具箱
         Manager::instance()->addCommand(new Bot());//机器人
         Manager::instance()->addCommand(new Run());//脚本运行
-        Manager::instance()->addCommand(new Package());//框架包管理
+        Manager::instance()->addCommand(new Framework());//框架包管理
     }
 
     private mixed $beforeCommand;
