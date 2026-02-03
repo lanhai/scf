@@ -70,17 +70,18 @@ class SocketListener extends Listener {
                     }
                     break;
                 case 'appoint_update':
-                    $finishCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+                    $nodeCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
                         'type' => $data['data']['type'],
                         'version' => $data['data']['version'],
                     ]);
+                    $timeout = $data['data']['timeout'] ?? 300;
                     //等待所有节点升级完成
-                    if ($finishCount) {
-                        $finishCount = 0;
+                    if ($nodeCount) {
+                        $nodeCount = 0;
                         $round = 1;
                         // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
                         $waitCh = new Channel(1);
-                        Timer::tick(1000 * 3, function ($timerId) use ($data, &$finishCount, &$round, $waitCh) {
+                        Timer::tick(1000 * 5, function ($timerId) use ($data, $timeout, &$nodeCount, &$round, $waitCh) {
                             $finish = true;
                             $count = 0;
                             $nodes = Manager::instance()->getServers();
@@ -104,8 +105,8 @@ class SocketListener extends Listener {
                                     }
                                 }
                             }
-                            if ($finish || $round >= 12 * 5) {
-                                $finishCount = $count; // 记录最终完成数
+                            if ($finish || $round >= ($timeout / 5)) {
+                                $nodeCount = $count; // 记录最终完成数
                                 Timer::clear($timerId);
                                 // 通知等待方（非阻塞：如果已有人在等则唤醒）
                                 if (!$waitCh->isEmpty()) { /* no-op */
@@ -114,15 +115,15 @@ class SocketListener extends Listener {
                             }
                             $round++;
                         });
-                        // 等待最多 600 秒（12*10 轮 * 5s）或被提前唤醒
-                        $waitCh->pop(305);
-                        $finishCount and Console::success("【Server】{$finishCount} 个节点应用更新完成，版本号:{$data['data']['version']}");
+                        // 最多等待
+                        $waitCh->pop($timeout + 3);
+                        $nodeCount and Console::success("【Server】{$nodeCount} 个子节点更新完成，版本号:{$data['data']['version']}");
                     }
                     if (App::appointUpdateTo($data['data']['type'], $data['data']['version'])) {
-                        $finishCount++;
+                        $nodeCount++;
                     }
                     if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
-                        $server->push($frame->fd, $finishCount);
+                        $server->push($frame->fd, $nodeCount);
                     }
                     break;
                 case 'restartAll':

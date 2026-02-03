@@ -241,11 +241,12 @@ class NodeManager {
      */
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
-        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version]]));
-        $reply = $socket->recv(30);
+        $timeout = 60 * 5;
+        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version, 'timeout' => $timeout]]));
+        $reply = $socket->recv($timeout + 5);
         if ($reply === false || $reply->data == '') {
             $socket->close();
-            return Result::error('升级未完成');
+            return Result::error('响应超时,升级失败');
         }
         return Result::success($reply->data ?: 0);
     }
