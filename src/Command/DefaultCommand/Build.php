@@ -34,8 +34,6 @@ class Build implements CommandInterface {
         $commandHelp->addAction('release', '打包应用');
         $commandHelp->addAction('rollback', '版本回滚');
         $commandHelp->addAction('history', '查看发布记录');
-        $commandHelp->addAction('framework', '打包框架');
-        $commandHelp->addAction('dashboard', '打包仪表盘UI');
         $apps = App::all();
         $names = [];
         foreach ($apps as $app) {
@@ -49,7 +47,7 @@ class Build implements CommandInterface {
     }
 
     public function exec(): ?string {
-        $action = Manager::instance()->getArg(0);
+        $action = Manager::instance()->getArg(0) ?: 'release';
         if ($action && method_exists($this, $action) && $action != 'help') {
             Env::initialize();
             define("VERSION_FILE", BUILD_PATH . APP_ID . '-version.json');

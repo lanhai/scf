@@ -408,7 +408,7 @@ class SubProcess {
                                 });
                             }
                             try {
-                                Coroutine\Barrier::wait($barrier);
+                                Coroutine\Barrier::wait($barrier, 60);
                             } catch (Throwable $throwable) {
                                 Log::instance()->error("内存统计错误:" . $throwable->getMessage());
                             }
