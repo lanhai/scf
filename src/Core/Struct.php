@@ -22,6 +22,18 @@ use Scf\Helper\JsonHelper;
  */
 class Struct {
     /**
+     * @var array<string, ReflectionProperty[]> 缓存字段反射信息
+     */
+    protected static array $_fieldsCache = [];
+    /**
+     * @var array<string, array> 缓存解析后的规则模板
+     */
+    protected static array $_validateTemplateCache = [];
+    /**
+     * @var bool 只注册一次Filter
+     */
+    protected static bool $_filterRegistered = false;
+    /**
      * @var array 验证信息
      */
     protected array $_validate = [];
@@ -156,41 +168,39 @@ class Struct {
      * @param bool $filterNull 是否过滤NULL的数据
      * @return array
      */
-    public function asArray(bool $filterNull = false): array {
-        return $this->toArray($filterNull);
+    public function toArray(bool $filterNull = false): array {
+        return $this->asArray($filterNull);
     }
 
-    public function toArray(bool $filterNull = false): array {
+    public function asArray(bool $filterNull = false): array {
         $fields = $this->_getFields();
         $_data = [];
-        foreach ($fields as $f) {
-            $f = $f->getName();
-            if ($this->_isGhostField($f)) {
+        foreach ($fields as $prop) {
+            $name = $prop->getName();
+            if ($this->_isGhostField($name)) {
                 continue; // 排除鬼魂字段
             }
-            if (!property_exists($this, $f)) {
-                continue;
-            }
-            if (!isset($this->$f)) {
+            if (!$prop->isInitialized($this)) {
                 if (!$filterNull) {
-                    $_data[$f] = null;
+                    $_data[$name] = null;
                 }
                 continue;
                 //$this->$f = null;
                 //continue; // 过滤null字段
             }
-            if ($filterNull && !is_array($this->$f)) {
+            $value = $this->$name;
+            if ($filterNull && !is_array($value)) {
 //                if (is_null($this->$f)) {
 //                    continue; // 过滤null字段
 //                }
-                if (is_string($this->$f) && 'null' == strtolower($this->$f)) {
+                if (is_string($value) && 'null' == strtolower($value)) {
                     continue; // 过滤null字段
                 }
-                if ($this->_isSkipField($f)) {
+                if ($this->_isSkipField($name)) {
                     continue; // 排除skip字段
                 }
             }
-            $_data[$f] = $this->$f;
+            $_data[$name] = $value;
         }
         return $_data;
     }
@@ -213,22 +223,33 @@ class Struct {
         $fields = $this->_getFields();
         $_data = [];
 
-        foreach ($fields as $f) {
-            $f = $f->getName();
-            $format = $this->_validate[$f]['format'] ?? null;
+        foreach ($fields as $prop) {
+            $name = $prop->getName();
+            $format = $this->_validate[$name]['format'] ?? null;
+
             if (!is_null($format) && $format[0]['type'] == 'json') {
-                $_data[$f] = isset($data[$f]) ? (!is_array($data[$f]) ? JsonHelper::recover($data[$f]) : $data[$f]) : null;
+                if (array_key_exists($name, $data)) {
+                    if (is_null($data[$name])) {
+                        $value = null;
+                    } elseif (!is_array($data[$name])) {
+                        $value = JsonHelper::recover($data[$name]);
+                    } else {
+                        $value = $data[$name];
+                    }
+                } else {
+                    $value = null;
+                }
             } else {
-                $_data[$f] = $data[$f] ?? ($this->$f ?? null);
+                if (array_key_exists($name, $data)) {
+                    $value = $data[$name];
+                } elseif ($prop->isInitialized($this)) {
+                    $value = $this->$name;
+                } else {
+                    $value = null;
+                }
             }
-        }
-        // 先赋值
-        foreach ($_data as $f => $d) {
-            try {
-                $this->$f = $d;
-            } catch (Error) {
-                $this->$f = null;
-            }
+            $_data[$name] = $value;
+            $this->_assignField($prop, $name, $value);
         }
         // 后验证
         if ($validate && !$this->validate($_data)) {
@@ -279,114 +300,52 @@ class Struct {
      * 分析验证规则
      */
     protected function _parseValidateRules(): void {
-        $fields = $this->_getFields();
-        foreach ($fields as $f) {
-            $name = $f->getName(); // 字段名称
-            $comment = $f->getDocComment(); // 字段规则注释
-            $matches = null;
-            if ($comment) {
-                preg_match_all('/@(default|rule|required|skip|ghost|format)(?:\[(\w+)\])?\s+?(.+)/', $comment, $matches);
-                $this->_validate[$name] = [];
-
-                if (!$matches) {
-                    continue;
+        $clsName = static::class;
+        if (!isset(self::$_validateTemplateCache[$clsName])) {
+            self::$_validateTemplateCache[$clsName] = $this->_buildValidateTemplate();
+        }
+        $template = self::$_validateTemplateCache[$clsName];
+        $this->_validate = [];
+        foreach ($template as $name => $rules) {
+            $this->_validate[$name] = [];
+            if (isset($rules['skip'])) {
+                $this->_validate[$name]['skip'] = $rules['skip'];
+            }
+            if (isset($rules['ghost'])) {
+                $this->_validate[$name]['ghost'] = $rules['ghost'];
+            }
+            if (isset($rules['required'])) {
+                $this->_validate[$name]['required'] = $rules['required'];
+            }
+            if (isset($rules['format'])) {
+                $this->_validate[$name]['format'] = $rules['format'];
+            }
+            if (isset($rules['default'])) {
+                foreach ($rules['default'] as $def) {
+                    $value = $this->_resolveDefaultValue($def['type'], $def['raw']);
+                    $this->_validate[$name]['default'][] = [
+                        'content' => $value,
+                        'scene' => $def['scene'],
+                    ];
                 }
-
-                for ($i = 0; $i < count($matches[0]); $i++) {
-                    $rn = trim($matches[1][$i]); // 指令名称
-                    $rs = trim($matches[2][$i]); // 指令场景
-                    $rc = trim($matches[3][$i]); // 规则内容
-
-                    switch ($rn) {
-                        // 跳过
-                        case 'skip':
-                            if (!isset($this->_validate[$name]['skip'])) {
-                                $this->_validate[$name]['skip'] = [];
-                            }
-                            $this->_validate[$name]['skip'][] = [
-                                'scene' => $rs
-                            ];
-                            break;
-                        // 鬼魂字段
-                        case 'ghost':
-                            if (!isset($this->_validate[$name]['ghost'])) {
-                                $this->_validate[$name]['ghost'] = [];
-                            }
-                            $this->_validate[$name]['ghost'][] = [
-                                'scene' => $rs
-                            ];
-                            break;
-                        // 默认值
-                        case 'default':
-                            $rc = explode(':', $rc, 2);
-                            $t = trim($rc[0]); // 类型:int,float,null,string
-                            $v = isset($rc[1]) ? trim($rc[1]) : null; // 值
-
-                            if (!is_null($v)) {
-                                $v = match ($t) {
-                                    'int' => intval($v),
-                                    'float' => floatval($v),
-                                    'null' => null,
-                                    'func' => call_user_func($v),
-                                    'method' => call_user_func_array([$this, $v], []),
-                                    'array' => json_decode($v, true),
-                                    'bool' => $v === 'true',
-                                    default => $v,
-                                };
-
-                                if (!isset($this->_validate[$name]['default'])) {
-                                    $this->_validate[$name]['default'] = [];
-                                }
-                                $this->_validate[$name]['default'][] = [
-                                    'content' => $v,
-                                    'scene' => $rs
-                                ];
-                            }
-
-                            break;
-                        // 规则,直接使用ircmaxell/filterus的字符串参数
-                        case 'rule':
-                            $rc = explode('|', $rc, 2);
-                            $rc[0] = trim($rc[0]);
-                            $rule = [];
-                            Filter::registerFilter('chs_string', '\Scf\Core\Filters\ChineseString');
-                            $rule['content'] = match (true) {
-                                str_starts_with($rc[0], 'func') => substr($rc[0], 5),
-                                str_starts_with($rc[0], 'method') => [$this, substr($rc[0], 7)],
-                                str_starts_with($rc[0], 'string') => Filter::factory(str_replace('string', 'chs_string', $rc[0])),
-                                default => Filter::factory($rc[0]),
-                            };
-                            $rule['error'] = $rc[1] ?? "{$name}格式不正确";
-                            $rule['scene'] = $rs;
-                            // 初始化规则部分
-                            if (!isset($this->_validate[$name]['rule'])) {
-                                $this->_validate[$name]['rule'] = [];
-                            }
-                            $this->_validate[$name]['rule'][] = $rule;
-                            break;
-                        //必填字段
-                        case 'required':
-                            $rc = explode('|', $rc);
-                            // 初始化规则部分
-                            if (!isset($this->_validate[$name]['required'])) {
-                                $this->_validate[$name]['required'] = [];
-                            }
-                            $this->_validate[$name]['required'][] = [
-                                'content' => true,
-                                'scene' => $rs,
-                                'error' => $rc[1] ?? "{$name}不能为空",
-                            ];
-                            break;
-                        //数据转换
-                        case 'format':
-                            if (!isset($this->_validate[$name]['format'])) {
-                                $this->_validate[$name]['format'] = [];
-                            }
-                            $this->_validate[$name]['format'][] = [
-                                'type' => $rc
-                            ];
-                            break;
+            }
+            if (isset($rules['rule'])) {
+                foreach ($rules['rule'] as $rule) {
+                    if (!self::$_filterRegistered) {
+                        Filter::registerFilter('chs_string', '\Scf\Core\Filters\ChineseString');
+                        self::$_filterRegistered = true;
                     }
+                    $validator = match ($rule['kind']) {
+                        'func' => $rule['raw'],
+                        'method' => [$this, $rule['raw']],
+                        'string' => Filter::factory(str_replace('string', 'chs_string', $rule['raw'])),
+                        default => Filter::factory($rule['raw']),
+                    };
+                    $this->_validate[$name]['rule'][] = [
+                        'content' => $validator,
+                        'error' => $rule['error'],
+                        'scene' => $rule['scene'],
+                    ];
                 }
             }
         }
@@ -397,8 +356,12 @@ class Struct {
      * @return ReflectionProperty[]
      */
     protected function _getFields(): array {
-        $cls = new ReflectionClass($this);
-        return $cls->getProperties(ReflectionProperty::IS_PUBLIC);
+        $clsName = static::class;
+        if (!isset(self::$_fieldsCache[$clsName])) {
+            $cls = new ReflectionClass($this);
+            self::$_fieldsCache[$clsName] = $cls->getProperties(ReflectionProperty::IS_PUBLIC);
+        }
+        return self::$_fieldsCache[$clsName];
     }
 
     /**
@@ -463,5 +426,138 @@ class Struct {
             }
         }
         return false;
+    }
+
+    /**
+     * @param ReflectionProperty $prop
+     * @param string $name
+     * @param mixed $value
+     */
+    protected function _assignField(ReflectionProperty $prop, string $name, mixed $value): void {
+        try {
+            $this->$name = $value;
+        } catch (Error $error) {
+            $type = $prop->getType();
+            $allowsNull = !$type || $type->allowsNull();
+            if ($allowsNull) {
+                $this->$name = null;
+            } else {
+                $this->addError($name, $error->getMessage());
+            }
+        }
+    }
+
+    /**
+     * @return array<string, array>
+     */
+    protected function _buildValidateTemplate(): array {
+        $template = [];
+        $fields = $this->_getFields();
+        foreach ($fields as $f) {
+            $name = $f->getName(); // 字段名称
+            $comment = $f->getDocComment(); // 字段规则注释
+            $matches = null;
+            if (!$comment) {
+                continue;
+            }
+            preg_match_all('/@(default|rule|required|skip|ghost|format)(?:\[(\w+)\])?\s+?(.+)/', $comment, $matches);
+            if (!$matches) {
+                continue;
+            }
+            $template[$name] = [];
+            for ($i = 0; $i < count($matches[0]); $i++) {
+                $rn = trim($matches[1][$i]); // 指令名称
+                $rs = trim($matches[2][$i]); // 指令场景
+                $rc = trim($matches[3][$i]); // 规则内容
+
+                switch ($rn) {
+                    // 跳过
+                    case 'skip':
+                        $template[$name]['skip'][] = [
+                            'scene' => $rs
+                        ];
+                        break;
+                    // 鬼魂字段
+                    case 'ghost':
+                        $template[$name]['ghost'][] = [
+                            'scene' => $rs
+                        ];
+                        break;
+                    // 默认值
+                    case 'default':
+                        $rc = explode(':', $rc, 2);
+                        $t = trim($rc[0]); // 类型:int,float,null,string
+                        $v = isset($rc[1]) ? trim($rc[1]) : null; // 值
+
+                        if (!is_null($v)) {
+                            $template[$name]['default'][] = [
+                                'type' => $t,
+                                'raw' => $v,
+                                'scene' => $rs,
+                            ];
+                        }
+                        break;
+                    // 规则,直接使用ircmaxell/filterus的字符串参数
+                    case 'rule':
+                        $rc = explode('|', $rc, 2);
+                        $rc[0] = trim($rc[0]);
+                        $kind = match (true) {
+                            str_starts_with($rc[0], 'func') => 'func',
+                            str_starts_with($rc[0], 'method') => 'method',
+                            str_starts_with($rc[0], 'string') => 'string',
+                            default => 'filter',
+                        };
+                        $raw = match ($kind) {
+                            'func' => substr($rc[0], 5),
+                            'method' => substr($rc[0], 7),
+                            default => $rc[0],
+                        };
+                        $template[$name]['rule'][] = [
+                            'kind' => $kind,
+                            'raw' => $raw,
+                            'error' => $rc[1] ?? "{$name}格式不正确",
+                            'scene' => $rs,
+                        ];
+                        break;
+                    //必填字段
+                    case 'required':
+                        $rc = explode('|', $rc);
+                        $template[$name]['required'][] = [
+                            'content' => true,
+                            'scene' => $rs,
+                            'error' => $rc[1] ?? "{$name}不能为空",
+                        ];
+                        break;
+                    //数据转换
+                    case 'format':
+                        $template[$name]['format'][] = [
+                            'type' => $rc
+                        ];
+                        break;
+                }
+            }
+        }
+        return $template;
+    }
+
+    /**
+     * @param string $type
+     * @param string|null $raw
+     * @return mixed
+     */
+    protected function _resolveDefaultValue(string $type, ?string $raw): mixed {
+        if (is_null($raw)) {
+            return null;
+        }
+        return match ($type) {
+            'int' => intval($raw),
+            'float' => floatval($raw),
+            'null' => null,
+            'func' => call_user_func($raw),
+            'method' => call_user_func_array([$this, $raw], []),
+            'array' => json_decode($raw, true),
+            'bool' => $raw === 'true',
+            default => $raw,
+        };
     }
 }

@@ -847,6 +847,26 @@ class Redis extends Cache {
     }
 
     /**
+     * 批量删除指定的key
+     * @param array $keys
+     * @return int|bool 返回删除的key数量，失败返回false
+     */
+    public function deleteMultiple(array $keys): int|bool {
+        if (empty($keys)) {
+            return 0;
+        }
+        try {
+            $prefixedKeys = array_map(function ($key) {
+                return $this->setPrefix($key);
+            }, $keys);
+            return $this->connection->del(...$prefixedKeys);
+        } catch (Throwable $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    /**
      * 清洗缓存
      * @return bool
      */
@@ -878,7 +898,7 @@ class Redis extends Cache {
         if (str_starts_with($key, REDIS_IGNORE_KEY_PREFIX)) {
             return str_replace(REDIS_IGNORE_KEY_PREFIX, "", $key);
         }
-        return $this->keyPrefix . '_' . $key;
+        return $this->keyPrefix . ':' . $key;
     }
 
     protected function onExecuteError(Throwable $exception): void {

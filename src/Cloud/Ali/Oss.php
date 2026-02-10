@@ -101,7 +101,7 @@ class Oss extends Aliyun {
         $cls = implode('\\', $arr);
         /** @var Dao $cls */
         $dao = $cls::factory();
-        $dao->updateTable($table);
+        $dao->updateTableStruct($table);
     }
 
     /**

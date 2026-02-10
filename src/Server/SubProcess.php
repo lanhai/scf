@@ -148,7 +148,7 @@ class SubProcess {
      * @return bool|int
      */
     public function pushConsoleLog($time, $message): bool|int {
-        if (isset($this->consolePushProcess)) {
+        if (isset($this->consolePushProcess) && Coroutine::getCid() > 0) {
             $socket = $this->consolePushProcess->exportSocket();
             return $socket->send(JsonHelper::toJson([
                 'time' => $time,
@@ -584,6 +584,7 @@ class SubProcess {
             MemoryMonitor::start('LogBackup');
             $serverConfig = Config::server();
             $logger = Log::instance();
+
             $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
             //清理过期日志
             $clearCount = $logger->clear($logExpireDays);

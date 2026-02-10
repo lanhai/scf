@@ -51,8 +51,9 @@ class PdoLogger implements ILogger {
                 Counter::instance()->delete($countKey);
             });
         }
-        ProcessLife::instance()->addSql("{$executeSql}【{$time}】ms");
-        PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql}【{$time}】ms");
+        //时间符号
+        ProcessLife::instance()->addSql("{$executeSql}", $time);
+        PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql} t={$time}ms");
         if (!is_null($exception) && !str_starts_with($executeSql, 'DESCRIBE')) {
             $backTrace = $exception->getTrace();
             $file = $backTrace[count($backTrace) - 2]['file'] ?? null;

@@ -4,7 +4,6 @@ namespace Scf\Database\Tools;
 
 use JetBrains\PhpStorm\ArrayShape;
 use PDOException;
-use Scf\Core\Console;
 
 class WhereBuilder {
 

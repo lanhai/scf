@@ -319,15 +319,32 @@ trait QueryBuilder {
                 list($keyword, $expr, $vals) = $item;
 
                 // in 处理
-                foreach ($vals as $k => $val) {
+                $bound = [];
+                foreach ($vals as $val) {
                     if (is_array($val)) {
-                        foreach ($val as &$value) {
-                            if (is_string($value)) {
-                                $value = "'$value'";
+                        if (!$val) {
+                            $expr = preg_replace('/\(\?\)/', '(NULL)', $expr, 1);
+                            continue;
+                        }
+                        $placeholders = [];
+                        foreach ($val as $inValue) {
+                            if ($inValue instanceof Expr) {
+                                $placeholders[] = $inValue->getExpr();
+                                array_push($bound, ...$inValue->getValues());
+                            } else {
+                                $placeholders[] = '?';
+                                $bound[] = $inValue;
                             }
                         }
-                        $expr = preg_replace('/\(\?\)/', sprintf('(%s)', implode(',', $val)), $expr, 1);
-                        unset($vals[$k]);
+                        $expr = preg_replace('/\(\?\)/', '(' . implode(',', $placeholders) . ')', $expr, 1);
+                    } elseif ($val instanceof Expr) {
+                        $count = 0;
+                        $expr = preg_replace('/\?/', $val->getExpr(), $expr, 1, $count);
+                        if ($count > 0) {
+                            array_push($bound, ...$val->getValues());
+                        }
+                    } else {
+                        $bound[] = $val;
                     }
                 }
 
@@ -336,7 +353,7 @@ trait QueryBuilder {
                 } else {
                     $sqls[] = "{$keyword} {$expr}";
                 }
-                array_push($values, ...$vals);
+                array_push($values, ...$bound);
             }
         }
 

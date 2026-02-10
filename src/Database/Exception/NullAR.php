@@ -38,7 +38,7 @@ class NullAR {
             Console::error('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
         } else {
             if (Env::isDev()) {
-                throw new AppError('活动记录数据不存在:' . $this->ar . ';sql:' . $this->sql);
+                throw new AppError('数据对象不存在:' . $this->ar . ';sql:' . $this->sql);
             } else {
                 throw new AppError('未查询到相关数据');
             }

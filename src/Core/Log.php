@@ -4,25 +4,24 @@ namespace Scf\Core;
 
 use Monolog\Logger;
 use Scf\Cache\Redis;
-use Scf\Component\SocketMessager;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\LogTable;
 use Scf\Core\Table\Runtime;
-use Scf\Core\Traits\Singleton;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Exception\AppError;
+use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;
 use Scf\Util\Time;
 use Swoole\Coroutine\System;
 use Throwable;
+use Scf\Cloud\Ali\Dingtalk;
 
 
-class Log {
-    use Singleton;
+class Log extends Component {
 
     protected string $_module = '';
     protected array $_config = [
@@ -32,18 +31,99 @@ class Log {
         'enable_access' => true,
         'check_dir' => true,
         'error_level' => Logger::NOTICE, // 错误日志记录等级
+        'dingtalk_enable_notify' => false,
+        'dingtalk_client_id' => null,
+        'dingtalk_secret' => null,
+        'dingtalk_group_template' => null,
+        'dingtalk_robot_code' => null,
+        'dingtalk_group_id' => null,
+        'dingtalk_uid' => null
     ];
     protected string $backupCounterKey = 'log_backup_start';
     protected string $idCounterKey = 'log_id';
     protected array $logTypes = ['info', 'error', 'slow', 'crontab'];
+    protected ?Dingtalk $dingtalkMessager = null;
 
     /**
      * @var int 日志ID
      */
     protected int $id = 0;
 
-    public function __construct($module = '') {
-        $this->_module = $module;
+    public function _init(): void {
+        if ($this->_config['dingtalk_enable_notify']) {
+            $this->dingtalkMessager = Dingtalk::instance();
+            $this->dingtalkMessager->setting('client_id', $this->_config['dingtalk_client_id']);
+            $this->dingtalkMessager->setting('secret', $this->_config['dingtalk_secret']);
+            $this->dingtalkMessager->setting('group_template', $this->_config['dingtalk_group_template']);
+            $this->dingtalkMessager->setting('robot_code', $this->_config['dingtalk_robot_code']);
+            $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
+            if ($pool instanceof NullPool) {
+                Console::warning('Redis服务不可用,无法启用日志钉钉推送', false);
+            } else {
+                $result = $this->dingtalkAuthCheck();
+                if ($result->hasError()) {
+                    Console::warning($result->getMessage(), false);
+                }
+            }
+        }
+    }
+
+    public function dingtalkAuthCallback($data): Result {
+        $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
+        $params = [
+            'code' => $data['code'],
+            'grantType' => 'authorization_code'
+        ];
+        $apiResponse = Dingtalk::instance()->queryUserAccessToken($params);
+        if ($apiResponse->hasError()) {
+            return Result::error("获取授权TOKEN失败:" . $apiResponse->getMessage());
+        }
+        $responseData = $apiResponse->getData();
+        $userToken = $responseData['accessToken'];
+        //查询UID
+        $infoQuery = Dingtalk::instance()->queryUserInfo(token: $userToken);
+        if ($infoQuery->hasError()) {
+            return Result::error("获取用户信息失败:" . $infoQuery->getMessage());
+        }
+        $unionId = $infoQuery->getData('unionId');
+        $userId = Dingtalk::instance()->queryUserId($unionId);
+        if ($userId->hasError()) {
+            return Result::error("获取userid失败:" . $userId->getMessage());
+        }
+        $this->_config['dingtalk_uid'] = $userId->getData('userid');
+        $pool->set('_LOG_DINGTALK_NOTIFY_UID_', $this->_config['dingtalk_uid'], -1);
+        return $this->dingtalkAuthCheck();
+    }
+
+    protected function dingtalkAuthCheck(): Result {
+        $pool = Redis::pool(Manager::instance()->getConfig('service_center_server') ?: 'main');
+        $dingtalk = Dingtalk::instance();
+        $uid = $this->_config['dingtalk_uid'] ?: $pool->get('_LOG_DINGTALK_NOTIFY_UID_');
+        if (!$uid) {
+            $authUri = $dingtalk->getAuthUri(APP_ID);
+            return Result::error("日志钉钉推送尚未完成授权:" . $authUri);
+        } else {
+            $groupId = $this->_config['dingtalk_group_id'] ?: $pool->get('_LOG_DINGTALK_NOTIFY_GROUP_ID_');
+            if (!$groupId) {
+                $createResult = $dingtalk->createGroup($uid);
+                if ($createResult->hasError()) {
+                    return Result::error("钉钉日志推送群创建失败:" . $createResult->getMessage());
+                } else {
+                    $groupId = $createResult->getData('open_conversation_id');
+                    $pool->set('_LOG_DINGTALK_NOTIFY_GROUP_ID_', $groupId, -1);
+                    $sendResult = $dingtalk->sendGroupMessage($groupId, 'inner_app_template_action_card', [
+                        'title' => '日志钉钉推送服务已启用',
+                        'markdown' => "欢迎使用钉钉通知服务"
+                    ]);
+                    if ($sendResult->hasError()) {
+                        return Result::error("日志钉钉推送服务启用发送消息失败:" . $sendResult->getMessage());
+                    }
+                }
+            }
+            $this->_config['dingtalk_uid'] = $uid;
+            $this->_config['dingtalk_group_id'] = $groupId;
+            return Result::success();
+        }
     }
 
     public static function filter($msg): string {
@@ -93,21 +173,20 @@ class Log {
             $error['file'] = $file ?: $msg->getFile();
             $error['line'] = $line ?: $msg->getLine();
         }
-        $error['time'] = date('Y-m-d H:i:s');
-        $error['ip'] = SERVER_HOST;
         //推送到控制台
         $log = [
             'message' => $error['error'],
             'file' => $error['file'] . ':' . $error['line'],
             'time' => date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3),
-            'module' => $this->_module,
+            'module' => $this->_module ?: 'Log',
             'backtrace' => $this->formatBackTrace($backTrace),
             'host' => SERVER_HOST,
+            'code' => $error['code']
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
         $logId = Counter::instance()->incr($this->idCounterKey);
-        if (RUNNING_SERVER && $table->count() < 200) {
+        if (IS_HTTP_SERVER && $table->count() < 200) {
             $table->set($logId, ['type' => 'error', 'log' => $log]);
         } else {
             $this->push('error', $log);
@@ -115,11 +194,24 @@ class Log {
         //推送到控制台
         Console::error($log['message'] . ' @ ' . $log['file']);
         //通知机器人
-        try {
-            SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
-        } catch (\Exception $exception) {
-            Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
+        if ($this->_config['dingtalk_enable_notify'] && $this->_config['dingtalk_group_id'] && Redis::pool()->lock('LOG:ERROR:' . md5($log['file']), 60)) {
+            $notifyMsg = ['⚠️错误通知⚠️', 'app:' . (Env::isDev() ? 'dev' : 'prod') . '@' . APP_ID];
+            foreach ($log as $k => $v) {
+                if ($k == 'backtrace') {
+                    continue;
+                }
+                $notifyMsg[] = $k . ':' . $v;
+            }
+            Dingtalk::instance()->sendGroupMessage($this->_config['dingtalk_group_id'], 'inner_app_template_action_card', [
+                'title' => '⚠️错误通知⚠️',
+                'markdown' => implode("\n\n", $notifyMsg),
+            ]);
         }
+//        try {
+//            SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('error', $error);
+//        } catch (\Exception $exception) {
+//            Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
+//        }
     }
 
 
@@ -143,7 +235,7 @@ class Log {
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
-        if (RUNNING_SERVER && $table->count() < 200) {
+        if (IS_HTTP_SERVER && $table->count() < 200) {
             $logId = Counter::instance()->incr($this->idCounterKey);
             $table->set($logId, ['type' => 'info', 'log' => $log]);
         } else {
@@ -153,14 +245,24 @@ class Log {
         Console::info($msg);
         //通知机器人
         if ($report) {
-            try {
-                $m['time'] = date('Y-m-d H:i:s');
-                $m['ip'] = SERVER_HOST;
-                $m['message'] = $msg;
-                SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
-            } catch (\Exception $exception) {
-                Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
+            $m['time'] = date('Y-m-d H:i:s');
+            $m['ip'] = SERVER_HOST;
+            $m['message'] = $msg;
+            if ($this->_config['dingtalk_enable_notify'] && $this->_config['dingtalk_group_id'] && Redis::pool()->lock('LOG:ACCESS:' . md5($log['file']), 60)) {
+                $notifyMsg = ['📖日志通知📖', 'app:' . (Env::isDev() ? 'dev' : 'prod') . '@' . APP_ID];
+                foreach ($m as $k => $v) {
+                    $notifyMsg[] = $k . ':' . $v;
+                }
+                Dingtalk::instance()->sendGroupMessage($this->_config['dingtalk_group_id'], 'inner_app_template_action_card', [
+                    'title' => '📖日志通知📖',
+                    'markdown' => implode("\n\n", $notifyMsg),
+                ]);
             }
+//            try {
+//                SERVER_LOG_REPORT == SWITCH_ON and SocketMessager::instance()->publish('access', $m);
+//            } catch (\Exception $exception) {
+//                Console::warning("机器人推送错误日志失败:" . $exception->getMessage(), false);
+//            }
         }
     }
 
@@ -180,11 +282,22 @@ class Log {
         ];
         //存到节点内存等待转存
         $table = LogTable::instance();
-        if (RUNNING_SERVER && $table->count() < 200) {
+        if (IS_HTTP_SERVER && $table->count() < 200) {
             $logId = Counter::instance()->incr($this->idCounterKey);
             $table->set($logId, ['type' => 'slow', 'log' => $log]);
         } else {
             $this->push('slow', $log);
+        }
+        //通知机器人
+        if ($this->_config['dingtalk_enable_notify'] && $this->_config['dingtalk_group_id'] && Redis::pool()->lock('LOG:ERROR:' . md5($log['file']), 60)) {
+            $notifyMsg = ['⚠️慢日志⚠️', 'app:' . (Env::isDev() ? 'dev' : 'prod') . '@' . APP_ID];
+            foreach ($log as $k => $v) {
+                $notifyMsg[] = $k . ':' . $v;
+            }
+            Dingtalk::instance()->sendGroupMessage($this->_config['dingtalk_group_id'], 'inner_app_template_action_card', [
+                'title' => '⚠️慢日志⚠️',
+                'markdown' => implode("\n\n", $notifyMsg),
+            ]);
         }
     }
 
@@ -196,7 +309,7 @@ class Log {
     public function crontab(array $log): void {
         $log['time'] = date('Y-m-d H:i:s') . '.' . substr(Time::millisecond(), -3);
         $table = LogTable::instance();
-        if (RUNNING_SERVER && $table->count() < 100) {
+        if (IS_HTTP_SERVER && $table->count() < 200) {
             $logId = Counter::instance()->incr($this->idCounterKey);
             $table->set($logId, ['type' => 'crontab', 'log' => $log]);
         } else {
@@ -273,7 +386,7 @@ class Log {
             $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
             if ($masterDB instanceof NullPool) {
                 //非server 日志本地化
-                if (!RUNNING_SERVER) {
+                if (!IS_HTTP_SERVER) {
                     if ($type == 'crontab') {
                         $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
                         $content = $log['message'];

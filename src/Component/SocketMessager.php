@@ -5,7 +5,6 @@ namespace Scf\Component;
 use Scf\Core\App;
 use Scf\Core\Coroutine\Component;
 use Scf\Helper\JsonHelper;
-use Scf\Mode\Web\Lifetime;
 use Scf\Util\Sn;
 use Scf\Util\Time;
 use Simps\MQTT\Client;

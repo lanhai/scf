@@ -2,14 +2,15 @@
 
 namespace Scf\Database;
 
-use Co\Channel;
-use JetBrains\PhpStorm\ArrayShape;
+use Throwable;
 use PDOException;
+use Swoole\Coroutine\Channel;
+use Swoole\Coroutine;
 use Scf\Command\Color;
 use Scf\Component\Cache;
-use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Core\Log;
 use Scf\Core\Struct;
 use Scf\Database\Exception\NullAR;
@@ -19,14 +20,10 @@ use Scf\Database\Tools\WhereBuilder;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
 use Scf\Util\File;
-use Swoole\Coroutine;
 use Symfony\Component\Yaml\Yaml;
-use Throwable;
 
 /**
  * 数据库访问对象Database Access Objects
- * @version 1.3
- * @updated 2025-09-10 10:33:34
  */
 class Dao extends Struct {
     /**
@@ -44,7 +41,6 @@ class Dao extends Struct {
      * @var string
      */
     protected string $_primaryKey = 'id';
-
     protected string $_autoIncKey = '';
     protected string $_createSql = '';
 
@@ -90,8 +86,6 @@ class Dao extends Struct {
     protected string $_customPrimaryKey = '';
     protected null|string|int $_primaryVal = null;
 
-    protected static array $_instances;
-    protected static array $_db_instances;
     protected bool $_arExist = false;
     protected Transaction $transaction;
     private string|null $whereSql = null;
@@ -117,7 +111,7 @@ class Dao extends Struct {
      * @param string|null $field
      * @return int|array
      */
-    public function count(string $field = null): int|array {
+    public function count(?string $field = null): int|array {
         $field = $field ?: $this->_primaryKey;
         $connection = $this->connection();
         try {
@@ -152,7 +146,7 @@ class Dao extends Struct {
     }
 
     /**
-     * 获取第一条数据
+     * 获取一条array格式数据
      * @param bool $format
      * @return array|null
      */
@@ -175,10 +169,11 @@ class Dao extends Struct {
     }
 
     /**
+     * 获取一条对象化数据
      * @return NullAR|static
      */
     public function ar(): static|NullAR {
-        $primaryVal = $this->_primaryVal ?: $this->queryPrimaryVal();
+        $primaryVal = $this->_primaryVal ?? $this->queryPrimaryVal();
         if (is_null($primaryVal)) {
             return new NullAR(static::class, $this->whereSql);
         }
@@ -197,7 +192,7 @@ class Dao extends Struct {
         }
         $this->_arExist = true;
         $this->install($result);
-        $this->snapshot = $this->toArray();
+        $this->snapshot = $this->asArray();
         return $this;
     }
 
@@ -282,9 +277,9 @@ class Dao extends Struct {
                     $channel = new Channel($channelSize);
                     for ($i = 0; $i < $channelSize; $i++) {
                         $pn = $randPages[$i];
-                        Coroutine::create(function () use ($pn, $channel, $pageSize, $count) {
-                            $where = $this->_where ?: [];
-                            $channel->push(static::select($this->getPrimaryKey())->where($where)->topPrimarys($pageSize, $pn, $count));
+                        Coroutine::create(function () use ($pn, $channel, $pageSize, $count, $where) {
+                            $localWhere = $where ?: [];
+                            $channel->push(static::select($this->getPrimaryKey())->where($localWhere)->topPrimarys($pageSize, $pn, $count));
                         });
                     }
                     $ids = [];
@@ -303,10 +298,17 @@ class Dao extends Struct {
         }
         $primaryValue = [];
         $size = min($size, count($collections));
-        for ($i = 0; $i < $size; $i++) {
-            shuffle($collections);
-            $primaryValue[] = $collections[0];
-            array_shift($collections);
+        if ($size <= 0) {
+            // 保持与历史行为兼容：不选取任何主键值，直接按照空主键集合构造查询
+            return $this->where([$this->getPrimaryKey() => $primaryValue])->all();
+        }
+        // 更高效地从集合中随机抽取指定数量的主键值（等价于原实现的“无放回随机”语义）
+        $randomKeys = array_rand($collections, $size);
+        if (!is_array($randomKeys)) {
+            $randomKeys = [$randomKeys];
+        }
+        foreach ($randomKeys as $key) {
+            $primaryValue[] = $collections[$key];
         }
         return $this->where([$this->getPrimaryKey() => $primaryValue])->all();
     }
@@ -318,7 +320,6 @@ class Dao extends Struct {
      * @param string|null $countField
      * @return array
      */
-    #[ArrayShape(['list' => "array", 'pages' => "int", 'pn' => "int", 'total' => "int", 'primarys' => "array"])]
     public function list(bool $format = true, int $total = 0, ?string $countField = null): array {
         $select = self::select($this->_primaryKey)->where($this->_where);
         if ($this->_group) {
@@ -472,7 +473,6 @@ class Dao extends Struct {
         if (!$this->getPrimaryKey()) {
             return null;
         }
-        //$connection->select($this->getPrimaryKey());
         $connection->select();
         try {
             if (!$result = $connection->first()) {
@@ -495,20 +495,26 @@ class Dao extends Struct {
      * @return int
      */
     public function update($datas, int $size = 0): int {
+        $priKey = $this->getPrimaryKey();
         if (is_null($this->_where) && !is_null($this->_primaryVal)) {
-            $this->where([$this->_primaryKey => $this->_primaryVal]);
+            $this->where([$priKey => $this->_primaryVal]);
         }
-        $connection = $this->connection(DBS_MASTER, false);
-        if ($size) {
-            $connection->limit($size);
+        $priValues = $this->primaryKeys($size);
+        if (!$priValues) {
+            return 0;
         }
-        $row = $connection->updates($datas)->rowCount();
-        if ($row) {
-            $priIds = $this->primaryKeys();
-            $this->deleteArCache($priIds);
+        $this->where([$priKey => $priValues]);
+        $connection = $this->connection(DBS_MASTER);
+        try {
+            $row = $connection->updates($datas)->rowCount();
+            if ($row) {
+                $this->deleteArCache($priValues);
+            }
+            return $row;
+        } catch (Throwable $exception) {
+            $this->addError($this->_table . '_UPDATE', $exception->getMessage());
+            return 0;
         }
-        $this->resetQueryParams();
-        return $row;
     }
 
 
@@ -518,27 +524,29 @@ class Dao extends Struct {
      * @return int
      */
     public function delete(int $size = 0): int {
-        $uniqueKey = $this->getPrimaryKey();
+        $priKey = $this->getPrimaryKey();
         $uniqueVal = $this->getPrimaryVal();
-        if (!is_null($uniqueVal)) {
-            $connection = $this->transaction ?? $this->master();
-            $row = $connection->table($this->_table)->where("`{$uniqueKey}` = ?", $uniqueVal)->delete()->rowCount();
+        if (!is_null($uniqueVal)) {//单条AR数据
+            $connection = $this->connection(DBS_MASTER);
+            $row = $connection->table($this->_table)->where("`{$priKey}` = ?", $uniqueVal)->delete()->rowCount();
             if ($row) {
                 $this->deleteArCache($uniqueVal);
                 $this->snapshot = null;
-                if (!empty($this->$uniqueKey)) unset($this->$uniqueKey);
+                if (!empty($this->$priKey)) {
+                    unset($this->$priKey);
+                }
             }
-        } else {
-            $connection = $this->transaction ?? $this->connection(DBS_MASTER, false);
-            if ($size) {
-                $connection->limit($size);
+        } else {//批量删除
+            $priValues = $this->primaryKeys($size);
+            if (!$priValues) {
+                return 0;
             }
-            $priIds = $this->primaryKeys($size);
+            $this->where([$priKey => $priValues]);
+            $connection = $this->connection(DBS_MASTER);
             $row = $connection->delete()->rowCount();
-            if ($row && $priIds) {
-                $this->deleteArCache($priIds);
+            if ($row) {
+                $this->deleteArCache($priValues);
             }
-            $this->resetQueryParams();
         }
         return $row;
     }
@@ -566,9 +574,10 @@ class Dao extends Struct {
      */
     public function tableExist(): bool {
         try {
-            $tablePrefix = Pdo::master($this->_dbName)->getConfig('prefix');
+            $pdoMaster = Pdo::master($this->_dbName);
+            $tablePrefix = $pdoMaster->getConfig('prefix');
             $completeTable = $tablePrefix . $this->getTable();
-            Pdo::master($this->getDb())->getDatabase()->exec('DESCRIBE ' . $completeTable);
+            $pdoMaster->getDatabase()->exec('DESCRIBE ' . $completeTable);
             return true;
         } catch (Throwable) {
             return false;
@@ -590,7 +599,7 @@ class Dao extends Struct {
      * @param $latest
      * @return void
      */
-    public function updateTable($latest): void {
+    public function updateTableStruct($latest): void {
         $hasError = false;
         if (!$this->databaseCheck()) {
             return;
@@ -607,53 +616,11 @@ class Dao extends Struct {
                 File::write($versionFile, Yaml::dump($latest, 3));
             }
         } elseif ($current['version'] !== $latest['version']) {
-            if (App::isDevEnv()) goto update;
-            //更新字段
+            if (Env::isDev()) goto update;
+            // 更新字段/索引/主键
             Console::info("【Database】{$latest['db']}.{$latest['table']} " . Color::yellow('需要更新'));
-            // 获取当前和新表的字段
-            $fields = array_keys($latest['columns']);
-            $currentFields = array_keys($current['columns']);
-            // 用于存储生成的 SQL 语句
-            $sqlStatements = [];
-            // 处理新增和更新字段
-            foreach ($fields as $field) {
-                if (!in_array($field, $currentFields)) {
-                    // 新增字段
-                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD COLUMN " . $latest['columns'][$field]['content'];
-                } elseif ($current['columns'][$field]['hash'] != $latest['columns'][$field]['hash']) {
-                    // 更新字段
-                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` MODIFY COLUMN " . $latest['columns'][$field]['content'];
-                }
-            }
-            // 处理删除字段
-            $fieldsToRemove = array_diff($currentFields, $fields);
-            foreach ($fieldsToRemove as $cfield) {
-                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP COLUMN `{$cfield}`";
-            }
-            //更新索引
-            $indexes = array_keys($latest['index']);
-            $currentIndexes = array_keys($current['index']);
-            foreach ($indexes as $index) {
-                if (!in_array($index, $currentIndexes)) {
-                    // 新增字段
-                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
-                } elseif ($current['index'][$index]['hash'] != $latest['index'][$index]['hash']) {
-                    // 更新字段
-                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$index}`";
-                    $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
-                }
-            }
-            // 删除索引
-            $indexesToRemove = array_diff($currentIndexes, $indexes);
-            foreach ($indexesToRemove as $dindex) {
-                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$dindex}`";
-            }
-            // 更新主键
-            if ($latest['primary'] !== $current['primary']) {
-                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP PRIMARY KEY, ADD PRIMARY KEY (" . implode(',', $latest['primary']) . ") USING BTREE";
-            }
-            // 输出所有 SQL 语句
-
+            $sqlStatements = $this->buildSchemaUpdateSqlStatements($latest, $current);
+            // 执行所有 SQL 语句
             foreach ($sqlStatements as $sql) {
                 try {
                     Pdo::master($this->getDb())->getDatabase()->exec($sql)->get();
@@ -676,7 +643,59 @@ class Dao extends Struct {
     }
 
     /**
-     * 保存活动记录
+     * 根据当前/最新表结构配置生成表结构变更 SQL 列表
+     * @param array $latest
+     * @param array $current
+     * @return array
+     */
+    private function buildSchemaUpdateSqlStatements(array $latest, array $current): array {
+        // 获取当前和新表的字段
+        $fields = array_keys($latest['columns']);
+        $currentFields = array_keys($current['columns']);
+        // 用于存储生成的 SQL 语句
+        $sqlStatements = [];
+        // 处理新增和更新字段
+        foreach ($fields as $field) {
+            if (!in_array($field, $currentFields)) {
+                // 新增字段
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD COLUMN " . $latest['columns'][$field]['content'];
+            } elseif ($current['columns'][$field]['hash'] != $latest['columns'][$field]['hash']) {
+                // 更新字段
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` MODIFY COLUMN " . $latest['columns'][$field]['content'];
+            }
+        }
+        // 处理删除字段
+        $fieldsToRemove = array_diff($currentFields, $fields);
+        foreach ($fieldsToRemove as $cfield) {
+            $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP COLUMN `{$cfield}`";
+        }
+        // 更新索引
+        $indexes = array_keys($latest['index']);
+        $currentIndexes = array_keys($current['index']);
+        foreach ($indexes as $index) {
+            if (!in_array($index, $currentIndexes)) {
+                // 新增索引
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
+            } elseif ($current['index'][$index]['hash'] != $latest['index'][$index]['hash']) {
+                // 更新索引
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$index}`";
+                $sqlStatements[] = "ALTER TABLE `{$latest['table']}` ADD " . $latest['index'][$index]['content'];
+            }
+        }
+        // 删除索引
+        $indexesToRemove = array_diff($currentIndexes, $indexes);
+        foreach ($indexesToRemove as $dindex) {
+            $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP INDEX `{$dindex}`";
+        }
+        // 更新主键
+        if ($latest['primary'] !== $current['primary']) {
+            $sqlStatements[] = "ALTER TABLE `{$latest['table']}` DROP PRIMARY KEY, ADD PRIMARY KEY (" . implode(',', $latest['primary']) . ") USING BTREE";
+        }
+        return $sqlStatements;
+    }
+
+    /**
+     * 对象数据落库
      * @param bool $filterNull
      * @param bool $forceInsert
      * @return bool
@@ -686,55 +705,117 @@ class Dao extends Struct {
             if (!$this->validate()) {
                 return false;
             }
-            //数据格式化
             $primaryKey = $this->getPrimaryKey();
-            $datas = $this->format($this->toArray($filterNull));
+            $datas = $this->format($this->asArray($filterNull));
             if (!$datas) {
                 return false;
             }
-            if (!$forceInsert && !empty($this->$primaryKey) && self::has($datas[$primaryKey])) {
-                //如果存在快照只更新值变动过的字段
+
+            // If it's an update operation (not force insert, and primary key exists)
+            if (!$forceInsert && !empty($this->$primaryKey)) {
+                $changedDatas = $datas; // Start with all data from current object
+
+                $nextSnapshot = null;
                 if (!is_null($this->snapshot)) {
-                    foreach ($datas as $k => $v) {
-                        $v = is_array($v) ? JsonHelper::toJson($v) : $v;
-                        if (isset($this->snapshot[$k])) {
-                            $snapshotVaule = is_array($this->snapshot[$k]) ? JsonHelper::toJson($this->snapshot[$k]) : $this->snapshot[$k];
-                            if ($v instanceof Calculator) {
-                                $c = clone $v;
-                                $c->getIncValue() > 0 and $this->snapshot[$k] += $c->getIncValue();
-                                $c->getRedValue() > 0 and $this->snapshot[$k] -= $c->getRedValue();
-                                $this->$k = $this->snapshot[$k];
-                                continue;
-                            }
-                            if (md5(strval($v)) == md5(strval($snapshotVaule))) {
-                                unset($datas[$k]);
-                            } else {
-                                //更新快照里对应字段的值
-                                $this->snapshot[$k] = $datas[$k];
-                            }
-                        }
-                    }
+                    // Filter out unchanged fields based on snapshot
+                    [$changedDatas, $nextSnapshot] = $this->getChangedFieldsFromSnapshot($datas);
                 }
-                if ($datas) {
+
+                if ($changedDatas) { // Only update if there are actual changes
                     try {
                         $connection = $this->transaction ?? $this->master();
-                        $row = $connection->table($this->_table)->where("`{$primaryKey}` = ?", $this->$primaryKey)->updates($datas)->rowCount();
+                        $row = $connection->table($this->_table)
+                            ->where("`{$primaryKey}` = ?", $this->$primaryKey)
+                            ->updates($changedDatas)
+                            ->rowCount();
+                        if ($row === 0) {
+                            $this->addError('save', "数据不存在或没有任何数据变化");
+                            return false; // 明确返回失败
+                        } else {
+                            $this->deleteArCache($this->$primaryKey);
+                            if (!is_null($nextSnapshot)) {
+                                $this->snapshot = $nextSnapshot;
+                            }
+                        }
                     } catch (Throwable $error) {
                         $this->addError('save', $error->getMessage());
                         return false;
                     }
-                    if ($row) {
-                        //清除缓存,此处不能直接使用更新后的快照数更新缓存
-                        $this->deleteArCache($this->$primaryKey);
-                    }
                 }
-            } else {
+            } else { // Insert operation
                 $connection = $this->transaction ?? $this->master();
                 $this->$primaryKey = $connection->insert($this->_table, $datas)->lastInsertId() ?: ($datas[$primaryKey] ?? '');
+                // After insert, set snapshot for future updates
+                $this->snapshot = $this->asArray();
             }
         } catch (Throwable $error) {
             $this->addError('save', $error->getMessage());
             return false;
+        }
+        return true;
+    }
+
+    /**
+     * 根据快照对比当前数据, 返回发生变化的字段数组与更新后的快照
+     * @param array $currentDatas 从当前对象获取的格式化数据
+     * @return array{0: array, 1: array} [changedFields, nextSnapshot]
+     */
+    private function getChangedFieldsFromSnapshot(array $currentDatas): array {
+        $changedFields = [];
+        $nextSnapshot = $this->snapshot ?? [];
+        foreach ($currentDatas as $field => $newValue) {
+            // If field is not in snapshot, it's a new field or was null, consider it changed
+            if (!array_key_exists($field, $nextSnapshot)) {
+                $changedFields[$field] = $newValue;
+                $nextSnapshot[$field] = $newValue;
+                continue;
+            }
+
+            $oldValue = $nextSnapshot[$field];
+
+            // Handle Calculator objects
+            if ($newValue instanceof Calculator) {
+                $calculator = clone $newValue;
+                // Apply calculation to snapshot value
+                $currentValue = is_numeric($oldValue) ? (int)$oldValue : 0;
+                if ($calculator->getIncValue() > 0) {
+                    $currentValue += $calculator->getIncValue();
+                }
+                if ($calculator->getRedValue() > 0) {
+                    $currentValue -= $calculator->getRedValue();
+                }
+                $nextSnapshot[$field] = $currentValue;
+                $this->$field = $currentValue; // Update current object property
+                $changedFields[$field] = $newValue; // Calculator objects always result in a change
+                continue;
+            }
+
+            // Use the new strict comparison method
+            if ($this->isValueChanged($newValue, $oldValue)) {
+                $changedFields[$field] = $newValue;
+                $nextSnapshot[$field] = $newValue;
+            }
+        }
+        return [$changedFields, $nextSnapshot];
+    }
+
+    /**
+     * 严格比较两个值是否发生变化，处理对象和数组
+     * @param mixed $newValue
+     * @param mixed $oldValue
+     * @return bool
+     */
+    private function isValueChanged(mixed $newValue, mixed $oldValue): bool {
+        if ($newValue === $oldValue) {
+            return false;
+        }
+        if (is_array($newValue) || is_object($newValue)) {
+            return serialize($newValue) !== serialize($oldValue);
+        }
+        if (gettype($newValue) !== gettype($oldValue)) {
+            if (is_numeric($newValue) && is_numeric($oldValue)) {
+                return (string)$newValue !== (string)$oldValue; // Compare as strings to handle '0' vs 0
+            }
         }
         return true;
     }
@@ -801,72 +882,6 @@ class Dao extends Struct {
     }
 
     /**
-     * 读取协程AR
-     * @param $id
-     * @return static|null
-     */
-    protected static function getInstanceAr($id): static|null {
-        $key = self::getInstanceArKey($id);
-        return self::$_instances[$key] ?? null;
-    }
-
-    /**
-     * 设置协程AR
-     * @param $id
-     * @param $ar
-     * @return void
-     */
-    protected static function setInstanceAr($id, $ar): void {
-        $cid = Coroutine::getCid();
-        $key = self::getInstanceArKey($id);
-        self::$_instances[$key] = $ar;
-        if ($cid > 0) {
-            Coroutine::defer(function () use ($key) {
-                unset(self::$_instances[$key]);
-            });
-        }
-    }
-
-    /**
-     * 更新协程AR
-     * @param $id
-     * @param $ar
-     * @return void
-     */
-    protected static function updateInstanceAr($id, $ar): void {
-        $key = self::getInstanceArKey($id);
-        if (isset(self::$_instances[$key])) {
-            self::$_instances[$key] = $ar;
-        }
-    }
-
-    /**
-     * 获取协程AR KEY
-     * @param $id
-     * @return string
-     */
-    protected static function getInstanceArKey($id): string {
-        $name = static::class;
-        $cid = Coroutine::getCid();
-        return str_replace("\\", "", $name) . '_' . $id . '_' . $cid;
-    }
-
-    /**
-     * 释放AR
-     * @param $id
-     * @param int|null $cid
-     * @return void
-     */
-    public function destroyInstanceAr($id, int $cid = null): void {
-        $name = static::class;
-        if ($cid === null) {
-            $cid = Coroutine::getCid();
-        }
-        $instanceKey = $name . '_' . $id . '_' . $cid;
-        unset(self::$_instances[$instanceKey]);
-    }
-
-    /**
      * 清除AR缓存
      * @param int|array|string $id
      * @return void
@@ -876,15 +891,14 @@ class Dao extends Struct {
             return;
         }
         if (is_array($id)) {
+            $keys = [];
             foreach ($id as $i) {
-                $arCacheKey = $this->getArCacheKey($i);
-                Cache::instance()->delete($arCacheKey);
-                //$this->destroyInstanceAr($id);
+                $keys[] = $this->getArCacheKey($i);
             }
+            Cache::instance()->deleteMultiple($keys);
         } else {
             $arCacheKey = $this->getArCacheKey($id);
             Cache::instance()->delete($arCacheKey);
-            //$this->destroyInstanceAr($id);
         }
     }
 
@@ -907,36 +921,17 @@ class Dao extends Struct {
             $db = $cls->master();
         }
         $result = $db->table($cls->_table)->where("`{$cls->_primaryKey}` = ?", $id)->select($cls->_primaryKey)->first();
-        if ($result) {
-            return true;
-        }
-        return false;
+        return (bool)$result;
     }
 
     /**
-     * 创建一个AR实例
+     * 创建一个Dao实例
      * @param array|null $data
      * @param string $scene
      * @return static
      */
     public static function factory(array $data = null, string $scene = ''): static {
         return parent::factory($data, $scene);
-    }
-
-    /**
-     * 字段赋值
-     * @param $values
-     * @return static
-     */
-    public static function setValues($values): static {
-        $dbcFields = array_keys(self::factory()->toArray());
-        $index = 0;
-        $item = [];
-        foreach ($values as $value) {
-            $item[$dbcFields[$index]] = $value;
-            $index++;
-        }
-        return self::factory($item);
     }
 
     /**
@@ -998,7 +993,6 @@ class Dao extends Struct {
      * 返回数据库设置
      * @return array
      */
-    #[ArrayShape(['db' => "string", 'table' => "string", 'primary_key' => "string"])]
     public function config(): array {
         return [
             'db' => $this->_dbName,
@@ -1045,16 +1039,7 @@ class Dao extends Struct {
      * @return DB
      */
     protected function slave(): DB {
-        $cid = Coroutine::getCid();
-        if (!isset(self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid])) {
-            self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid] = Pdo::slave($this->_dbName, $this->enablePool)->getDatabase();
-            if ($cid > 0) {
-                Coroutine::defer(function () use ($cid) {
-                    unset(self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid]);
-                });
-            }
-        }
-        return self::$_db_instances[DBS_SLAVE . '_' . $this->_dbName . '_' . $cid];
+        return Pdo::slave($this->_dbName, $this->enablePool)->getDatabase();
     }
 
     /**
@@ -1062,28 +1047,17 @@ class Dao extends Struct {
      * @return DB
      */
     protected function master(): DB {
-        $cid = Coroutine::getCid();
-        if (!isset(self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid])) {
-            self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid] = Pdo::master($this->_dbName, $this->enablePool)->getDatabase();
-            if ($cid > 0) {
-                Coroutine::defer(function () use ($cid) {
-                    unset(self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid]);
-                });
-            }
-        }
-        return self::$_db_instances[DBS_MASTER . '_' . $this->_dbName . '_' . $cid];
+        return Pdo::master($this->_dbName, $this->enablePool)->getDatabase();
     }
 
     /**
      * 为当前对象开启事务
      * @return void
+     * @throws Throwable
      */
     public function beginTransaction(): void {
-        try {
-            $this->transaction = $this->master()->beginTransaction();
-        } catch (Throwable $exception) {
-            Console::error($exception->getMessage());
-        }
+        $this->transaction = $this->master()->beginTransaction();
+
     }
 
     /**

@@ -306,7 +306,7 @@ class App {
                     } else {
                         /** @var Dao $cls */
                         $dao = $cls::factory();
-                        $dao->updateTable($table);
+                        $dao->updateTableStruct($table);
                     }
                 }
                 Console::info("【Database】数据库&表检查更新完成");

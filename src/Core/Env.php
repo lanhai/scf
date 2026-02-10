@@ -43,7 +43,7 @@ class Env {
         !defined('SERVER_HOST') and define('SERVER_HOST', $options['host'] ?? Env::getIntranetIp());
         !defined('SERVER_HOST_IS_IP') and define('SERVER_HOST_IS_IP', filter_var(SERVER_HOST, FILTER_VALIDATE_IP) !== false);
         !defined('SERVER_APP_FINGERPRINT_FILE') and define('SERVER_APP_FINGERPRINT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.fingerprint');
-        if (RUNNING_BUILD || RUNNING_PACKAGE || RUNNING_CREATE_AR) {
+        if (RUNNING_BUILD || RUNNING_BUILD_FRAMEWORK || RUNNING_CREATE_AR) {
             $runEnv = 'dev';
         } else {
             $runEnv = $commandManager->issetOpt('dev') ? 'dev' : ($options['env'] ?? (ENV_VARIABLES['app_env'] ?: 'production'));

@@ -156,18 +156,18 @@ class Http extends \Scf\Core\Server {
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? 1000);
         //开启日志推送
-        Console::enablePush($serverConfig['enable_log_push'] ?? 1);
+        Console::enablePush($serverConfig['enable_log_push'] ?? STATUS_ON);
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
-            'worker_num' => $serverConfig['worker_num'] ?? 128,
-            'max_wait_time' => $serverConfig['max_wait_time'] ?? 30,
+            'worker_num' => $serverConfig['worker_num'] ?? 8,
+            'max_wait_time' => $serverConfig['max_wait_time'] ?? 120,
             'reload_async' => true,
             'enable_reuse_port' => true,
             'daemonize' => Manager::instance()->issetOpt('d'),
             'log_file' => APP_PATH . '/log/server.log',
             'pid_file' => SERVER_MASTER_PID_FILE,
-            'task_worker_num' => $serverConfig['task_worker_num'] ?? 128,
+            'task_worker_num' => $serverConfig['task_worker_num'] ?? 4,
             'task_enable_coroutine' => true,
             'max_connection' => $serverConfig['max_connection'] ?? 4096,//最大连接数
             'max_coroutine' => $serverConfig['max_coroutine'] ?? 10240,//最多启动多少个携程

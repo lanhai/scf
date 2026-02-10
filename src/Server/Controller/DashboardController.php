@@ -421,7 +421,7 @@ class DashboardController extends Controller {
         if (APP_SRC_TYPE == 'phar') {
             $status['latest_version'] = App::latestVersion();
         }
-        $client = Http::create(FRAMEWORK_REMOTE_VERSION_SERVER);
+        $client = Http::create(FRAMEWORK_VERSION_SERVER);
         $remoteVersionResponse = $client->get();
         $client->close();
         if (!$remoteVersionResponse->hasError()) {
@@ -437,7 +437,7 @@ class DashboardController extends Controller {
         } else {
             $currentDashboardVersion = JsonHelper::recover(File::read($versionJson));
         }
-        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_REMOTE_VERSION_SERVER));
+        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_VERSION_SERVER));
         $dashboardVersionResponse = $client->get();
         if (!$dashboardVersionResponse->hasError()) {
             $dashboardVersion = $dashboardVersionResponse->getData();
@@ -468,7 +468,7 @@ class DashboardController extends Controller {
         } else {
             $localVersion = JsonHelper::recover(File::read($versionJson))['version'] ?? '0.0.0';
         }
-        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_REMOTE_VERSION_SERVER));
+        $client = Http::create(str_replace('version.json', 'dashboard-version.json', FRAMEWORK_VERSION_SERVER));
         $dashboardVersionResponse = $client->get();
         if ($dashboardVersionResponse->hasError()) {
             return Result::error('版本信息获取失败:' . $dashboardVersionResponse->getMessage());

@@ -3,6 +3,7 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
+use Scf\Cloud\Ali\Dingtalk;
 use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
@@ -49,16 +50,37 @@ class CgiListener extends Listener {
             $response->end();
             return;
         }
+        Response::instance()->register($response);
+        Request::instance()->register($request);
         if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
             $response->end();
             return;
+        } elseif ($request->server['path_info'] == '/@log:dingtalk:auth:callback@/') {
+            $response->status(200);
+            //$response->header("Content-Type", "text/html; charset=utf-8");
+            $response->header("Content-Type", "application/json;charset=utf-8");
+            Request::get()->pack($data);
+            $result = \Scf\Core\Log::instance()->dingtalkAuthCallback($data);
+            if ($result->hasError()) {
+                $response->end(JsonHelper::toJson([
+                    'errCode' => $result->getErrCode(),
+                    'message' => $result->getMessage(),
+                    'data' => $result->getData()
+                ]));
+            } else {
+                $response->end(JsonHelper::toJson([
+                    'errCode' => 0,
+                    'message' => "SUCCESS",
+                    'data' => "授权完成"
+                ]));
+            }
+            return;
         }
-
         $mysqlExecuteCount = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
         $requestCount = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
         if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
             Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
-            $response->header("Content-Type", "text/html; charset=utf-8");
+            $response->header("Content-Type", "application/json;charset=utf-8");
             $response->status(503);
             $response->end(JsonHelper::toJson([
                 'errCode' => 'SERVER_BUSY',
@@ -67,8 +89,7 @@ class CgiListener extends Listener {
             ]));
             return;
         }
-        Response::instance()->register($response);
-        Request::instance()->register($request);
+
         $workerId = Server::server()->worker_id + 1;
         //等待响应
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);

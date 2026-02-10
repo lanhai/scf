@@ -525,6 +525,7 @@ abstract class AConnection implements IConnection {
         while ($row = $this->statement->fetchColumn($columnNumber)) {
             $column[] = $row;
         }
+        $this->releaseConnectionIfNeeded();
         return $column;
     }
 
@@ -579,6 +580,7 @@ abstract class AConnection implements IConnection {
      * @param array $data
      * @param string $insert
      * @return IConnection
+     * @throws Throwable
      */
     public function insert(string $table, array $data, string $insert = 'INSERT INTO'): IConnection {
         $prefix = $this->config['prefix'] ?? '';

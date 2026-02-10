@@ -176,7 +176,7 @@ class Console {
      * @return void
      */
     public static function error(string $str, bool $push = true): void {
-        self::log(Color::red($str), $push);
+        self::log($str, $push, 'red');
     }
 
     /**
@@ -186,7 +186,7 @@ class Console {
      * @return void
      */
     public static function success(string $str, bool $push = true): void {
-        self::log(Color::green($str), $push);
+        self::log($str, $push, 'green');
     }
 
     /**
@@ -196,7 +196,7 @@ class Console {
      * @return void
      */
     public static function warning(string $str, bool $push = true): void {
-        self::log(Color::brown($str), $push);
+        self::log($str, $push, 'brown');
     }
 
     /**
@@ -205,16 +205,17 @@ class Console {
      * @return void
      */
     public static function info(string $str, bool $push = true): void {
-        self::log(Color::cyan($str), $push);
+        self::log($str, $push, 'cyan');
     }
 
     /**
      * 向控制台输出消息
      * @param string $str
      * @param bool $push
+     * @param null $color
      */
-    public static function log(string $str, bool $push = true): void {
-        if ($push && RUNNING_SERVER && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
+    public static function log(string $str, bool $push = true, $color = null): void {
+        if ($push && IS_HTTP_SERVER && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
             try {
                 Http::instance()->pushConsoleLog(date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3), Log::filter($str));
             } catch (Throwable $e) {
@@ -224,6 +225,9 @@ class Console {
         if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
         } else {
+            if ($color) {
+                $str = Color::$color($str);
+            }
             $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";
         }
         echo $str;

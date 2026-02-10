@@ -2,6 +2,7 @@
 
 namespace Scf\Component\Coroutine;
 
+use RuntimeException;
 use Scf\Core\Coroutine\Component;
 use Scf\Cache\Redis;
 use Scf\Mode\Web\Request;
@@ -12,15 +13,13 @@ class Session extends Component {
 
     protected array $_config = [
         'prefix' => null, // SESSION名称前缀
-        'name' => null,
         'path' => null,
         'domain' => null,
         'expire' => null,
-        'use_trans_sid' => null,
-        'use_cookies' => null,
-        'cache_limiter' => null,
-        'cache_expire' => null,
-        'auto_start' => true,
+        'cookie_name' => '_CID_',
+        'cookie_secure' => false,
+        'cookie_httponly' => true,
+        'cookie_samesite' => 'Lax',
     ];
     protected string $_prefix = '';
     protected ?string $sessionId = null;
@@ -28,13 +27,18 @@ class Session extends Component {
 
     protected function _init(): void {
         $this->_prefix = is_null($this->_config['prefix']) ? '' : $this->_config['prefix'];
-        $sessionId = Request::cookie('_SESSIONID_');
+        $cookieName = $this->_config['cookie_name'];
+        $sessionId = Request::cookie($cookieName);
         if (!$sessionId) {
             $sessionId = Sn::create_uuid();
-            Response::instance()->setCookie('_SESSIONID_', $sessionId);
+            Response::instance()->setCookie(
+                $cookieName,
+                $sessionId,
+                $this->_config
+            );
         }
         $this->_id = $sessionId;
-        $this->sessionId = '_SESSION_' . $sessionId;
+        $this->sessionId = 'session:' . $sessionId;
     }
 
     /**
@@ -43,18 +47,25 @@ class Session extends Component {
      * @return mixed
      */
     public function get(string $name = null): mixed {
+        if (is_null($name)) {
+            throw new RuntimeException('Session::get(null) is forbidden, use all() explicitly.');
+        }
         if ($this->_prefix) {
             $name = $this->_prefix . $name;
         }
-        if (is_null($name)) {
-            $result = Redis::pool()->hgetAll($this->sessionId);
-        } else {
-            $result = Redis::pool()->hget($this->sessionId, $name);
-        }
-        if ($result) {
+        $result = Redis::pool()->hget($this->sessionId, $name);
+        if ($result && str_contains($name, 'LOGIN_UID')) {
             Redis::pool()->expire($this->sessionId, $this->_config['expire'] ?: 1800);
         }
         return $result;
+    }
+
+    public function all(): array {
+        $result = Redis::pool()->hgetAll($this->sessionId);
+        if ($result) {
+            Redis::pool()->expire($this->sessionId, $this->_config['expire'] ?: 1800);
+        }
+        return $result ?: [];
     }
 
     /**
@@ -64,6 +75,9 @@ class Session extends Component {
      * @return bool|int
      */
     public function set(string $name, $value): bool|int {
+        if ($value === null) {
+            return $this->del($name);
+        }
         if ($this->_prefix) {
             $name = $this->_prefix . $name;
         }
@@ -89,13 +103,6 @@ class Session extends Component {
      */
     public function clean(): bool {
         return Redis::pool()->delete($this->sessionId);
-    }
-
-    /**
-     * 开启session
-     */
-    public function start(): void {
-        session_start();
     }
 
     public function id(): ?string {

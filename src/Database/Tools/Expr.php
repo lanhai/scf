@@ -38,4 +38,18 @@ class Expr {
         return vsprintf($expr, $this->values);
     }
 
+    /**
+     * @return string
+     */
+    public function getExpr(): string {
+        return $this->expr;
+    }
+
+    /**
+     * @return array
+     */
+    public function getValues(): array {
+        return $this->values;
+    }
+
 }

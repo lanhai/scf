@@ -86,7 +86,7 @@ class Response {
             $twig = new Environment($loader, [
                 'cache' => APP_TMP_PATH . '/template',
                 'auto_reload' => true,  // 当模板文件修改时自动重新编译
-                'debug' => \Scf\Core\App::isDevEnv(), // 开启调试模式
+                'debug' => Env::isDev(), // 开启调试模式
             ]);
             try {
                 self::instance()->end($twig->render($status == 404 ? '404.html' : 'error.html', ['msg' => $output['message']]));
@@ -234,7 +234,7 @@ EOT;
 
     public function json($data): void {
         $logger = ProcessLife::instance();
-        Env::isDev() and $data['debug'] = $logger->requestDebugInfo();
+        Env::isDev() and $data['debug_info'] = $logger->requestDebugInfo();
         $this->setHeader('Content-Type', 'application/json;charset=utf-8');
         $this->setHeader('Server', 'scf-http-server');
         $this->end(JsonHelper::toJson($data));

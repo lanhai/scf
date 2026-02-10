@@ -55,7 +55,7 @@ class StatisticModel {
                 } else {
                     /** @var Dao $cls */
                     $dao = $cls::factory();
-                    $dao->updateTable($table);
+                    $dao->updateTableStruct($table);
                 }
             }
         }

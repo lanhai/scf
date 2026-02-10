@@ -62,13 +62,14 @@ class ProcessLife {
     /**
      * 记录redis操作记录
      * @param $cmd
+     * @param float $cost
      * @return void
      */
-    public function addRedis($cmd): void {
+    public function addRedis($cmd, float $cost): void {
         if (ENV_MODE !== MODE_CGI) {
             return;
         }
-        $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $cmd;
+        $record = "【" . date('H:i:s') . "." . substr(Time::millisecond(), -3) . " ⧖{$cost}ms】" . $cmd;
         if (str_starts_with(strtolower($cmd), 'get') || str_starts_with(strtolower($cmd), 'hget')) {
             $this->redisLogs['get'] += 1;
         } else {
@@ -93,13 +94,14 @@ class ProcessLife {
     /**
      * 记录sql
      * @param $sql
+     * @param float $cost
      * @return void
      */
-    public function addSql($sql): void {
+    public function addSql($sql, float $cost): void {
         if (ENV_MODE !== MODE_CGI) {
             return;
         }
-        $record = "【" . date('m-d H:i:s') . "." . substr(Time::millisecond(), -3) . "】" . $sql;
+        $record = "【" . date('H:i:s') . "." . substr(Time::millisecond(), -3) . " ⧖{$cost}ms】" . $sql;
         if (str_starts_with(strtolower($sql), 'select')) {
             $this->databaseLogs['read'] += 1;
         } else {
@@ -115,7 +117,7 @@ class ProcessLife {
     public function requestDebugInfo(): array {
         return [
             'cid' => Coroutine::getCid(),
-            'runtime' => App::instance()->consume() . 'ms',
+            'consume_ms' => App::instance()->consume(),
             'database' => $this->databaseLogs,
             'redis' => $this->redisLogs
         ];

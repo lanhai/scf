@@ -46,6 +46,15 @@ class Cache extends Component {
     }
 
     /**
+     * 批量删除key
+     * @param array $keys
+     * @return int|bool
+     */
+    public function deleteMultiple(array $keys): int|bool {
+        return $this->driver->deleteMultiple($keys);
+    }
+
+    /**
      * @return void
      */
     public function close(): void {
