@@ -357,53 +357,6 @@ class MemoryMonitor {
         return $buildRows();
     }
 
-    /**
-     * @param $filter
-     */
-    public static function usage($filter = null): void {
-        Coroutine::create(function () use ($filter) {
-            $client = Http::create(Dashboard::host() . '/memory');
-            $result = $client->get();
-            if ($result->hasError()) {
-                Console::error($result->getMessage());
-                return;
-            }
-            $data = $result->getData('data');
-            $output = new ConsoleOutput();
-            $table = new Table($output);
-            // 初次构建
-            $start = time();
-            // 富表格输出
-            $table->setHeaders([
-                Color::notice('进程名'),
-                Color::notice('PID'),
-                Color::notice('分配内存(PHP)'),
-                Color::notice('保留内存(PHP real)'),
-                Color::notice('峰值内存(PHP peak)'),
-                Color::notice('OS实际占用(PSS/RSS)'),
-                Color::notice('RSS'),
-                Color::notice('PSS'),
-                Color::notice('更新时间'),
-                Color::notice('状态'),
-            ])->setRows(array_values($data['rows']));
-            $table->render();
-            $cost = (time() - $start) ?: 1;
-            Console::write(
-                "共" . Color::notice($data['total']) .
-                "个进程,离线" . Color::red($data['offline']) .
-                "个, 实际占用(PHP real):" . Color::cyan(($data['real_total_mb']) . "MB") .
-                ", OS实际累计(PSS/RSS):" . Color::cyan(($data['os_actual_total_mb']) . "MB") .
-                ", RSS累计:" . Color::cyan(($data['rss_total_mb']) . "MB") .
-                (isset($data['pss_total_mb']) ? ", PSS累计:" . Color::cyan(($data['pss_total_mb']) . "MB") : '') .
-                ", 系统总内存:" . Color::cyan(($data['system_total_mem_gb'] ?? '-') . "GB") .
-                ", 系统空闲:" . Color::cyan(($data['system_free_mem_gb'] ?? '-') . "GB") .
-                ", 查询耗时:" . $cost . "秒"
-            );
-        });
-        Event::wait();
-    }
-
-
     public static function stop(): void {
         if (self::$timerId) {
             Timer::clear(self::$timerId);

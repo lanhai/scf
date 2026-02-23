@@ -34,7 +34,7 @@ class Dashboard {
     protected ?Server $_SERVER = null;
 
     public static function host(): string {
-        return 'http://127.0.0.1:' . File::read(SERVER_PORT_FILE);
+        return 'http://127.0.0.1:' . File::read(SERVER_DASHBOARD_PORT_FILE);
     }
 
     public static function start(): void {

@@ -24,6 +24,7 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Scf\Util\Sn;
+use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Timer;
@@ -148,7 +149,7 @@ class CgiListener extends Listener {
                             'line' => $exception->getLine(),
                             'time' => date('Y-m-d H:i:s'),
                             'trace' => Env::isDev() ? $exception->getTrace() : null,
-                            'ip' => Server::instance()->ip()
+                            'ip' => Server::instance()->host()
                         ]);
                     }
                     goto Done;
@@ -165,7 +166,7 @@ class CgiListener extends Listener {
                     'line' => $line,
                     'time' => date('Y-m-d H:i:s'),
                     'trace' => Env::isDev() ? $exception->getTrace() : null,
-                    'ip' => Server::instance()->ip()
+                    'ip' => Server::instance()->host()
                 ]);
             }
         }

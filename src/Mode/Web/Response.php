@@ -254,7 +254,8 @@ EOT;
     }
 
 
-    #[NoReturn] public function stop($code): void {
+    #[NoReturn]
+    public function stop($code): void {
         $this->saveSlowLog();
         $this->isEnd = true;
         exit($code);

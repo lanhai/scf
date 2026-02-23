@@ -41,7 +41,7 @@ class Http extends \Scf\Core\Server {
      */
     protected string $id = '';
     /**
-     * @var string 绑定ip
+     * @var string 绑定host
      */
     protected string $bindHost = '0.0.0.0';
     /**
@@ -49,9 +49,9 @@ class Http extends \Scf\Core\Server {
      */
     protected int $bindPort = 0;
     /**
-     * @var string 本机ip地址
+     * @var string 本机host地址
      */
-    protected string $ip;
+    protected string $host;
     /**
      * @var string 节点名称
      */
@@ -62,7 +62,7 @@ class Http extends \Scf\Core\Server {
      */
     protected int $started = 0;
 
-    protected SubProcess $subProcess;
+    protected SubProcessManager $subProcessManager;
 
     /**
      * @param string $role
@@ -75,7 +75,7 @@ class Http extends \Scf\Core\Server {
         $this->role = $role;
         $this->started = time();
         $this->id = APP_NODE_ID;
-        $this->ip = SERVER_HOST;
+        $this->host = SERVER_HOST;
     }
 
     /**
@@ -132,29 +132,14 @@ class Http extends \Scf\Core\Server {
         Dashboard::start();
         //启动masterDB(redis协议)服务器
         //MasterDB::start(MDB_PORT);
-        //检查Redis是否配置
-//        $process = new Process(function () {
-//            App::mount();
-//            $pool = Redis::pool(\Scf\Server\Manager::instance()->getConfig('service_center_server') ?: 'main');
-//            if ($pool instanceof NullPool) {
-//                Runtime::instance()->set('REDIS_ENABLE', false);
-//                Runtime::instance()->set('REDIS_UNAVAILABLE_REMARK', $pool->getError());
-//            } else {
-//                Runtime::instance()->set('REDIS_ENABLE', true);
-//            }
-//        });
-//        $process->start();
-//        Process::wait();
-//        if (!Runtime::instance()->get('REDIS_ENABLE')) {
-//            Console::error("【Server】服务注册不可用:" . Runtime::instance()->get('REDIS_UNAVAILABLE_REMARK'));
-//            exit(0);
-//        }
         //加载服务器配置
         $serverConfig = Config::server();
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);
         !defined('MAX_MYSQL_EXECUTE_LIMIT') and define('MAX_MYSQL_EXECUTE_LIMIT', $serverConfig['max_mysql_execute_limit'] ?? 1000);
+        //是否允许跨域请求
+        define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
         //开启日志推送
         Console::enablePush($serverConfig['enable_log_push'] ?? STATUS_ON);
         //实例化服务器
@@ -164,14 +149,14 @@ class Http extends \Scf\Core\Server {
             'max_wait_time' => $serverConfig['max_wait_time'] ?? 120,
             'reload_async' => true,
             'enable_reuse_port' => true,
-            'daemonize' => Manager::instance()->issetOpt('d'),
+            'daemonize' => false,//Manager::instance()->issetOpt('d'),
             'log_file' => APP_PATH . '/log/server.log',
             'pid_file' => SERVER_MASTER_PID_FILE,
             'task_worker_num' => $serverConfig['task_worker_num'] ?? 4,
             'task_enable_coroutine' => true,
-            'max_connection' => $serverConfig['max_connection'] ?? 4096,//最大连接数
-            'max_coroutine' => $serverConfig['max_coroutine'] ?? 10240,//最多启动多少个携程
-            'max_concurrency' => $serverConfig['max_concurrency'] ?? 2048,//最高并发
+            'max_connection' => $serverConfig['max_connection'] ?? 1024,//最大连接数
+            'max_coroutine' => $serverConfig['max_coroutine'] ?? 1024 * 3,//最多启动多少个携程
+            'max_concurrency' => $serverConfig['max_concurrency'] ?? 1024,//最高并发
             'package_max_length' => $serverConfig['package_max_length'] ?? 10 * 1024 * 1024
         ];
         if (!empty($serverConfig['static_handler_locations']) || Env::isDev()) {
@@ -181,10 +166,8 @@ class Http extends \Scf\Core\Server {
             $setting['http_index_files'] = ['index.html'];
             $setting['static_handler_locations'] = $serverConfig['static_handler_locations'] ?? ['/cp', '/asset'];
         }
-        //是否允许跨域请求
-        define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
         $this->server->set($setting);
-        //监听HTTP请求
+        //监听HTTP&socket连接
         try {
             if (self::isPortInUse($this->bindPort)) {
                 $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程'));
@@ -215,7 +198,7 @@ class Http extends \Scf\Core\Server {
         $rport = RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0);
         if ($rport) {
             try {
-                $rpcPort = $rport;// self::getUseablePort($rport);
+                $rpcPort = $rport;
                 // 尝试杀掉占用端口的进程
                 if (self::isPortInUse($rpcPort)) {
                     $this->log(Color::yellow('RPC服务端口[' . $rpcPort . ']被占用,尝试结束进程'));
@@ -292,6 +275,7 @@ class Http extends \Scf\Core\Server {
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             MemoryMonitor::start('Server:Master');
+            //每三秒将服务器运行状态写入内存表
             Timer::tick(1000 * 3, function ($tid) use ($server) {
                 if (!Runtime::instance()->serverIsAlive()) {
                     Timer::clear($tid);
@@ -302,10 +286,7 @@ class Http extends \Scf\Core\Server {
 
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
-            define("SERVER_MASTER_PID", $masterPid);
-            define("SERVER_MANAGER_PID", $managerPid);
-            File::write(SERVER_MANAGER_PID_FILE, $managerPid);
-            File::write(SERVER_PORT_FILE, Runtime::instance()->dashboardPort());
+            File::write(SERVER_DASHBOARD_PORT_FILE, Runtime::instance()->dashboardPort());
             $scfVersion = SCF_VERSION;
             $role = SERVER_ROLE;
             $env = SERVER_RUN_ENV;
@@ -358,17 +339,8 @@ INFO;
         });
 
         try {
-            $this->subProcess = new SubProcess($this->server, $serverConfig);
-            $subProcess = new Process(function () {
-                while (true) {
-                    if (Runtime::instance()->serverIsReady()) {
-                        break;
-                    }
-                    sleep(1);
-                }
-                $this->subProcess->start();
-            });
-            $subProcess->start();
+            $this->subProcessManager = new SubProcessManager($this->server, $serverConfig);
+            $this->subProcessManager->start();
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -383,10 +355,10 @@ INFO;
      * @return bool|int
      */
     public function pushConsoleLog($time, $message): bool|int {
-        if (!isset($this->subProcess)) {
+        if (!isset($this->subProcessManager)) {
             return false;
         }
-        return $this->subProcess->pushConsoleLog($time, $message);
+        return $this->subProcessManager->pushConsoleLog($time, $message);
     }
 
 
@@ -397,7 +369,7 @@ INFO;
     public function shutdown(): void {
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsAlive(false);
-        $this->subProcess->shutdown();
+        $this->subProcessManager->shutdown();
         Timer::after(1000, function () {
             $this->server->shutdown();
         });
@@ -426,7 +398,7 @@ INFO;
         } else {
             Console::info('【Server】' . Color::yellow('正在重启服务器'));
         }
-        $this->subProcess->sendCommand('upgrade');
+        $this->subProcessManager->sendCommand('upgrade');
         $this->server->reload();
         //重启控制台
         if (App::isMaster()) {
@@ -480,8 +452,8 @@ INFO;
     /**
      * @return string|null
      */
-    public function ip(): ?string {
-        return $this->ip;
+    public function host(): ?string {
+        return $this->host;
     }
 
     public function getPort(): int {

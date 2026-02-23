@@ -3,7 +3,6 @@
 namespace Scf\Server;
 
 use Scf\Command\Color;
-use Scf\Command\Manager as CommandManager;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -31,9 +30,9 @@ use Swoole\WebSocket\Server;
 use Throwable;
 use function Co\run;
 
-class SubProcess {
+class SubProcessManager {
 
-    protected array $process = [];
+    protected array $processList = [];
     protected array $pidList = [];
     protected array $serverConfig;
     protected Server $server;
@@ -45,28 +44,41 @@ class SubProcess {
         $runQueueInMaster = $serverConfig['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $serverConfig['redis_queue_in_slave'] ?? false;
         //内存使用情况统计
-        $this->process['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
+        $this->processList['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
         //心跳检测
-        $this->process['Heartbeat'] = $this->createHeartbeatProcess();
+        $this->processList['Heartbeat'] = $this->createHeartbeatProcess();
         //日志备份
-        $this->process['LogBackup'] = $this->createLogBackupProcess();
-        //定时任务
-        $this->process['CrontabManager'] = $this->createCrontabManagerProcess();
+        $this->processList['LogBackup'] = $this->createLogBackupProcess();
+        //排程任务
+        $this->processList['CrontabManager'] = $this->createCrontabManagerProcess();
         //控制台日志推送
         $this->consolePushProcess = $this->createConsolePushProcess();
         //redis队列
         if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
-            $this->process['RedisQueue'] = $this->createRedisQueueProcess();
+            $this->processList['RedisQueue'] = $this->createRedisQueueProcess();
         }
         //文件变更监听
-        if ((Env::isDev() && APP_SRC_TYPE == 'dir') || CommandManager::instance()->issetOpt('watch')) {
-            $this->process['FileWatch'] = $this->createFileWatchProcess();
+        if (Env::isDev() && APP_SRC_TYPE == 'dir') {
+            $this->processList['FileWatch'] = $this->createFileWatchProcess();
         }
     }
 
     public function start(): void {
+        $subProcess = new Process(function () {
+            while (true) {
+                if (Runtime::instance()->serverIsReady()) {
+                    break;
+                }
+                sleep(1);
+            }
+            $this->run();
+        });
+        $subProcess->start();
+    }
+
+    private function run(): void {
         $this->consolePushProcess->start();
-        foreach ($this->process as $name => $process) {
+        foreach ($this->processList as $name => $process) {
             /** @var Process $process */
             $process->start();
             $this->pidList[$process->pid] = $name;
@@ -84,27 +96,27 @@ class SubProcess {
                     switch ($oldProcessName) {
                         case 'MemoryUsageCount':
                             $newProcess = $this->createMemoryUsageCountProcess();
-                            $this->process['MemoryUsageCount'] = $newProcess;
+                            $this->processList['MemoryUsageCount'] = $newProcess;
                             break;
                         case 'Heartbeat':
                             $newProcess = $this->createHeartbeatProcess();
-                            $this->process['Heartbeat'] = $newProcess;
+                            $this->processList['Heartbeat'] = $newProcess;
                             break;
                         case 'LogBackup':
                             $newProcess = $this->createLogBackupProcess();
-                            $this->process['LogBackup'] = $newProcess;
+                            $this->processList['LogBackup'] = $newProcess;
                             break;
                         case 'CrontabManager':
                             $newProcess = $this->createCrontabManagerProcess();
-                            $this->process['CrontabManager'] = $newProcess;
+                            $this->processList['CrontabManager'] = $newProcess;
                             break;
                         case 'FileWatch':
                             $newProcess = $this->createFileWatchProcess();
-                            $this->process['FileWatch'] = $newProcess;
+                            $this->processList['FileWatch'] = $newProcess;
                             break;
                         case 'RedisQueue':
                             $newProcess = $this->createRedisQueueProcess();
-                            $this->process['RedisQueue'] = $newProcess;
+                            $this->processList['RedisQueue'] = $newProcess;
                             break;
                         default:
                             Console::warning("子进程 {$pid} 退出，未知进程");
@@ -122,7 +134,7 @@ class SubProcess {
     public function shutdown(): void {
         //Process::kill($this->consolePushProcess->pid, SIGTERM);
         $this->consolePushProcess->write('shutdown');
-        foreach ($this->process as $process) {
+        foreach ($this->processList as $process) {
             /** @var Process $process */
             $process->write('shutdown');
             //$process->exit();
@@ -131,7 +143,7 @@ class SubProcess {
     }
 
     public function sendCommand($cmd, array $params = []): void {
-        foreach ($this->process as $process) {
+        foreach ($this->processList as $process) {
             /** @var Process $process */
             $socket = $process->exportSocket();
             $socket->send(JsonHelper::toJson([

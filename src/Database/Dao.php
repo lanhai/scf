@@ -712,7 +712,7 @@ class Dao extends Struct {
             }
 
             // If it's an update operation (not force insert, and primary key exists)
-            if (!$forceInsert && !empty($this->$primaryKey)) {
+            if (!$forceInsert && !empty($this->$primaryKey) && static::has($this->$primaryKey)) {
                 $changedDatas = $datas; // Start with all data from current object
 
                 $nextSnapshot = null;
@@ -915,13 +915,9 @@ class Dao extends Struct {
         if (Cache::instance()->get($cls->getArCacheKey($id))) {
             return true;
         }
-        if ($actor == DBS_SLAVE) {
-            $db = $cls->slave();
-        } else {
-            $db = $cls->master();
-        }
-        $result = $db->table($cls->_table)->where("`{$cls->_primaryKey}` = ?", $id)->select($cls->_primaryKey)->first();
-        return (bool)$result;
+        $db = $actor == DBS_SLAVE ? $cls->slave() : $cls->master();
+        $count = $db->table($cls->_table)->where("`{$cls->_primaryKey}` = ?", $id)->select($cls->_primaryKey)->count();
+        return $count > 0;
     }
 
     /**

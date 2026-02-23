@@ -141,7 +141,7 @@ class Native {
         });
         //启动文件监听进程
         if (Env::isDev()) {
-            $this->server->addProcess(SubProcess::createFileWatchProcess($this->server));
+            //$this->server->addProcess(SubProcess::createFileWatchProcess($this->server));
         }
         $this->server->start();
     }

@@ -23,9 +23,10 @@ $envVariables = [
     'host_ip' => getenv('HOST_IP') ?: '',
     'os_name' => getenv('OS_NAME') ?: '',
     'network_mode' => getenv('NETWORK_MODE') ?: '',
+    'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',
 ];
 define("ENV_VARIABLES", $envVariables);
-define('IS_DEV', (ENV_VARIABLES['app_env'] === 'dev') || in_array('-dev', $argv));//开发模式
+define('IS_DEV', (ENV_VARIABLES['app_env'] === 'dev') || in_array('-dev', $argv));//开发环境
 define('IS_PACK', in_array('-pack', $argv));//框架打包源码模式
 define('NO_PACK', (IS_DEV && !IS_PACK) || in_array('-nopack', $argv));//框架非打包源码模式
 define('IS_HTTP_SERVER', in_array('server', $argv));
@@ -36,10 +37,10 @@ define('RUNNING_TOOLBOX', in_array('toolbox', $argv));//cli工具
 define('RUNNING_BUILD_FRAMEWORK', in_array('framework', $argv));//框架源码构建&发布到github
 define('RUNNING_CREATE_AR', RUNNING_TOOLBOX && in_array('ar', $argv));//构建数据AR文件
 
+//框架源码是否打包
+const FRAMEWORK_IS_PHAR = IS_PACK || (!IS_DEV && !NO_PACK && !RUNNING_BUILD && !RUNNING_INSTALL && !RUNNING_BUILD_FRAMEWORK);
 
-const FRAMEWORK_IS_PHAR = IS_PACK || (!IS_DEV && !NO_PACK && !RUNNING_BUILD && !RUNNING_INSTALL && !RUNNING_BUILD_FRAMEWORK);//框架源码是否打包
-
-function _UpdateFramework_($boot = false): string {
+function scf_try_upgrade($boot = false): string {
     clearstatcache();
     $srcPack = __DIR__ . '/build/src.pack';
     $updatePack = __DIR__ . '/build/update.pack';
@@ -119,7 +120,18 @@ function _UpdateFramework_($boot = false): string {
     return $srcPack;
 }
 
-$srcPack = _UpdateFramework_(true);
+function scf_run(array $argv): void {
+    $caller = new Scf\Command\Caller();
+    $caller->setScript(current($argv));
+    $caller->setCommand(next($argv));
+    $caller->setParams($argv);
+    $ret = Scf\Command\Runner::instance()->run($caller);
+    if (!empty($ret->getMsg())) {
+        echo $ret->getMsg() . "\n";
+    }
+}
+
+$srcPack = scf_try_upgrade(true);
 // 注册scf命名空间
 spl_autoload_register(function ($class) use ($srcPack) {
     // 将命名空间 Scf 映射到 PHAR 文件中的 src 目录
@@ -154,20 +166,9 @@ ini_set('date.timezone', 'Asia/Shanghai');
 // 加载第三方库
 require __DIR__ . '/vendor/autoload.php';
 
-function start(array $argv): void {
-    $caller = new Scf\Command\Caller();
-    $caller->setScript(current($argv));
-    $caller->setCommand(next($argv));
-    $caller->setParams($argv);
-    $ret = Scf\Command\Runner::instance()->run($caller);
-    if (!empty($ret->getMsg())) {
-        echo $ret->getMsg() . "\n";
-    }
-}
-
 if (!IS_HTTP_SERVER) {
     $managerProcess = new Process(function () use ($argv) {
-        start($argv);
+        scf_run($argv);
     });
     $managerProcess->start();
     Process::wait();
@@ -175,10 +176,9 @@ if (!IS_HTTP_SERVER) {
     while (true) {
         $managerProcess = new Process(function () use ($argv) {
             $serverBuildVersion = require Scf\Root::dir() . '/version.php';
-            define("FRAMEWORK_VERSION_SERVER", 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json');
             define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
             define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
-            start($argv);
+            scf_run($argv);
         });
         $managerProcess->start();
         $ret = Process::wait();
@@ -189,7 +189,7 @@ if (!IS_HTTP_SERVER) {
             break;
         }
         try {
-            _UpdateFramework_();
+            scf_try_upgrade();
         } catch (\Throwable $e) {
             echo "[manager] update failed: {$e->getMessage()}\n";
         }

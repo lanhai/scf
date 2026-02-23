@@ -35,7 +35,6 @@ class Toolbox implements CommandInterface {
     }
 
     public function help(Help $commandHelp): Help {
-        $commandHelp->addAction('memory', '内存占用');
         $commandHelp->addAction('cli', '控制台应用');
         $commandHelp->addAction('rpc', 'RPC服务更新');
         $commandHelp->addAction('ar', '活动记录对象创建');
@@ -47,10 +46,6 @@ class Toolbox implements CommandInterface {
 
         $commandHelp->addActionOpt('-app', '应用目录');
         return $commandHelp;
-    }
-
-    public function memory(): void {
-        MemoryMonitor::usage();
     }
 
     public function rpc(): void {

@@ -28,12 +28,12 @@ class Env {
         $role = $commandManager->issetOpt('master') ? NODE_ROLE_MASTER : ($options['role'] ?? (ENV_VARIABLES['server_role'] ?: NODE_ROLE_MASTER));
         !defined('SERVER_ROLE') and define('SERVER_ROLE', $role);
         !defined('SERVER_PORT') and define('SERVER_PORT', $options['port'] ?? ($mode == MODE_NATIVE ? 9501 : 0));
-        !defined('SERVER_PORT_FILE') and define('SERVER_PORT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_port');
+
         !defined('SERVER_MASTER_PID_FILE') and define('SERVER_MASTER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '.pid');
-        !defined('SERVER_MANAGER_PID_FILE') and define('SERVER_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_manager.pid');
         !defined('SERVER_MASTER_DB_PID_FILE') and define('SERVER_MASTER_DB_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_master_db.pid');
         !defined('SERVER_RPC_PID_FILE') and define('SERVER_RPC_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_rpc.pid');
         !defined('SERVER_DASHBOARD_PID_FILE') and define('SERVER_DASHBOARD_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_dashboard.pid');
+        !defined('SERVER_DASHBOARD_PORT_FILE') and define('SERVER_DASHBOARD_PORT_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_dashboard_port');
         !defined('SERVER_QUEUE_MANAGER_PID_FILE') and define('SERVER_QUEUE_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_queue_manager.pid');
         !defined('SERVER_CRONTAB_MANAGER_PID_FILE') and define('SERVER_CRONTAB_MANAGER_PID_FILE', dirname(SCF_ROOT) . '/var/' . $path . '_' . SERVER_ROLE . '_crontab_manager.pid');
         //是否开启定时任务

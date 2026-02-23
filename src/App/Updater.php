@@ -214,7 +214,7 @@ class Updater {
                 Console::warning('【updater】创建更新目录失败');
                 return false;
             }
-            $client = Http::create(FRAMEWORK_VERSION_SERVER);
+            $client = Http::create(ENV_VARIABLES['scf_update_server']);
             $remoteVersionResponse = $client->get();
             if ($remoteVersionResponse->hasError()) {
                 Console::warning('【updater】远程版本获取失败:' . $remoteVersionResponse->getMessage());
