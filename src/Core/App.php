@@ -404,10 +404,7 @@ class App {
      */
     public static function install(): bool {
         run(function () {
-            $status = Updater::instance()->updateApp(true);
-//            if (!$status) {
-//                Log::instance()->error('更新应用失败');
-//            }
+            Updater::instance()->updateApp(true);
         });
         Event::wait();
         if (!self::isReady()) {

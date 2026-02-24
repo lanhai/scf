@@ -9,7 +9,7 @@ use Scf\Mode\Web\Exception\AppException;
 use Scf\Mode\Web\Exception\NotFoundException;
 
 
-class App extends Lifetime {
+class App extends RequestLifetime {
     /**
      * @var Router
      */
@@ -22,34 +22,16 @@ class App extends Lifetime {
 
     /**
      * 初始化
-     * @throws NotFoundException
      */
     public function init(): void {
         $this->start();
-        $modules = \Scf\Core\App::getModules();
         $this->router = Router::instance();
         //配置初始化
-        try {
-            if (!$this->router->matchAnnotationRoute($this->request()->server())) {
-                $this->router->dispatch($this->request()->server(), $modules);
-            }
-            //创建日志记录
-            $this->_logger = Log::instance()->setModule($this->router->getModule());
-        } catch (NotFoundException) {
-            $this->_logger = Log::instance()->setModule('server');
-            if (str_contains($this->router->getPath(), 'MP_verify_')) {
-                //微信公众号域名接入文件校验特殊处理
-                $arr = explode('.', $this->router->getPath());
-                $str = $arr[0];
-                $str = ltrim(str_replace('MP_verify_', '', $str), '/');
-                $this->response()->end($str);
-            } elseif (preg_match('/^(\d+)\.txt$/', $this->router->getModule(), $matches) && file_exists(APP_PUBLIC_PATH . '/' . $this->router->getModule())) {
-                $this->response()->end(file_get_contents(APP_PUBLIC_PATH . '/' . $this->router->getModule()));
-            } else {
-                Response::instance()->setHeader('Error-Info', 'module undefined:' . $this->router->getModule());
-                throw new NotFoundException('未定义的模块:' . $this->router->getModule());
-            }
+        if (!$this->router->matchAnnotationRoute($this->request()->server())) {
+            $this->router->dispatch();
         }
+        //创建日志记录
+        $this->_logger = Log::instance()->setModule($this->router->getModule());
     }
 
     /**
@@ -57,7 +39,7 @@ class App extends Lifetime {
      * @throws NotFoundException
      * @throws AppException
      */
-    public function run(): string|Result {
+    public function run(): Result|string {
         $router = $this->router;
         //自定义错误处理
         set_error_handler([$this, 'errorHandler']);
@@ -76,8 +58,17 @@ class App extends Lifetime {
         $path = $router->getRoute();
         $matched = $router->matchNormalRoute();
         if (!$matched) {
-            Response::instance()->setHeader('Error-Info', 'route not match:' . $path);
-            throw new NotFoundException('访问的页面不存在');
+            //微信公众号域名接入文件校验特殊处理
+            if (str_contains($router->getPath(), 'MP_verify_')) {
+                $arr = explode('.', $router->getPath());
+                $str = $arr[0];
+                return ltrim(str_replace('MP_verify_', '', $str), '/');
+            } elseif (preg_match('/^(\d+)\.txt$/', $router->getModule()) && file_exists(APP_PUBLIC_PATH . '/' . $router->getModule())) {
+                return file_get_contents(APP_PUBLIC_PATH . '/' . $router->getModule());
+            } else {
+                Response::instance()->setHeader('Error-Info', 'route not match:' . $path);
+                throw new NotFoundException('访问的页面不存在');
+            }
         }
         $ctrlPath = $router->getController() . '/' . $router->getAction();
         $router->setCtrlPath($ctrlPath);
@@ -102,12 +93,6 @@ class App extends Lifetime {
      * @param null $line
      */
     public function errorHandler($level, $message, $file = null, $line = null): void {
-//        if (Env::isDev()) {
-//            Console::warning('******************发生错误(level:' . $level . ')******************');
-//            Console::warning($message);
-//            Console::warning($file . '@' . $line);
-//            Console::warning('*******************************************');
-//        }
         \Scf\Core\Log::instance()->error($message, file: $file, line: $line);
         //判断是否是子携程触发的错误
         $response = Response::instance();

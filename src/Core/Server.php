@@ -212,7 +212,6 @@ abstract class Server {
     public static function killProcessByPort(int $port): bool {
         $pids = self::findPidsByPort($port);
         if (!$pids) {
-            Console::info("【Server】没有进程占用端口:$port");
             return true;
         }
         foreach ($pids as $pid) {

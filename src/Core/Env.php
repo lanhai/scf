@@ -153,7 +153,7 @@ class Env {
         if (!self::inDocker()) {
             return $intranetIp;
         }
-        if (ENV_VARIABLES['net_work_mode'] == NETWORK_MODE_GROUP) {
+        if (ENV_VARIABLES['network_mode'] == NETWORK_MODE_GROUP) {
             $intranetIp = ENV_VARIABLES['host_ip'] ?: App::getServerIp()['intranet'];
         }
         return $intranetIp;

@@ -5,7 +5,7 @@ namespace Scf\Mode\Web;
 use Scf\Core\Traits\ProcessLifeSingleton;
 use Scf\Util\Time;
 
-class Lifetime {
+class RequestLifetime {
     use ProcessLifeSingleton;
 
     /**

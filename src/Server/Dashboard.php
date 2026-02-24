@@ -4,7 +4,6 @@ namespace Scf\Server;
 
 use Scf\App\Updater;
 use Scf\Command\Color;
-use Scf\Command\Manager;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -14,7 +13,6 @@ use Scf\Core\Traits\Singleton;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
-use Scf\Mode\Web\Router;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Listener\CgiListener;
 use Scf\Util\File;
@@ -26,7 +24,6 @@ use Swoole\Process;
 use Swoole\Server\Task;
 use Swoole\Timer;
 use Throwable;
-use function Co\run;
 
 class Dashboard {
     use Singleton;
@@ -34,7 +31,7 @@ class Dashboard {
     protected ?Server $_SERVER = null;
 
     public static function host(): string {
-        return 'http://127.0.0.1:' . File::read(SERVER_DASHBOARD_PORT_FILE);
+        return 'http://localhost:' . File::read(SERVER_DASHBOARD_PORT_FILE);
     }
 
     public static function start(): void {
@@ -50,7 +47,7 @@ class Dashboard {
         $port = Http::getUseablePort($port);
         $process = new Process(function () use ($port) {
             try {
-                self::instance()->create($port, Manager::instance()->issetOpt('d'));
+                self::instance()->create($port);
             } catch (Throwable $exception) {
                 Console::log('[' . $exception->getCode() . ']' . Color::red($exception->getMessage()));
             }
@@ -129,7 +126,7 @@ class Dashboard {
             try {
                 $this->_SERVER = new Server('127.0.0.1');
                 $setting = [
-                    'worker_num' => 2,
+                    'worker_num' => 1,
                     'max_wait_time' => 60,
                     'reload_async' => true,
                     'daemonize' => $daemonize,
@@ -240,7 +237,7 @@ class Dashboard {
                     Runtime::instance()->set('DASHBOARD_SERVER_PID', $server->master_pid);
                     if (!App::isReady()) {
                         Console::info("【Dashboard】等待安装配置文件就绪...");
-                        $this->waittingInstall();
+                        $this->waittingForInstall();
                         Console::info("【Dashboard】应用安装成功!配置文件加载完成!开始重启");
                         $server->reload();
                     }
@@ -275,7 +272,7 @@ class Dashboard {
      * 等待安装
      * @return void
      */
-    protected function waittingInstall(): void {
+    protected function waittingForInstall(): void {
         while (true) {
             $app = App::installer();
             if ($app->readyToInstall()) {
@@ -288,7 +285,7 @@ class Dashboard {
                     Console::info('【Dashboard】更新失败:' . $version['remote']['app']['version']);
                 }
             }
-            sleep(3);
+            sleep(1);
         }
     }
 }

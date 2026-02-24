@@ -3,7 +3,6 @@
 namespace Scf\Server\Listener;
 
 use Scf\Client\Http;
-use Scf\Cloud\Ali\Dingtalk;
 use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
@@ -24,7 +23,6 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Scf\Util\Sn;
-use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Timer;

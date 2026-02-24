@@ -170,7 +170,6 @@ class Http extends \Scf\Core\Server {
         //监听HTTP&socket连接
         try {
             if (self::isPortInUse($this->bindPort)) {
-                $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程'));
                 if (!self::killProcessByPort($this->bindPort)) {
                     $this->log(Color::red('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程失败'));
                     // 稍等片刻再退出/或由外层管理器重试
