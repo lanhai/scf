@@ -146,15 +146,13 @@ class Env {
      */
     public static function getIntranetIp(): ?string {
         $intranetIp = null;
-        foreach (swoole_get_local_ip() as $ip) {
-            $intranetIp = $ip;
-            break;
-        }
-        if (!self::inDocker()) {
-            return $intranetIp;
-        }
-        if (ENV_VARIABLES['network_mode'] == NETWORK_MODE_GROUP) {
+        if (self::inDocker() || ENV_VARIABLES['network_mode'] == NETWORK_MODE_GROUP) {
             $intranetIp = ENV_VARIABLES['host_ip'] ?: App::getServerIp()['intranet'];
+        } else {
+            foreach (swoole_get_local_ip() as $ip) {
+                $intranetIp = $ip;
+                break;
+            }
         }
         return $intranetIp;
     }
