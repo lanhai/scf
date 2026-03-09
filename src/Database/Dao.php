@@ -710,18 +710,13 @@ class Dao extends Struct {
             if (!$datas) {
                 return false;
             }
-
-            // If it's an update operation (not force insert, and primary key exists)
             if (!$forceInsert && !empty($this->$primaryKey) && static::has($this->$primaryKey)) {
-                $changedDatas = $datas; // Start with all data from current object
-
+                $changedDatas = $datas;
                 $nextSnapshot = null;
                 if (!is_null($this->snapshot)) {
-                    // Filter out unchanged fields based on snapshot
                     [$changedDatas, $nextSnapshot] = $this->getChangedFieldsFromSnapshot($datas);
                 }
-
-                if ($changedDatas) { // Only update if there are actual changes
+                if ($changedDatas) {
                     try {
                         $connection = $this->transaction ?? $this->master();
                         $row = $connection->table($this->_table)
@@ -729,8 +724,8 @@ class Dao extends Struct {
                             ->updates($changedDatas)
                             ->rowCount();
                         if ($row === 0) {
-                            $this->addError('save', "数据不存在或没有任何数据变化");
-                            return false; // 明确返回失败
+                            $this->addError('save', "数据不存在或没有任何变化");
+                            return false;
                         } else {
                             $this->deleteArCache($this->$primaryKey);
                             if (!is_null($nextSnapshot)) {

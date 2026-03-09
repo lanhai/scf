@@ -407,6 +407,9 @@ abstract class AConnection implements IConnection {
      */
     public function first(): object|bool|array {
         if ($this->table) {
+            if ($this->limit <= 0) {
+                $this->limit(1);
+            }
             list($sql, $values) = $this->build('SELECT');
             $this->raw($sql, ...$values);
         }
@@ -421,6 +424,9 @@ abstract class AConnection implements IConnection {
      */
     public function value(string $field): mixed {
         if ($this->table) {
+            if ($this->limit <= 0) {
+                $this->limit(1);
+            }
             list($sql, $values) = $this->build('SELECT');
             $this->raw($sql, ...$values);
         }
@@ -485,10 +491,7 @@ abstract class AConnection implements IConnection {
      */
     public function queryOne(int $fetchStyle = null): object|bool|array {
         $fetchStyle = $fetchStyle ?: $this->options[\PDO::ATTR_DEFAULT_FETCH_MODE];
-        //return $this->statement->fetch($fetchStyle);
-        // 建议这里用 fetchAll + 取第一行，更保险
-        $rows = $this->statement->fetchAll($fetchStyle);
-        $result = $rows[0] ?? false;
+        $result = $this->statement->fetch($fetchStyle);
 
         $this->releaseConnectionIfNeeded();
         return $result;

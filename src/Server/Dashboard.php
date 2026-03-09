@@ -126,7 +126,7 @@ class Dashboard {
             try {
                 $this->_SERVER = new Server('127.0.0.1');
                 $setting = [
-                    'worker_num' => 1,
+                    'worker_num' => 2,
                     'max_wait_time' => 60,
                     'reload_async' => true,
                     'daemonize' => $daemonize,
