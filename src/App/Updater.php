@@ -4,6 +4,9 @@ namespace Scf\App;
 
 use Error;
 use PhpZip\ZipFile;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+use FilesystemIterator;
 use Scf\Client\Http;
 use Scf\Core\Console;
 use Scf\Core\Result;
@@ -20,6 +23,7 @@ class Updater {
 
     protected static array $_instances;
     protected ?array $_version = null;
+    protected ?array $_remoteAppVersions = null;
 
     /**
      * @return Updater
@@ -54,36 +58,23 @@ class Updater {
      * @return false
      */
     public function changeAppVersion($version, bool $isInstall = false, ?string $appoint = 'all'): bool {
-        $appFile = App::core($version);
-        $versionInfo = null;
-        $app = App::info();
-        if (!$app->update_server) {
-            Log::instance()->error('【Server】应用未设置更新服务器');
+        $result = $this->getRemoteVersionsRecord(true);
+        if ($result->hasError()) {
+            Log::instance()->error('【Server】获取云端版本号失败:' . Color::red($result->getMessage()));
             return false;
         }
-        try {
-            $client = Http::create($app->update_server . '?time=' . time());
-            $result = $client->get();
-            if ($result->hasError()) {
-                Log::instance()->error('【Server】获取云端版本号失败:' . Color::red($result->getMessage()));
-                return false;
-            }
-            $remote = $result->getData();
-            $appVersion = $remote['app'];
-        } catch (Error $error) {
-            Log::instance()->error('【Server】获取版本服务器版本号失败:' . $error->getMessage());
-            return false;
-        }
-        foreach ($appVersion as $v) {
-            if (strcmp($version, $v['version']) == 0) {
-                $versionInfo = $v;
-                break;
-            }
-        }
+        $appVersions = $result->getData();
+        $versionInfo = $this->findVersionInfo($appVersions, $version);
         if (is_null($versionInfo)) {
             Log::instance()->error('【Server】升级失败:未查询到版本:' . $version);
             return false;
         }
+        return $this->applyVersionUpdate($version, $appVersions, $versionInfo, $isInstall, $appoint);
+    }
+
+    protected function applyVersionUpdate(string $version, array $appVersions, array $versionInfo, bool $isInstall = false, ?string $appoint = 'all'): bool {
+        $appFile = App::core($version);
+        $app = App::info();
         if (!is_null($appoint)) {
             //指定更新
             $appoint == 'app' and $versionInfo['public_object'] = null;
@@ -94,7 +85,7 @@ class Updater {
             $latestAppVersion = null;
             $latestPublicVersion = null;
             //$versionServer = JsonHelper::recover(File::read(VERSION_FILE));
-            foreach ($appVersion as $v) {
+            foreach ($appVersions as $v) {
                 if (!empty($v['app_object']) && is_null($latestAppVersion)) {
                     $latestAppVersion = $v['app_object'];
                     $version = $v['version'];
@@ -233,10 +224,8 @@ class Updater {
             }
             return true;
         }
-        $localVersion = $this->getLocalVersion();
-        $current = (int)str_replace('.', '', $localVersion['version']);
-        $target = (int)str_replace('.', '', $version);
-        if ($current == $target) {
+        $currentVersion = $this->getCurrentInstalledVersionByType($type);
+        if (!is_null($currentVersion) && strcmp($currentVersion, $version) === 0) {
             Console::warning("【Server】已是当前版本:" . $version);
             return false;
         }
@@ -250,12 +239,7 @@ class Updater {
             Console::warning('【updater】版本清单获取失败');
             return false;
         }
-        $versionInfo = null;
-        foreach ($versions as $item) {
-            if ($item['version'] == $version) {
-                $versionInfo = $item;
-            }
-        }
+        $versionInfo = $this->findVersionInfo($versions, $version);
         if (is_null($versionInfo)) {
             Console::warning('【updater】未匹配到版本记录');
             return false;
@@ -267,11 +251,29 @@ class Updater {
             Console::warning('【updater】未匹配到资源文件');
             return false;
         }
-        if (!$this->changeAppVersion($version, appoint: $type)) {
+        if (!$this->applyVersionUpdate($version, $versions, $versionInfo, false, $type)) {
             Console::warning('【updater】更新失败');
             return false;
         }
         return true;
+    }
+
+    protected function getCurrentInstalledVersionByType(string $type): ?string {
+        $localVersion = $this->getLocalVersion();
+        return match ($type) {
+            'public' => $localVersion['public_version'] ?? null,
+            'app' => $localVersion['version'] ?? null,
+            default => $localVersion['version'] ?? null,
+        };
+    }
+
+    protected function findVersionInfo(array $versions, string $version): ?array {
+        foreach ($versions as $item) {
+            if (($item['version'] ?? '') === $version) {
+                return $item;
+            }
+        }
+        return null;
     }
 
     /**
@@ -328,20 +330,8 @@ class Updater {
      * 获取远程版本记录
      * @return Result
      */
-    public function getRemoteVersionsRecord(): Result {
-        $app = App::info();
-        if (!$app->update_server) {
-            return Result::error('获取版本服务器版本号失败:未设置更新服务器');
-        } else {
-
-            $client = Http::create($app->update_server . '?time=' . time());
-            $result = $client->get();
-            if ($result->hasError()) {
-                return Result::error('获取版本服务器版本号失败:' . $result->getMessage());
-            } else {
-                return Result::success($result->getData('app'));
-            }
-        }
+    public function getRemoteVersionsRecord(bool $refresh = false): Result {
+        return $this->fetchRemoteAppVersions($refresh);
     }
 
     /**
@@ -390,24 +380,46 @@ class Updater {
      * @return bool
      */
     protected function clearPublic(string $dir = APP_PUBLIC_PATH): bool {
-        //先删除目录下的文件：
-        $dh = opendir($dir);
-        while ($file = readdir($dh)) {
-            if ($file != "." && $file != "..") {
-                $fullpath = $dir . "/" . $file;
-                if (!is_dir($fullpath)) {
-                    try {
-                        unlink($fullpath);
-                    } catch (Throwable) {
-
-                    }
+        if (!is_dir($dir)) {
+            return true;
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterator as $item) {
+            try {
+                if ($item->isDir()) {
+                    @rmdir($item->getPathname());
                 } else {
-                    $this->clearPublic($fullpath);
+                    @unlink($item->getPathname());
                 }
+            } catch (Throwable) {
+
             }
         }
-        closedir($dh);
         return true;
+    }
+
+    protected function fetchRemoteAppVersions(bool $refresh = false): Result {
+        if (!$refresh && !is_null($this->_remoteAppVersions)) {
+            return Result::success($this->_remoteAppVersions);
+        }
+        $app = App::info();
+        if (!$app->update_server) {
+            return Result::error('获取版本服务器版本号失败:未设置更新服务器');
+        }
+        try {
+            $client = Http::create($app->update_server . '?time=' . time());
+            $result = $client->get();
+            if ($result->hasError()) {
+                return Result::error('获取版本服务器版本号失败:' . $result->getMessage());
+            }
+            $this->_remoteAppVersions = $result->getData('app') ?: [];
+            return Result::success($this->_remoteAppVersions);
+        } catch (Error $error) {
+            return Result::error('获取版本服务器版本号失败:' . $error->getMessage());
+        }
     }
 
     /**

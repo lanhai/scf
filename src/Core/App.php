@@ -42,6 +42,7 @@ class App {
      * 自定义更新src/public到指定版本
      * @param $type
      * @param $version
+     * @param bool $autoReload
      * @return bool
      */
     public static function appointUpdateTo($type, $version, bool $autoReload = true): bool {
