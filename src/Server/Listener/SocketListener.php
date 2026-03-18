@@ -5,7 +5,6 @@ namespace Scf\Server\Listener;
 use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Console;
-use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
@@ -13,11 +12,12 @@ use Scf\Core\Table\SocketConnectionTable;
 use Scf\Core\Table\SocketRouteTable;
 use Scf\Helper\JsonHelper;
 use Scf\Mode\Socket\Connection;
+use Scf\Server\DashboardAuth;
 use Scf\Server\Http;
 use Scf\Server\Manager;
-use Scf\Util\Auth;
 use Scf\Util\Time;
 use Swoole\Coroutine\Channel;
+use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
@@ -70,60 +70,64 @@ class SocketListener extends Listener {
                     }
                     break;
                 case 'appoint_update':
+                    $taskId = $data['data']['task_id'] ?? uniqid('update_', true);
+                    $slaveHosts = $this->connectedSlaveHosts($server);
+                    $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
                     $nodeCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
                         'type' => $data['data']['type'],
                         'version' => $data['data']['version'],
+                        'task_id' => $taskId,
                     ]);
                     $timeout = $data['data']['timeout'] ?? 300;
+                    $masterUpdateDone = false;
+                    $masterUpdateSuccess = false;
+                    Coroutine::create(function () use ($data, &$masterUpdateDone, &$masterUpdateSuccess) {
+                        $masterUpdateSuccess = App::appointUpdateTo($data['data']['type'], $data['data']['version'], false);
+                        $masterUpdateDone = true;
+                    });
                     //等待所有节点升级完成
-                    if ($nodeCount) {
-                        $nodeCount = 0;
-                        $round = 1;
-                        // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
-                        $waitCh = new Channel(1);
-                        Timer::tick(1000 * 5, function ($timerId) use ($data, $timeout, &$nodeCount, &$round, $waitCh) {
-                            $finish = true;
-                            $count = 0;
-                            $nodes = Manager::instance()->getServers();
-                            if ($nodes) {
-                                foreach ($nodes as $node) {
-                                    if ($node['role'] == NODE_ROLE_MASTER) {
-                                        continue;
-                                    }
-                                    $updateType = $data['data']['type'];
-                                    $versionFields = [
-                                        'app' => 'app_version',
-                                        'public' => 'public_version',
-                                        'framework' => 'framework_build_version'
-                                    ];
-                                    $current = (int)str_replace('.', '', $node[$versionFields[$updateType] ?? 'app_version']);
-                                    $target = (int)str_replace('.', '', $data['data']['version']);
-                                    if ($current !== $target) {
-                                        $finish = false;
-                                    } else {
-                                        $count++;
-                                    }
-                                }
+                    $slaveSuccessCount = 0;
+                    $round = 1;
+                    // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
+                    $waitCh = new Channel(1);
+                    Timer::tick(1000 * 5, function ($timerId) use ($taskId, $slaveHosts, $timeout, &$slaveSuccessCount, &$round, $waitCh, &$masterUpdateDone) {
+                        $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
+                        $slaveSuccessCount = $summary['success'];
+                        if (($summary['finished'] && $masterUpdateDone) || $round >= ($timeout / 5)) {
+                            Timer::clear($timerId);
+                            // 通知等待方（非阻塞：如果已有人在等则唤醒）
+                            if (!$waitCh->isEmpty()) { /* no-op */
                             }
-                            if ($finish || $round >= ($timeout / 5)) {
-                                $nodeCount = $count; // 记录最终完成数
-                                Timer::clear($timerId);
-                                // 通知等待方（非阻塞：如果已有人在等则唤醒）
-                                if (!$waitCh->isEmpty()) { /* no-op */
-                                }
-                                $waitCh->push(true);
-                            }
-                            $round++;
-                        });
-                        // 最多等待
-                        $waitCh->pop($timeout + 3);
-                        $nodeCount and Console::success("【Server】{$nodeCount} 个子节点更新完成，版本号:{$data['data']['version']}");
+                            $waitCh->push(true);
+                        }
+                        $round++;
+                    });
+                    // 最多等待
+                    $waitCh->pop($timeout + 3);
+                    if ($slaveSuccessCount) {
+                        Console::success("【Server】{$slaveSuccessCount} 个子节点更新完成，版本号:{$data['data']['version']}");
                     }
-                    if (App::appointUpdateTo($data['data']['type'], $data['data']['version'])) {
+                    $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
+                    if ($summary['failed_hosts']) {
+                        Console::warning("【Server】以下节点升级失败:" . implode(',', $summary['failed_hosts']));
+                    }
+                    if ($summary['pending_hosts']) {
+                        Console::warning("【Server】以下节点升级超时未完成:" . implode(',', $summary['pending_hosts']));
+                    }
+                    $nodeCount = $slaveSuccessCount;
+                    if ($masterUpdateSuccess) {
                         $nodeCount++;
+                    } elseif ($masterUpdateDone) {
+                        Console::warning("【Server】当前节点升级失败:{$data['data']['type']} => {$data['data']['version']}");
+                    } else {
+                        Console::warning("【Server】当前节点升级超时未完成:{$data['data']['type']} => {$data['data']['version']}");
                     }
+                    $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
                     if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
                         $server->push($frame->fd, $nodeCount);
+                    }
+                    if ($masterUpdateSuccess && $data['data']['type'] !== 'public') {
+                        App::scheduleUpdateReload($data['data']['type']);
                     }
                     break;
                 case 'restartAll':
@@ -164,6 +168,17 @@ class SocketListener extends Listener {
                     ServerNodeStatusTable::instance()->set($host, $status);
                     $server->push($frame->fd, "::pong");
                     break;
+                case 'node_update_state':
+                    $payload = $data['data'] ?? [];
+                    $taskId = $payload['task_id'] ?? '';
+                    $host = $payload['host'] ?? '';
+                    if ($taskId && $host) {
+                        Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, $host), $payload);
+                    }
+                    if (!empty($payload['message'])) {
+                        Console::info($payload['message'], false);
+                    }
+                    break;
                 default:
                     $server->push($frame->fd, "不支持的事件");
                     break;
@@ -192,6 +207,59 @@ class SocketListener extends Listener {
 //            }
 //            Runtime::instance()->set($key, $usageMb);
 //        });
+    }
+
+    private function connectedSlaveHosts(Server $server): array {
+        $hosts = [];
+        foreach (ServerNodeTable::instance()->rows() as $node) {
+            if (($node['role'] ?? '') === NODE_ROLE_MASTER) {
+                continue;
+            }
+            if (!$server->isEstablished($node['socket_fd'])) {
+                continue;
+            }
+            $hosts[] = $node['host'];
+        }
+        return array_values(array_unique($hosts));
+    }
+
+    private function summarizeNodeUpdateTask(string $taskId, array $hosts): array {
+        $success = 0;
+        $failedHosts = [];
+        $pendingHosts = [];
+        foreach ($hosts as $host) {
+            $state = Runtime::instance()->get($this->nodeUpdateTaskStateKey($taskId, $host));
+            if (!$state) {
+                $pendingHosts[] = $host;
+                continue;
+            }
+            $current = $state['state'] ?? '';
+            if ($current === 'success') {
+                $success++;
+                continue;
+            }
+            if ($current === 'failed') {
+                $failedHosts[] = $host;
+                continue;
+            }
+            $pendingHosts[] = $host;
+        }
+        return [
+            'finished' => empty($pendingHosts),
+            'success' => $success,
+            'failed_hosts' => $failedHosts,
+            'pending_hosts' => $pendingHosts,
+        ];
+    }
+
+    private function clearNodeUpdateTaskStates(string $taskId, array $hosts): void {
+        foreach ($hosts as $host) {
+            Runtime::instance()->delete($this->nodeUpdateTaskStateKey($taskId, $host));
+        }
+    }
+
+    private function nodeUpdateTaskStateKey(string $taskId, string $host): string {
+        return 'NODE_UPDATE_TASK:' . md5($taskId . ':' . $host);
     }
 
     protected function callRoute(string $route, int $fd, string $event, string $message = "", ?Request $request = null, ?Server $server = null): bool {
@@ -235,14 +303,13 @@ class SocketListener extends Listener {
      */
     protected function onHandshake(Request $request, Response $response) {
         $uri = $request->server['request_uri'] ?? '/';
+        $connectionRoute = '';
         if ($uri !== '/' && SocketRouteTable::instance()->has($uri)) {
             if (!$this->callRoute($uri, $request->fd, Connection::EVENT_AUTH, request: $request)) {
                 $response->status(403);
                 goto end;
             }
-            SocketConnectionTable::instance()->set($request->fd, [
-                'route' => $uri
-            ]);
+            $connectionRoute = $uri;
             Event::defer(function () use ($request, $uri) {
                 if (Http::server()->isEstablished($request->fd)) {
                     $this->callRoute($uri, $request->fd, Connection::EVENT_CONNECT);
@@ -250,24 +317,14 @@ class SocketListener extends Listener {
             });
             goto upgrade;
         }
-        $password = $request->get['password'] ?? '';
         $token = $request->get['token'] ?? '';
-        if ((!$password || $password != md5(App::authKey())) && !$token) {
+        if (!$token) {
             $response->status(403);
             goto end;
         }
-        if ($token) {
-            $tokenDecode = Auth::decode($token);
-            if (!JsonHelper::is($tokenDecode)) {
-                $response->status(403);
-                goto end;
-            }
-            $tokenData = JsonHelper::recover($tokenDecode);
-            $expired = $tokenData['expired'] ?? 0;
-            if (time() > $expired) {
-                $response->status(403);
-                goto end;
-            }
+        if (!DashboardAuth::validateSocketToken($token)) {
+            $response->status(403);
+            goto end;
         }
         upgrade:
         //websocket握手连接算法验证
@@ -298,8 +355,8 @@ class SocketListener extends Listener {
         foreach ($headers as $key => $val) {
             $response->header($key, $val);
         }
+        SocketConnectionTable::instance()->remember($request->fd, Http::server()->worker_id + 1, $connectionRoute);
         $response->status(101);
-        Counter::instance()->incr("worker:" . (Http::server()->worker_id + 1) . ":connection");
         end:
         $response->end();
     }
@@ -326,15 +383,16 @@ class SocketListener extends Listener {
      * @return void
      */
     protected function onClose(Server $server, $fd): void {
-        if ($server->isEstablished($fd)) {
-            if ($route = SocketConnectionTable::instance()->route($fd)) {
-                SocketConnectionTable::instance()->delete($fd);
+        $connection = SocketConnectionTable::instance()->connection($fd);
+        if ($connection) {
+            SocketConnectionTable::instance()->delete($fd);
+            $route = $connection['route'] ?? '';
+            if ($route) {
                 $this->callRoute($route, $fd, Connection::EVENT_DISCONNECT);
             }
-            Counter::instance()->decr("worker:" . ($server->worker_id + 1) . ":connection");
-            Manager::instance()->removeNodeClient($fd);
-            Manager::instance()->removeDashboardClient($fd);
         }
+        Manager::instance()->removeNodeClient($fd);
+        Manager::instance()->removeDashboardClient($fd);
     }
 
     protected function subscribeServerStatus($fd, Server $server): void {

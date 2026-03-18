@@ -4,7 +4,6 @@ namespace Scf\Command\Handler;
 
 use ErrorException;
 use Scf\App\Updater;
-use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Result;
 use Scf\Command\Color;
@@ -169,7 +168,7 @@ class NodeManager {
                         } else {
                             $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                         }
-                        $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
+                        $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
                         $websocket->push('log_subscribe');
                         // 使用 Swoole 定时器定期接收消息
                         while (true) {
@@ -212,7 +211,7 @@ class NodeManager {
                     } else {
                         $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                     }
-                    $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
+                    $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
                     Coroutine::create(function () use ($websocket, $node) {
                         $websocket->push('update');
                         while (true) {
@@ -241,8 +240,9 @@ class NodeManager {
      */
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
-        $timeout = 60 * 5;
-        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version, 'timeout' => $timeout]]));
+        $taskId = uniqid('update_', true);
+        $timeout = 60 * 11;
+        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version, 'timeout' => $timeout, 'task_id' => $taskId]]));
         $reply = $socket->recv($timeout + 5);
         if ($reply === false || $reply->data == '') {
             $socket->close();
@@ -265,7 +265,7 @@ class NodeManager {
             } else {
                 $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
             }
-            $websocket = SaberGM::websocket('ws://' . $socketHost . '?username=manager&password=' . md5(App::authKey()));
+            $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
             Coroutine::create(function () use ($websocket, $msg, $node) {
                 $websocket->push($msg);
                 while (true) {

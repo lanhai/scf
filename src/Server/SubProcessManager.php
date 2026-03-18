@@ -14,6 +14,7 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
+use Scf\Core\Table\SocketConnectionTable;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Root;
@@ -491,6 +492,7 @@ class SubProcessManager {
                         $node->threads = count(Coroutine::list());
                         $node->thread_status = Coroutine::stats();
                         $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: []; //$server->stats();
+                        $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
                         $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
                         $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
                         $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
@@ -552,9 +554,40 @@ class SubProcessManager {
                                             Http::instance()->reload();
                                             break;
                                         case 'appoint_update':
+                                            $taskId = $params['task_id'] ?? '';
+                                            $statePayload = [
+                                                'event' => 'node_update_state',
+                                                'data' => [
+                                                    'task_id' => $taskId,
+                                                    'host' => SERVER_HOST,
+                                                    'type' => $params['type'],
+                                                    'version' => $params['version'],
+                                                    'updated_at' => time(),
+                                                ]
+                                            ];
+                                            $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                                                'data' => [
+                                                    'state' => 'running',
+                                                    'message' => "【" . SERVER_HOST . "】开始更新 {$params['type']} => {$params['version']}",
+                                                ]
+                                            ])));
                                             if (App::appointUpdateTo($params['type'], $params['version'])) {
+                                                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                                                    'data' => [
+                                                        'state' => 'success',
+                                                        'message' => "【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}",
+                                                        'updated_at' => time(),
+                                                    ]
+                                                ])));
                                                 $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
                                             } else {
+                                                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                                                    'data' => [
+                                                        'state' => 'failed',
+                                                        'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}",
+                                                        'updated_at' => time(),
+                                                    ]
+                                                ])));
                                                 $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}");
                                             }
                                             break;

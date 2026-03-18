@@ -2,7 +2,6 @@
 
 namespace Scf\Server\Controller;
 
-use PhpZip\Exception\ZipException;
 use PhpZip\ZipFile;
 use Scf\App\Updater;
 use Scf\Client\Http;
@@ -24,6 +23,7 @@ use Scf\Mode\Web\Controller;
 use Scf\Mode\Web\Document as DocumentComponent;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
+use Scf\Server\DashboardAuth;
 use Scf\Server\Manager;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
@@ -40,6 +40,7 @@ class DashboardController extends Controller {
         '/nodes', '/memory'
     ];
     protected string $token;
+    protected string $currentUser = 'system';
 
     public function init($path): void {
         if (!App::isReady() && $path != '/install' && $path != '/install_check') {
@@ -285,7 +286,7 @@ class DashboardController extends Controller {
             return Result::error("安装秘钥错误");
         }
         $config = JsonHelper::recover($decode);
-        if (empty($config['key']) || empty($config['server'] || empty($config['dashboard_password']) || empty($config['expired']))) {
+        if (empty($config['key']) || empty($config['server']) || empty($config['dashboard_password']) || empty($config['expired'])) {
             return Result::error("安装秘钥错误");
         }
         if (time() > $config['expired']) {
@@ -399,7 +400,7 @@ class DashboardController extends Controller {
             $socketHost = $protocol . 'localhost:' . Runtime::instance()->httpPort();
         }
         $status = Manager::instance()->getStatus();
-        $status['socket_host'] = $socketHost . '?token=' . $this->token;
+        $status['socket_host'] = $socketHost . '?token=' . rawurlencode($this->token);
         $remoteVersion = [
             'version' => FRAMEWORK_BUILD_VERSION,
             'build' => FRAMEWORK_BUILD_TIME,
@@ -479,16 +480,11 @@ class DashboardController extends Controller {
         if ($downloadResult->hasError()) {
             return Result::error("下载升级包失败:" . $downloadResult->getMessage());
         }
-        //解压缩
-        $zipFile = new ZipFile();
         try {
-            $stream = File::read($publicFilePath);
-            $zipFile->openFromString($stream)->setReadPassword('scfdashboard')->extractTo(SCF_ROOT . '/build/public/dashboard');
-        } catch (ZipException $e) {
+            $this->extractDashboardArchive($publicFilePath, SCF_ROOT . '/build/public/dashboard');
+        } catch (Throwable $e) {
             unlink($publicFilePath);
             return Result::error('资源包解压失败:' . $e->getMessage());
-        } finally {
-            $zipFile->close();
         }
         unlink($publicFilePath);
         if (!File::write($versionJson, JsonHelper::toJson($dashboardVersion))) {
@@ -524,6 +520,34 @@ class DashboardController extends Controller {
         }
         closedir($dh);
         return true;
+    }
+
+    protected function extractDashboardArchive(string $archivePath, string $targetDir): void {
+        if (class_exists(\ZipArchive::class)) {
+            $archive = new \ZipArchive();
+            $opened = $archive->open($archivePath);
+            if ($opened === true) {
+                try {
+                    $archive->setPassword('scfdashboard');
+                    if (!$archive->extractTo($targetDir)) {
+                        throw new \RuntimeException('ZipArchive extract failed');
+                    }
+                    return;
+                } finally {
+                    $archive->close();
+                }
+            }
+        }
+        $stream = File::read($archivePath);
+        if ($stream === false) {
+            throw new \RuntimeException('升级包读取失败');
+        }
+        $zipFile = new ZipFile();
+        try {
+            $zipFile->openFromString($stream)->setReadPassword('scfdashboard')->extractTo($targetDir);
+        } finally {
+            $zipFile->close();
+        }
     }
 
     /**
@@ -726,10 +750,11 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCheck(): Result {
-        if (!$this->verifyPassword($this->password)) {
+        $token = DashboardAuth::refreshDashboardToken($this->token);
+        if (!$token) {
             return Result::error('登陆已失效', 'LOGIN_EXPIRED');
         }
-        $this->loginUser['token'] = $this->genterateToken();
+        $this->loginUser['token'] = $token;
         return Result::success($this->loginUser);
     }
 
@@ -741,10 +766,17 @@ class DashboardController extends Controller {
         Request::post([
             'password' => Request\Validator::required("密码不能为空")
         ])->assign($password);
+        if (!DashboardAuth::dashboardPassword()) {
+            return Result::error('请先配置 server.dashboard_password');
+        }
         if (!$this->verifyPassword($password)) {
             return Result::error('密码错误');
         } else {
-            $this->loginUser['token'] = $this->genterateToken();
+            $token = $this->genterateToken();
+            if (!$token) {
+                return Result::error('请先配置 server.dashboard_password');
+            }
+            $this->loginUser['token'] = $token;
             return Result::success($this->loginUser);
         }
     }
@@ -755,6 +787,24 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionLogout(): Result {
+        if (!empty($this->token)) {
+            DashboardAuth::expireDashboardToken($this->token);
+        }
+        return Result::success();
+    }
+
+    public function actionRefreshToken(): Result {
+        $token = DashboardAuth::refreshDashboardToken($this->token);
+        if (!$token) {
+            return Result::error('登录已过期', 'LOGIN_EXPIRED');
+        }
+        return Result::success(['token' => $token]);
+    }
+
+    public function actionExpireToken(): Result {
+        if (!empty($this->token)) {
+            DashboardAuth::expireDashboardToken($this->token);
+        }
         return Result::success();
     }
 
@@ -770,18 +820,11 @@ class DashboardController extends Controller {
         }
         $token = substr($authorization, 7);
         $this->token = $token;
-        //判断是否超管
-        $decodeToken = Auth::decode($token);
-        if (!$decodeToken || !JsonHelper::is($decodeToken)) {
-            Response::interrupt("登录已失效", 'TOKEN_NOT_VALID', status: 200);
+        $session = DashboardAuth::validateDashboardToken($token);
+        if (!$session) {
+            Response::interrupt("登录已失效", 'LOGIN_EXPIRED', status: 200);
         }
-        $decodeData = JsonHelper::recover($decodeToken);
-        $password = $decodeData['password'] ?? null;
-        $this->password = $password;
-        $expired = $decodeData['expired'] ?? 0;
-        if (time() > $expired) {
-            Response::interrupt("登录已过期", 'LOGIN_EXPIRED', status: 200);
-        }
+        $this->currentUser = $session['user'] ?? 'system';
         return true;
     }
 
@@ -790,20 +833,8 @@ class DashboardController extends Controller {
         'avatar' => 'https://ascript.oss-cn-chengdu.aliyuncs.com/upload/20240513/04c3eeac-f118-4ea7-8665-c9bd4d20a05d.png',
         'token' => null
     ];
-    protected string $password = '';
-
-    /**
-     * 生成token
-     * @return string
-     */
-    protected function genterateToken(): string {
-        $tokenData = [
-            'password' => $this->password,
-            'expired' => time() + 3600 * 24 * 7,
-            'login_time' => time(),
-            'user' => 'system'
-        ];
-        return Auth::encode(JsonHelper::toJson($tokenData));
+    protected function genterateToken(): string|false {
+        return DashboardAuth::createDashboardToken($this->currentUser);
     }
 
     /**
@@ -812,12 +843,11 @@ class DashboardController extends Controller {
      * @return bool
      */
     protected function verifyPassword($password): bool {
-        $serverConfig = Config::server();
-        $superPassword = $serverConfig['dashboard_password'] ?? null;
-        if (App::info()->dashboard_password !== $password && App::info()->app_auth_key !== $password && $superPassword !== $password) {
+        $dashboardPassword = DashboardAuth::dashboardPassword();
+        if (!$dashboardPassword || !hash_equals($dashboardPassword, (string)$password)) {
             return false;
         }
-        $this->password = $password;
+        $this->currentUser = 'system';
         return true;
     }
 }

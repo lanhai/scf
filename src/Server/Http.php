@@ -130,10 +130,13 @@ class Http extends \Scf\Core\Server {
         Runtime::instance()->serverIsAlive(true);
         //启动master节点管理面板服务器
         Dashboard::start();
-        //启动masterDB(redis协议)服务器
-        //MasterDB::start(MDB_PORT);
         //加载服务器配置
         $serverConfig = Config::server();
+        if (defined('APP_MODULE_STYLE') === false) {
+            define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_MULTI);
+        }
+        //启动masterDB(redis协议)服务器
+        //MasterDB::start(MDB_PORT);
         $this->bindPort = $this->bindPort ?: ($serverConfig['port'] ?? 9580);// \Scf\Core\Server::getUseablePort($this->bindPort ?: ($serverConfig['port'] ?? 9580));
         !defined('MAX_REQUEST_LIMIT') and define('MAX_REQUEST_LIMIT', $serverConfig['max_request_limit'] ?? 1280);
         !defined('SLOW_LOG_TIME') and define('SLOW_LOG_TIME', $serverConfig['slow_log_time'] ?? 10000);

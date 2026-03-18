@@ -6,8 +6,8 @@ use Exception;
 use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Console;
-use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
+use Scf\Core\Table\SocketConnectionTable;
 use Scf\Helper\ArrayHelper;
 use Scf\Server\Dashboard;
 use Swoole\Coroutine;
@@ -209,6 +209,7 @@ class MemoryMonitor {
             $osActualTotal = 0.0; // 累计 OS 视角实际占用（优先PSS, 其次RSS）
             $processList = MemoryMonitorTable::instance()->rows();
             if ($processList) {
+                $workerConnectionStats = SocketConnectionTable::instance()->workerConnectionStats();
                 foreach ($processList as $data) {
                     $key = $data['process'];
                     if ($filter && !str_contains($key, $filter)) {
@@ -251,7 +252,8 @@ class MemoryMonitor {
                     $status = Color::green('正常');
                     $online++;
                     if (str_starts_with($process, 'worker:')) {
-                        $connection = Counter::instance()->get($process . ":connection") ?: 0;
+                        $workerId = (int)str_replace('worker:', '', $process);
+                        $connection = $workerConnectionStats[$workerId] ?? 0;
                     } else {
                         $connection = 0;
                     }

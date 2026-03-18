@@ -8,7 +8,6 @@ use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
-use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Log;
@@ -30,7 +29,6 @@ class WorkerListener extends Listener {
                 Process::kill($server->worker_pid, SIGKILL);
             }
         });
-        Counter::instance()->set("worker:" . ($workerId + 1) . ":connection", 0);
         //监控内存使用
         $limitMb = Config::server()['worker_memory_limit'] ?? 256;
         MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);

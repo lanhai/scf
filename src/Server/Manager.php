@@ -17,6 +17,7 @@ use Scf\Core\Table\ServerNodeTable;
 use Scf\Database\Exception\NullPool;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
+use Scf\Server\DashboardAuth;
 use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
@@ -63,22 +64,31 @@ class Manager extends Component {
         if (!str_contains($socketHost, ':')) {
             $socketHost .= '/dashboard.socket';
         }
-        try {
-            $socket = SaberGM::websocket('ws://' . $socketHost . '?username=node-' . APP_NODE_ID . '&password=' . md5(App::authKey()));
-            if (!$this->wsConnected($socket)) {
+        $retryDelay = 1;
+        while (true) {
+            try {
+                $socket = SaberGM::websocket($this->buildInternalSocketUrl($socketHost, 'node-' . APP_NODE_ID));
+                if ($this->wsConnected($socket)) {
+                    return $socket;
+                }
                 $cli = $this->getWsClient($socket);
                 $status = $cli->statusCode ?? 'null';
                 $err = $cli->errCode ?? 'null';
                 Console::warning("【Server】与master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
-                sleep(5);
-                return $this->getMasterSocketConnection();
+            } catch (RequestException $throwable) {
+                Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
             }
-            return $socket;
-        } catch (RequestException $throwable) {
-            Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
-            sleep(5);
-            return $this->getMasterSocketConnection();
+            sleep($retryDelay);
+            $retryDelay = min($retryDelay * 2, 30);
         }
+    }
+
+    public function buildInternalSocketUrl(string $socketHost, string $subject): string {
+        $query = http_build_query([
+            'token' => DashboardAuth::createInternalSocketToken($subject)
+        ]);
+        $separator = str_contains($socketHost, '?') ? '&' : '?';
+        return 'ws://' . $socketHost . $separator . $query;
     }
 
     /**

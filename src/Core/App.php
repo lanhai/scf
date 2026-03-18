@@ -44,28 +44,34 @@ class App {
      * @param $version
      * @return bool
      */
-    public static function appointUpdateTo($type, $version): bool {
+    public static function appointUpdateTo($type, $version, bool $autoReload = true): bool {
         try {
-            $httpServer = \Scf\Server\Http::instance();
             if (Updater::instance()->appointUpdateTo($type, $version)) {
                 if ($type == 'public') {
                     return true;
                 }
-                Timer::after(App::isMaster() ? 5000 : 100, function () use ($httpServer, $type) {
-                    if ($type == 'framework') {
-                        Timer::after(1000, function () use ($httpServer) {
-                            $httpServer->shutdown();
-                        });
-                    } else {
-                        $httpServer->reload();
-                    }
-                });
+                if ($autoReload) {
+                    self::scheduleUpdateReload($type);
+                }
                 return true;
             }
             return false;
         } catch (Throwable) {
             return false;
         }
+    }
+
+    public static function scheduleUpdateReload(string $type): void {
+        $httpServer = \Scf\Server\Http::instance();
+        Timer::after(App::isMaster() ? 5000 : 100, function () use ($httpServer, $type) {
+            if ($type == 'framework') {
+                Timer::after(1000, function () use ($httpServer) {
+                    $httpServer->shutdown();
+                });
+            } else {
+                $httpServer->reload();
+            }
+        });
     }
 
     /**

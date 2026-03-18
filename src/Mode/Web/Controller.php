@@ -60,6 +60,7 @@ abstract class Controller {
             Response::interrupt(App::isDevEnv() ? '模板文件:' . ($tplPath . $tplFile) . ' 不存在' : '系统繁忙,请稍后重试');
         } else {
             $loader = new FilesystemLoader($tplPath);
+            TwigCache::prepare(APP_TMP_PATH . '/template');
             $twig = new Environment($loader, [
                 'cache' => APP_TMP_PATH . '/template',
                 'auto_reload' => true,  // 当模板文件修改时自动重新编译

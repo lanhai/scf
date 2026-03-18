@@ -75,7 +75,29 @@ class Config {
     public static function load(array|string $path): void {
         $config = is_array($path) ? $path : (is_file($path) ? require($path) : []);
         try {
-            self::$_cache = Arr::merge(self::$_cache, is_array($config) ? $config : []);
+            $config = is_array($config) ? $config : [];
+
+            // Support explicit path replacement for env configs that should not
+            // use recursive merge semantics (for example indexed arrays).
+            $replaceKeys = $config['__replace__'] ?? [];
+            unset($config['__replace__']);
+            if (is_string($replaceKeys)) {
+                $replaceKeys = [$replaceKeys];
+            }
+            if (is_array($replaceKeys)) {
+                $notFound = new \stdClass();
+                foreach ($replaceKeys as $replaceKey) {
+                    if (!is_string($replaceKey) || $replaceKey === '') {
+                        continue;
+                    }
+                    $value = Arr::path($config, $replaceKey, $notFound, '.');
+                    if ($value !== $notFound) {
+                        Arr::setPath(self::$_cache, $replaceKey, $value, '.');
+                    }
+                }
+            }
+
+            self::$_cache = Arr::merge(self::$_cache, $config);
         } catch (Throwable $e) {
             Console::error($path . "=>" . $e->getMessage());
         }

@@ -3,7 +3,6 @@
 namespace Scf\App;
 
 use Error;
-use PhpZip\Exception\ZipException;
 use PhpZip\ZipFile;
 use Scf\Client\Http;
 use Scf\Core\Console;
@@ -128,18 +127,14 @@ class Updater {
             }
             //Log::instance()->info("资源包下载完成:" . $publicFilePath);
             //解压缩
-            $zipFile = new ZipFile();
             try {
                 $this->clearPublic();
-                $stream = File::read($publicFilePath);
-                $zipFile->openFromString($stream)->setReadPassword($app->app_auth_key)->extractTo(APP_PUBLIC_PATH);
-                //Log::instance()->info("资源包解压成功");
-            } catch (ZipException $e) {
+                $this->extractZipArchive($publicFilePath, APP_PUBLIC_PATH, $app->app_auth_key);
+            } catch (Throwable $e) {
                 Log::instance()->error("【Server】资源包解压失败:" . Color::red($e->getMessage()));
                 return false;
-            } finally {
-                $zipFile->close();
             }
+            @unlink($publicFilePath);
             $installer = App::installer();
             $installer->public_version = $publicVersion;
             $installer->updated = date('Y-m-d H:i:s');
@@ -185,7 +180,7 @@ class Updater {
             //更新本地配置文件
             $app = App::installer();
             $app->version = $version;
-            $app->updated = date('Yx-m-d H:i:s');
+            $app->updated = date('Y-m-d H:i:s');
             if (!$app->update()) {
                 Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
                 return false;
@@ -413,5 +408,43 @@ class Updater {
         }
         closedir($dh);
         return true;
+    }
+
+    /**
+     * 优先使用 ZipArchive 直接从文件解压，避免把整个资源包读入内存。
+     * 老环境没有 ZipArchive 时再回退到原有实现。
+     */
+    protected function extractZipArchive(string $archivePath, string $targetDir, ?string $password = null): void {
+        if (class_exists(\ZipArchive::class)) {
+            $archive = new \ZipArchive();
+            $opened = $archive->open($archivePath);
+            if ($opened === true) {
+                try {
+                    if (!empty($password)) {
+                        $archive->setPassword($password);
+                    }
+                    if (!$archive->extractTo($targetDir)) {
+                        throw new \RuntimeException('ZipArchive extract failed');
+                    }
+                    return;
+                } finally {
+                    $archive->close();
+                }
+            }
+        }
+        $stream = File::read($archivePath);
+        if ($stream === false) {
+            throw new \RuntimeException('升级包读取失败');
+        }
+        $zipFile = new ZipFile();
+        try {
+            $zipFile->openFromString($stream);
+            if (!empty($password)) {
+                $zipFile->setReadPassword($password);
+            }
+            $zipFile->extractTo($targetDir);
+        } finally {
+            $zipFile->close();
+        }
     }
 }

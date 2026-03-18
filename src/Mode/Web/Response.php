@@ -83,6 +83,7 @@ class Response {
             self::instance()->json($output);
         } else {
             $loader = new FilesystemLoader(__DIR__ . '/Template');
+            TwigCache::prepare(APP_TMP_PATH . '/template');
             $twig = new Environment($loader, [
                 'cache' => APP_TMP_PATH . '/template',
                 'auto_reload' => true,  // 当模板文件修改时自动重新编译
