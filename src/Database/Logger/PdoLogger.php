@@ -52,7 +52,9 @@ class PdoLogger implements ILogger {
             });
         }
         //时间符号
-        ProcessLife::instance()->addSql("{$executeSql}", $time);
+        if (ProcessLife::enabled()) {
+            ProcessLife::instance()->addSql("{$executeSql}", $time);
+        }
         PRINT_MYSQL_LOG and Console::info("【Mysql】{$executeSql} t={$time}ms");
         if (!is_null($exception) && !str_starts_with($executeSql, 'DESCRIBE')) {
             $backTrace = $exception->getTrace();

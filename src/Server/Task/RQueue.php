@@ -51,6 +51,8 @@ class RQueue {
                 Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
             } else {
                 $config = Config::server();
+                $memoryLimit = (int)($config['redis_queue_memory_limit'] ?? max((int)($config['worker_memory_limit'] ?? 256), 1024));
+                @ini_set('memory_limit', $memoryLimit . 'M');
                 MemoryMonitor::start('redis:queue');
                 self::instance()->watch($config['redis_queue_mc'] ?? 32);
             }
@@ -68,6 +70,8 @@ class RQueue {
             Console::warning("【RedisQueue】Redis服务不可用,队列管理未启动");
         } else {
             $config = Config::server();
+            $memoryLimit = (int)($config['redis_queue_memory_limit'] ?? max((int)($config['worker_memory_limit'] ?? 256), 1024));
+            @ini_set('memory_limit', $memoryLimit . 'M');
             self::instance()->watch($config['redis_queue_mc'] ?? 32);
         }
     }

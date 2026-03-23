@@ -3,6 +3,7 @@
 namespace Scf\Mode\Web;
 
 use Scf\Core\Config;
+use Scf\Core\Context;
 use Scf\Core\Traits\ProcessLifeSingleton;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\ObjectHelper;
@@ -15,6 +16,8 @@ use Swoole\Coroutine;
 
 class Request {
     use ProcessLifeSingleton;
+
+    public const CONTEXT_ACTIVE_KEY = '__web_request_active__';
 
     const REQUIRED = '__REQUIRED__';
     const VALIDATOR = '__VALIDATOR__';
@@ -432,6 +435,7 @@ class Request {
      */
     public function register(\Swoole\Http\Request $request): void {
         $this->cid = Coroutine::getCid();
+        Context::set(self::CONTEXT_ACTIVE_KEY, true);
         $this->_request = $request;
         $request = ObjectHelper::toArray($request);
         $this->_COOKIE = $request['cookie'] ?: [];

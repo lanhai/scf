@@ -262,7 +262,6 @@ class Updater {
         $localVersion = $this->getLocalVersion();
         return match ($type) {
             'public' => $localVersion['public_version'] ?? null,
-            'app' => $localVersion['version'] ?? null,
             default => $localVersion['version'] ?? null,
         };
     }

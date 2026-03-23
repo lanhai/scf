@@ -4,7 +4,6 @@ namespace Scf\Cache\Logger;
 
 use Mix\Redis\LoggerInterface;
 use Scf\Core\Console;
-use Scf\Server\Http;
 use Scf\Server\Worker\ProcessLife;
 use Throwable;
 
@@ -18,7 +17,7 @@ class RedisLogger implements LoggerInterface {
      * @return void
      */
     public function trace(float $time, string $cmd, array $args, ?Throwable $exception): void {
-        if (!is_null(Http::server())) {
+        if (ProcessLife::enabled()) {
             ProcessLife::instance()->addRedis("{$cmd} {$args[0]} " . ($args[1] ?? ""), $time);
         }
         PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? "") . "t={$time}ms");

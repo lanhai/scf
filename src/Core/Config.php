@@ -35,6 +35,7 @@ class Config {
                 'enable_coroutine' => true,
                 'worker_num' => 8,
                 'worker_memory_limit' => 256,
+                'redis_queue_memory_limit' => 1024,
                 'max_wait_time' => 60,
                 'task_worker_num' => 4,
                 'max_connection' => 4096,//最大连接数

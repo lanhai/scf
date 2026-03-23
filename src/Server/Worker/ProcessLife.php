@@ -2,8 +2,11 @@
 
 namespace Scf\Server\Worker;
 
+use Scf\Core\Context;
+use Scf\Core\Env;
 use Scf\Core\Traits\ProcessLifeSingleton;
 use Scf\Mode\Web\App;
+use Scf\Mode\Web\Request;
 use Scf\Util\Random;
 use Scf\Util\Time;
 use Swoole\Coroutine;
@@ -13,6 +16,14 @@ use Swoole\Coroutine;
  */
 class ProcessLife {
     use ProcessLifeSingleton;
+
+    protected const MAX_SQL_LOGS = 200;
+    protected const MAX_REDIS_LOGS = 200;
+    protected const MAX_LOG_LENGTH = 1024;
+
+    public static function enabled(): bool {
+        return Context::has(Request::CONTEXT_ACTIVE_KEY);
+    }
 
     protected ?string $lifeId = null;
     protected int $count = 0;
@@ -66,7 +77,7 @@ class ProcessLife {
      * @return void
      */
     public function addRedis($cmd, float $cost): void {
-        if (ENV_MODE !== MODE_CGI) {
+        if (!self::enabled()) {
             return;
         }
         $record = "【" . date('H:i:s') . "." . substr(Time::millisecond(), -3) . " ⧖{$cost}ms】" . $cmd;
@@ -75,7 +86,9 @@ class ProcessLife {
         } else {
             $this->redisLogs['set'] += 1;
         }
-        $this->redisLogs['cmd'][] = $record;
+        if (Env::isDev()) {
+            $this->appendLog($this->redisLogs['cmd'], $record, self::MAX_REDIS_LOGS);
+        }
     }
 
     /**
@@ -98,7 +111,7 @@ class ProcessLife {
      * @return void
      */
     public function addSql($sql, float $cost): void {
-        if (ENV_MODE !== MODE_CGI) {
+        if (!self::enabled()) {
             return;
         }
         $record = "【" . date('H:i:s') . "." . substr(Time::millisecond(), -3) . " ⧖{$cost}ms】" . $sql;
@@ -107,7 +120,9 @@ class ProcessLife {
         } else {
             $this->databaseLogs['write'] += 1;
         }
-        $this->databaseLogs['sql'][] = $record;
+        if (Env::isDev()) {
+            $this->appendLog($this->databaseLogs['sql'], $record, self::MAX_SQL_LOGS);
+        }
     }
 
     /**
@@ -121,6 +136,18 @@ class ProcessLife {
             'database' => $this->databaseLogs,
             'redis' => $this->redisLogs
         ];
+    }
+
+    protected function appendLog(array &$logs, string $record, int $max): void {
+        if (mb_strlen($record) > self::MAX_LOG_LENGTH) {
+            $record = mb_substr($record, 0, self::MAX_LOG_LENGTH) . '...';
+        }
+        $logs[] = $record;
+        $count = count($logs);
+        if ($count <= $max) {
+            return;
+        }
+        array_splice($logs, 0, $count - $max);
     }
 
 
