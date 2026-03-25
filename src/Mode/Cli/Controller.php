@@ -3,6 +3,7 @@
 namespace Scf\Mode\Cli;
 
 use JetBrains\PhpStorm\NoReturn;
+use Scf\Command\Manager;
 use Scf\Core\Console;
 
 class Controller {
@@ -36,6 +37,15 @@ class Controller {
      */
     protected function print($msg): void {
         Console::write("------------------------------------------------【" . date('H:i:s', time()) . "】------------------------------------------------\n" . $msg . "\n------------------------------------------------------------------------------------------------------------");
+    }
+
+    protected function getCliArgs(int $offset = 2): array {
+        return array_values(array_slice(Manager::instance()->getArgs(), $offset));
+    }
+
+    protected function getCliArg(int $index = 0, mixed $default = null, int $offset = 2): mixed {
+        $args = $this->getCliArgs($offset);
+        return $args[$index] ?? $default;
     }
 
     #[NoReturn] protected function exit(): void {

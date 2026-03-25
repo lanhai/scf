@@ -102,7 +102,6 @@ INFO;
     }
 
     protected function onpipeMessage(Server $server, $workerId, $data) {
-
     }
 
     protected function onWorkerStop(Server $server, $workerId): void {

@@ -248,6 +248,10 @@ class NodeManager {
             $socket->close();
             return Result::error('响应超时,升级失败');
         }
+        $socket->close();
+        if (JsonHelper::is($reply->data)) {
+            return Result::success(JsonHelper::recover($reply->data));
+        }
         return Result::success($reply->data ?: 0);
     }
 

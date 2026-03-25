@@ -8,113 +8,97 @@ if (version_compare(PHP_VERSION, '8.1.0', '<')) {
     exit(1);
 }
 
-//系统路径
 const SCF_ROOT = __DIR__;
-define("BUILD_PATH", dirname(SCF_ROOT) . '/build/');
-define("SCF_APPS_ROOT", dirname(SCF_ROOT) . '/apps');
+defined('BUILD_PATH') || define('BUILD_PATH', dirname(SCF_ROOT) . '/build/');
+defined('SCF_APPS_ROOT') || define('SCF_APPS_ROOT', dirname(SCF_ROOT) . '/apps');
+scf_define_runtime_constants($argv);
 
-//读取系统环境参数
-$envVariables = [
-    'app_env' => getenv('APP_ENV') ?: '',
-    'app_dir' => getenv('APP_DIR') ?: '',
-    'app_src' => getenv('APP_SRC') ?: '',
-    'server_role' => getenv('SERVER_ROLE') ?: '',
-    'static_handler' => getenv('STATIC_HANDLER') ?: '',
-    'host_ip' => getenv('HOST_IP') ?: '',
-    'os_name' => getenv('OS_NAME') ?: '',
-    'network_mode' => getenv('NETWORK_MODE') ?: '',
-    'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',
-];
-define("ENV_VARIABLES", $envVariables);
-define('IS_DEV', (ENV_VARIABLES['app_env'] === 'dev') || in_array('-dev', $argv));//开发环境
-define('IS_PACK', in_array('-pack', $argv));//框架打包源码模式
-define('NO_PACK', (IS_DEV && !IS_PACK) || in_array('-nopack', $argv));//框架非打包源码模式
-define('IS_HTTP_SERVER', in_array('server', $argv));
-define('IS_HTTP_SERVER_START', in_array('start', $argv));
-define('RUNNING_BUILD', in_array('build', $argv));//源码构建
-define('RUNNING_INSTALL', in_array('install', $argv));//创建应用
-define('RUNNING_TOOLBOX', in_array('toolbox', $argv));//cli工具
-define('RUNNING_BUILD_FRAMEWORK', in_array('framework', $argv));//框架源码构建&发布到github
-define('RUNNING_CREATE_AR', RUNNING_TOOLBOX && in_array('ar', $argv));//构建数据AR文件
+$srcPack = scf_try_upgrade(true);
+$frameworkSourceDir = scf_framework_source_dir();
 
-//框架源码是否打包
-const FRAMEWORK_IS_PHAR = IS_PACK || (!IS_DEV && !NO_PACK && !RUNNING_BUILD && !RUNNING_INSTALL && !RUNNING_BUILD_FRAMEWORK);
+spl_autoload_register(static function (string $class) use ($srcPack, $frameworkSourceDir): void {
+    $filePath = scf_resolve_framework_class_file($class, $srcPack, $frameworkSourceDir);
+    if ($filePath !== null && file_exists($filePath)) {
+        require $filePath;
+    }
+});
 
-function scf_try_upgrade($boot = false): string {
+date_default_timezone_set(scf_detect_timezone());
+require SCF_ROOT . '/vendor/autoload.php';
+
+scf_bootstrap($argv);
+
+function scf_bootstrap(array $argv): void {
+    if (!scf_bool_constant('IS_HTTP_SERVER')) {
+        scf_run($argv);
+        return;
+    }
+
+    scf_run_server_process_loop($argv);
+}
+
+function scf_define_runtime_constants(array $argv): void {
+    $envVariables = [
+        'app_env' => getenv('APP_ENV') ?: '',
+        'app_dir' => getenv('APP_DIR') ?: '',
+        'app_src' => getenv('APP_SRC') ?: '',
+        'server_role' => getenv('SERVER_ROLE') ?: '',
+        'static_handler' => getenv('STATIC_HANDLER') ?: '',
+        'host_ip' => getenv('HOST_IP') ?: '',
+        'os_name' => getenv('OS_NAME') ?: '',
+        'network_mode' => getenv('NETWORK_MODE') ?: '',
+        'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',
+    ];
+
+    defined('ENV_VARIABLES') || define('ENV_VARIABLES', $envVariables);
+    defined('IS_DEV') || define('IS_DEV', $envVariables['app_env'] === 'dev' || scf_has_arg($argv, '-dev'));
+    defined('IS_PACK') || define('IS_PACK', scf_has_arg($argv, '-pack'));
+    defined('NO_PACK') || define('NO_PACK', (scf_bool_constant('IS_DEV') && !scf_bool_constant('IS_PACK')) || scf_has_arg($argv, '-nopack'));
+    defined('IS_HTTP_SERVER') || define('IS_HTTP_SERVER', scf_has_arg($argv, 'server'));
+    defined('IS_HTTP_SERVER_START') || define('IS_HTTP_SERVER_START', scf_has_arg($argv, 'start'));
+    defined('RUNNING_BUILD') || define('RUNNING_BUILD', scf_has_arg($argv, 'build'));
+    defined('RUNNING_INSTALL') || define('RUNNING_INSTALL', scf_has_arg($argv, 'install'));
+    defined('RUNNING_TOOLBOX') || define('RUNNING_TOOLBOX', scf_has_arg($argv, 'toolbox'));
+    defined('RUNNING_BUILD_FRAMEWORK') || define('RUNNING_BUILD_FRAMEWORK', scf_has_arg($argv, 'framework'));
+    defined('RUNNING_CREATE_AR') || define('RUNNING_CREATE_AR', scf_bool_constant('RUNNING_TOOLBOX') && scf_has_arg($argv, 'ar'));
+    defined('FRAMEWORK_IS_PHAR') || define('FRAMEWORK_IS_PHAR', scf_bool_constant('IS_PACK') || (!scf_bool_constant('IS_DEV') && !scf_bool_constant('NO_PACK') && !scf_bool_constant('RUNNING_BUILD') && !scf_bool_constant('RUNNING_INSTALL') && !scf_bool_constant('RUNNING_BUILD_FRAMEWORK')));
+}
+
+function scf_try_upgrade(bool $boot = false): string {
     clearstatcache();
-    $srcPack = __DIR__ . '/build/src.pack';
-    $updatePack = __DIR__ . '/build/update.pack';
-    $lockFile = __DIR__ . '/build/update.lock';
 
-    // 辅助方法: 原子替换 (同目录临时文件 -> 重命名)
-    $atomicReplace = static function (string $from, string $to): bool {
-        // 确保目标目录存在
-        $dir = dirname($to);
-        if (!is_dir($dir)) {
-            return false;
-        }
-        // 首先尝试简单重命名（如果在同一文件系统且未被占用这是最优方式）
-        if (@rename($from, $to)) {
-            return true;
-        }
-        // 备选方案: 复制到同目录下的临时文件然后重命名
-        $tmp = $dir . '/.' . basename($to) . '.tmp.' . getmypid();
-        if (!@copy($from, $tmp)) {
-            return false;
-        }
-        // 尝试保留部分权限
-        @chmod($tmp, 0644);
-        if (!@rename($tmp, $to)) {
-            // 如果重命名失败则清理临时文件
-            @unlink($tmp);
-            return false;
-        }
-        // 替换成功后删除原始 update pack
-        @unlink($from);
-        return true;
-    };
+    $srcPack = SCF_ROOT . '/build/src.pack';
+    $updatePack = SCF_ROOT . '/build/update.pack';
+    $lockFile = SCF_ROOT . '/build/update.lock';
 
-    // 框架是否已打包?
-    if (FRAMEWORK_IS_PHAR) {
-        // 如果还没有 src.pack 且也没有 update.pack，这是严重错误。
-        // (我们会在任何可能的更新后验证其存在性)
+    if (!scf_bool_constant('FRAMEWORK_IS_PHAR')) {
+        return $srcPack;
+    }
 
-        // 获取简单锁以避免并发写入
-        $lock = @fopen($lockFile, 'c');
-        if ($lock) {
-            @flock($lock, LOCK_EX);
-        }
+    $lock = scf_open_lock_file($lockFile);
+    if (is_resource($lock)) {
+        scf_safe_call(static fn() => flock($lock, LOCK_EX));
+    }
 
-        // 如果存在 update.pack，尝试原子性地切换
-        if (file_exists($updatePack)) {
-            // 直接用 atomicReplace 覆盖目标路径（无需先 unlink $srcPack）
-            if (!$atomicReplace($updatePack, $srcPack)) {
-                echo "写入更新文件失败!\n";
-                if ($lock) {
-                    @flock($lock, LOCK_UN);
-                    @fclose($lock);
-                }
-                if ($boot) {
-                    // 启动时更新失败是致命的，因为无法保证一致性
-                    exit(2);
-                }
-            } else {
-                echo "框架源码包已更新\n";
-                flush();
-                clearstatcache();
+    if (file_exists($updatePack)) {
+        $error = null;
+        if (!scf_atomic_replace($updatePack, $srcPack, $error)) {
+            scf_stderr('写入更新文件失败!' . ($error ? ' ' . $error : ''));
+            scf_release_lock($lock);
+            if ($boot) {
+                exit(2);
             }
+        } else {
+            scf_stdout('框架源码包已更新');
+            clearstatcache();
         }
+    }
 
-        if ($lock) {
-            @flock($lock, LOCK_UN);
-            @fclose($lock);
-        }
+    scf_release_lock($lock);
 
-        // 任何更新后，确保 src.pack 存在
-        if (!file_exists($srcPack)) {
-            echo "内核文件不存在\n";
-            exit(3);
-        }
+    if (!file_exists($srcPack)) {
+        scf_stderr('内核文件不存在');
+        exit(3);
     }
 
     return $srcPack;
@@ -122,77 +106,148 @@ function scf_try_upgrade($boot = false): string {
 
 function scf_run(array $argv): void {
     $caller = new Scf\Command\Caller();
-    $caller->setScript(current($argv));
-    $caller->setCommand(next($argv));
+    $caller->setScript((string)($argv[0] ?? ''));
+    $caller->setCommand($argv[1] ?? false);
     $caller->setParams($argv);
+
     $ret = Scf\Command\Runner::instance()->run($caller);
     if (!empty($ret->getMsg())) {
-        echo $ret->getMsg() . "\n";
+        scf_stdout($ret->getMsg());
     }
 }
 
-$srcPack = scf_try_upgrade(true);
-// 注册scf命名空间
-spl_autoload_register(function ($class) use ($srcPack) {
-    // 将命名空间 Scf 映射到 PHAR 文件中的 src 目录
-    if (str_starts_with($class, 'Scf\\')) {
-        $classPath = str_replace('Scf\\', '', $class);
-        $relative = str_replace('\\', '/', $classPath) . '.php';
-        if (FRAMEWORK_IS_PHAR) {
-            if ($class === 'Scf\\Command\\Caller' || $class === 'Scf\\Command\\Runner') {
-                // 这两个类强制使用非打包源码，避免在 PHAR 中被固定导致热更新受限
-                if (IS_DEV || is_dir(__DIR__ . '/src/')) {
-                    $filePath = __DIR__ . '/src/' . $relative;
-                } else {
-                    $filePath = __DIR__ . '/vendor/lhai/scf/src/' . $relative;
-                }
-            } else {
-                $filePath = 'phar://' . $srcPack . '/' . $relative;
-            }
-        } else {
-            if (is_dir(__DIR__ . '/src/')) {
-                $filePath = __DIR__ . '/src/' . $relative;
-            } else {
-                $filePath = __DIR__ . '/vendor/lhai/scf/src/' . $relative;
-            }
-        }
-        if (file_exists($filePath)) {
-            require $filePath;
-        }
-    }
-});
-// TODO: 根据加载的APP配置设置时区
-ini_set('date.timezone', 'Asia/Shanghai');
-// 加载第三方库
-require __DIR__ . '/vendor/autoload.php';
-
-if (!IS_HTTP_SERVER) {
-    $managerProcess = new Process(function () use ($argv) {
-        scf_run($argv);
-    });
-    $managerProcess->start();
-    Process::wait();
-} else {
+function scf_run_server_process_loop(array $argv): void {
     while (true) {
-        $managerProcess = new Process(function () use ($argv) {
+        $managerProcess = new Process(static function () use ($argv): void {
             $serverBuildVersion = require Scf\Root::dir() . '/version.php';
             define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
             define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
             scf_run($argv);
         });
         $managerProcess->start();
+
         $ret = Process::wait();
         if ($ret) {
-            echo "[manager] child exit pid={$ret['pid']} code={$ret['code']} signal={$ret['signal']}\n";
+            scf_stdout("[manager] child exit pid={$ret['pid']} code={$ret['code']} signal={$ret['signal']}");
         }
-        if (!IS_HTTP_SERVER_START) {
+        if (!scf_bool_constant('IS_HTTP_SERVER_START')) {
             break;
         }
         try {
             scf_try_upgrade();
         } catch (\Throwable $e) {
-            echo "[manager] update failed: {$e->getMessage()}\n";
+            scf_stderr("[manager] update failed: {$e->getMessage()}");
         }
         sleep(2);
     }
+}
+
+function scf_framework_source_dir(): string {
+    $sourceDir = SCF_ROOT . '/src/';
+    if (is_dir($sourceDir)) {
+        return $sourceDir;
+    }
+
+    return SCF_ROOT . '/vendor/lhai/scf/src/';
+}
+
+function scf_resolve_framework_class_file(string $class, string $srcPack, string $frameworkSourceDir): ?string {
+    if (!str_starts_with($class, 'Scf\\')) {
+        return null;
+    }
+
+    $relativePath = str_replace('\\', '/', substr($class, 4)) . '.php';
+    if (!scf_bool_constant('FRAMEWORK_IS_PHAR') || scf_should_load_from_source($class)) {
+        return $frameworkSourceDir . $relativePath;
+    }
+
+    return 'phar://' . $srcPack . '/' . $relativePath;
+}
+
+function scf_should_load_from_source(string $class): bool {
+    return in_array($class, ['Scf\\Command\\Caller', 'Scf\\Command\\Runner'], true);
+}
+
+function scf_atomic_replace(string $from, string $to, ?string &$error = null): bool {
+    $dir = dirname($to);
+    if (!is_dir($dir)) {
+        $error = '目标目录不存在:' . $dir;
+        return false;
+    }
+
+    if (scf_safe_call(static fn() => rename($from, $to), $error)) {
+        return true;
+    }
+
+    $tmp = $dir . '/.' . basename($to) . '.tmp.' . getmypid();
+    if (!scf_safe_call(static fn() => copy($from, $tmp), $error)) {
+        return false;
+    }
+
+    scf_safe_call(static fn() => chmod($tmp, 0644));
+    if (!scf_safe_call(static fn() => rename($tmp, $to), $error)) {
+        scf_safe_call(static fn() => unlink($tmp));
+        return false;
+    }
+
+    scf_safe_call(static fn() => unlink($from));
+    return true;
+}
+
+function scf_open_lock_file(string $lockFile) {
+    return scf_safe_call(static fn() => fopen($lockFile, 'c'));
+}
+
+function scf_release_lock($lock): void {
+    if (!is_resource($lock)) {
+        return;
+    }
+
+    scf_safe_call(static fn() => flock($lock, LOCK_UN));
+    scf_safe_call(static fn() => fclose($lock));
+}
+
+function scf_safe_call(callable $callback, ?string &$error = null): mixed {
+    $error = null;
+    set_error_handler(static function (int $severity, string $message) use (&$error): bool {
+        $error = $message;
+        return true;
+    });
+
+    try {
+        return $callback();
+    } finally {
+        restore_error_handler();
+    }
+}
+
+function scf_stdout(string $message): void {
+    fwrite(STDOUT, $message . PHP_EOL);
+}
+
+function scf_stderr(string $message): void {
+    fwrite(STDERR, $message . PHP_EOL);
+}
+
+function scf_detect_timezone(): string {
+    $candidates = [
+        getenv('TZ') ?: null,
+        ini_get('date.timezone') ?: null,
+    ];
+
+    foreach ($candidates as $timezone) {
+        if (is_string($timezone) && $timezone !== '' && in_array($timezone, timezone_identifiers_list(), true)) {
+            return $timezone;
+        }
+    }
+
+    return 'Asia/Shanghai';
+}
+
+function scf_has_arg(array $argv, string $needle): bool {
+    return in_array($needle, $argv, true);
+}
+
+function scf_bool_constant(string $name): bool {
+    return defined($name) && (bool)constant($name);
 }

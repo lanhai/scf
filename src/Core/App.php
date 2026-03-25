@@ -37,6 +37,7 @@ class App {
     protected static ?string $appid = null;
     protected static string $path;
     protected static bool $_ready = false;
+    protected static ?string $_lastUpdateError = null;
 
     /**
      * 自定义更新src/public到指定版本
@@ -46,8 +47,11 @@ class App {
      * @return bool
      */
     public static function appointUpdateTo($type, $version, bool $autoReload = true): bool {
+        self::$_lastUpdateError = null;
         try {
-            if (Updater::instance()->appointUpdateTo($type, $version)) {
+            $updater = Updater::instance();
+            $updater->resetLastError();
+            if ($updater->appointUpdateTo($type, $version)) {
                 if ($type == 'public') {
                     return true;
                 }
@@ -56,10 +60,17 @@ class App {
                 }
                 return true;
             }
+            self::$_lastUpdateError = $updater->getLastError() ?: "更新失败:{$type} => {$version}";
             return false;
-        } catch (Throwable) {
+        } catch (Throwable $throwable) {
+            self::$_lastUpdateError = $throwable->getMessage();
+            Log::instance()->error('【Server】升级执行异常:' . $throwable->getMessage());
             return false;
         }
+    }
+
+    public static function getLastUpdateError(): ?string {
+        return self::$_lastUpdateError;
     }
 
     public static function scheduleUpdateReload(string $type): void {
@@ -146,7 +157,7 @@ class App {
         $version = $updater->getVersion();
         Console::line();
         $versionInfo .= "APP版本:" . $version['local']['version'] . ",更新时间:" . $version['local']['updated'] . "\n";
-        $versionInfo .= "SCF版本:" . SCF_VERSION . ",更新时间:" . date('Y-m-d H:i:s') . "\n";
+        $versionInfo .= "SCF版本:" . SCF_COMPOSER_VERSION . ",更新时间:" . date('Y-m-d H:i:s') . "\n";
         if (is_null($version['remote'])) {
             $versionInfo .= "最新版本:获取失败\n";
         } else {

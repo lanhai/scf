@@ -469,7 +469,7 @@ class SubProcessManager {
                 $node->swoole_version = swoole_version();
                 $node->cpu_num = swoole_cpu_num();
                 $node->stack_useage = Coroutine::getStackUsage();
-                $node->scf_version = SCF_VERSION;
+                $node->scf_version = SCF_COMPOSER_VERSION;
                 $node->server_run_mode = APP_SRC_TYPE;
                 while (true) {
                     $socket = Manager::instance()->getMasterSocketConnection();
@@ -581,14 +581,16 @@ class SubProcessManager {
                                                 ])));
                                                 $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
                                             } else {
+                                                $error = App::getLastUpdateError() ?: '未知原因';
                                                 $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                                                     'data' => [
                                                         'state' => 'failed',
-                                                        'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}",
+                                                        'error' => $error,
+                                                        'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}",
                                                         'updated_at' => time(),
                                                     ]
                                                 ])));
-                                                $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']}");
+                                                $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}");
                                             }
                                             break;
                                         default:

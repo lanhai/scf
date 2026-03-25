@@ -99,13 +99,17 @@ class Manager {
                     [$option, $value] = explode('=', $option, 2);
                 }
                 if ($option) $this->opts[$option] = $value;
-            } else if (str_contains($param, '=')) {
+            } else if (str_contains($param, '=') && !$this->isUrlArg($param)) {
                 [$name, $value] = explode('=', $param, 2);
                 if ($name) $this->args[$name] = $value;
             } else {
                 $this->args[] = $param;
             }
         }
+    }
+
+    private function isUrlArg(string $param): bool {
+        return (bool)preg_match('#^[a-z][a-z0-9+.\-]*://#i', $param);
     }
 
     public function addCommand(CommandInterface $handler): void {

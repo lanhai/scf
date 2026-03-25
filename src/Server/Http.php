@@ -289,7 +289,7 @@ class Http extends \Scf\Core\Server {
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
             File::write(SERVER_DASHBOARD_PORT_FILE, Runtime::instance()->dashboardPort());
-            $scfVersion = SCF_VERSION;
+            $scfVersion = SCF_COMPOSER_VERSION;
             $role = SERVER_ROLE;
             $env = SERVER_RUN_ENV;
             $src = APP_SRC_TYPE;

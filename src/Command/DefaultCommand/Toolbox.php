@@ -17,7 +17,6 @@ use Scf\Mode\Cli\App;
 use Scf\Rpc\Updater;
 use Scf\Util\Auth;
 use Scf\Util\File;
-use Scf\Util\MemoryMonitor;
 use Swoole\Event;
 use Swoole\ExitException;
 use Symfony\Component\Yaml\Yaml;

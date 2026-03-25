@@ -4,7 +4,6 @@ namespace Scf\Mode\Cli;
 
 use Scf\Command\Color;
 use Scf\Command\Manager;
-use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Helper\StringHelper;
 
@@ -35,9 +34,21 @@ class App {
         }
         $params = Manager::instance()->getOpts();
         $controller = $params['controller'] ?? '';
-        if ($controller && in_array($controller, $options)) {
-            //查询控制器在options数组里是第几个
-            $cmdNum = array_search($controller, $options) + 1;
+        if (!$controller && is_string($cmdNum) && !is_numeric($cmdNum)) {
+            $controller = trim($cmdNum);
+            $cmdNum = 0;
+        }
+        if ($controller && ($directController = $this->resolveDirectControllerClass($controller))) {
+            return $this->runController($directController);
+        }
+        if ($controller) {
+            $appNum = $this->matchAppNum($controller);
+            if (!is_null($appNum)) {
+                $cmdNum = $appNum + 1;
+            }
+        }
+        if (is_string($cmdNum) && is_numeric($cmdNum)) {
+            $cmdNum = (int)$cmdNum;
         }
         if (!$cmdNum) {
             $cmdNum = Console::select($options, 1, 1, "请选择要执行的操作,当前运行环境:" . (\Scf\Core\App::isDevEnv() ? Color::green('开发环境') : Color::yellow('生产环境')));
@@ -50,6 +61,33 @@ class App {
             return $this->ready();
         }
         return $this->run($appNum);
+    }
+
+    protected function matchAppNum(string $controller): ?int {
+        $controller = $this->normalizeControllerName($controller);
+        foreach ($this->_apps as $index => $app) {
+            $appController = $app['controller'] ?? '';
+            if ($appController && $this->normalizeControllerName($appController) === $controller) {
+                return $index;
+            }
+            $appName = $app['name'] ?? '';
+            if ($appName && strtolower($appName) === strtolower(trim($controller))) {
+                return $index;
+            }
+        }
+        return null;
+    }
+
+    protected function normalizeControllerName(string $controller): string {
+        $controller = trim($controller);
+        if (str_contains($controller, '\\')) {
+            $controller = substr($controller, strrpos($controller, '\\') + 1);
+        }
+        $controller = str_replace('-', '_', $controller);
+        if (!preg_match('/[A-Z]/', $controller)) {
+            $controller = StringHelper::lower2camel(strtolower($controller));
+        }
+        return strtolower($controller);
     }
 
     /**
@@ -68,8 +106,13 @@ class App {
         } else {
             $ctrlClass = \Scf\Core\App::buildControllerPath('Cli', $controller);
         }
+        return $this->runController($ctrlClass);
+    }
+
+    protected function runController(string $ctrlClass): bool {
         if (!class_exists($ctrlClass)) {
             Console::log('控制器不存在:' . $ctrlClass);
+            return false;
         }
         $params = Manager::instance()->getOpts();
         $selectNum = $params['select'] ?? 0;
@@ -80,6 +123,27 @@ class App {
             $app->run();
         }
         return true;
+    }
+
+    protected function resolveDirectControllerClass(string $controller): ?string {
+        spl_autoload_register(['\Scf\Core\App', 'autoload'], true);
+        $normalizedController = $this->normalizeControllerClassName($controller);
+        $moduleStyle = APP_MODULE_STYLE;
+        if ($moduleStyle == APP_MODULE_STYLE_MULTI) {
+            $ctrlClass = \Scf\Core\App::buildControllerPath(StringHelper::lower2camel('Cli'), 'Controller', $normalizedController);
+        } else {
+            $ctrlClass = \Scf\Core\App::buildControllerPath('Cli', $normalizedController);
+        }
+        return class_exists($ctrlClass) ? $ctrlClass : null;
+    }
+
+    protected function normalizeControllerClassName(string $controller): string {
+        $controller = trim($controller);
+        if (str_contains($controller, '\\')) {
+            $controller = substr($controller, strrpos($controller, '\\') + 1);
+        }
+        $controller = str_replace('-', '_', strtolower($controller));
+        return StringHelper::lower2camel($controller);
     }
 
 } 

@@ -24,6 +24,7 @@ class Updater {
     protected static array $_instances;
     protected ?array $_version = null;
     protected ?array $_remoteAppVersions = null;
+    protected ?string $_lastError = null;
 
     /**
      * @return Updater
@@ -36,14 +37,28 @@ class Updater {
         return self::$_instances[$class];
     }
 
+    public function resetLastError(): void {
+        $this->_lastError = null;
+    }
+
+    public function getLastError(): ?string {
+        return $this->_lastError;
+    }
+
+    protected function setLastError(string $message): void {
+        $this->_lastError = trim($message);
+    }
+
     /**
      * 更新应用到最新版本
      * @param bool $isInstall
      * @return bool
      */
     public function updateApp(bool $isInstall = false): bool {
+        $this->resetLastError();
         $version = $this->getRemoteVersion();
         if (is_null($version) || !isset($version['app'])) {
+            $this->setLastError('获取版本服务器版本号失败');
             Log::instance()->error('【Server】升级失败:获取版本服务器版本号失败!');
             return false;
         }
@@ -58,22 +73,25 @@ class Updater {
      * @return false
      */
     public function changeAppVersion($version, bool $isInstall = false, ?string $appoint = 'all'): bool {
+        $this->resetLastError();
+        $requestedVersion = $this->normalizeVersion((string)$version);
         $result = $this->getRemoteVersionsRecord(true);
         if ($result->hasError()) {
+            $this->setLastError('获取云端版本号失败:' . $result->getMessage());
             Log::instance()->error('【Server】获取云端版本号失败:' . Color::red($result->getMessage()));
             return false;
         }
         $appVersions = $result->getData();
-        $versionInfo = $this->findVersionInfo($appVersions, $version);
+        $versionInfo = $this->findVersionInfo($appVersions, $requestedVersion, $appoint);
         if (is_null($versionInfo)) {
+            $this->setLastError('未查询到版本:' . $version);
             Log::instance()->error('【Server】升级失败:未查询到版本:' . $version);
             return false;
         }
-        return $this->applyVersionUpdate($version, $appVersions, $versionInfo, $isInstall, $appoint);
+        return $this->applyVersionUpdate($versionInfo['version'], $appVersions, $versionInfo, $isInstall, $appoint);
     }
 
     protected function applyVersionUpdate(string $version, array $appVersions, array $versionInfo, bool $isInstall = false, ?string $appoint = 'all'): bool {
-        $appFile = App::core($version);
         $app = App::info();
         if (!is_null($appoint)) {
             //指定更新
@@ -98,93 +116,109 @@ class Updater {
             $versionInfo['public_object'] = $latestPublicVersion;
             $versionInfo['app_object'] = $latestAppVersion;
         }
-        if ($versionInfo['public_object']) {
-            //Log::instance()->info("开始下载資源包:" . $versionInfo['server'] . $versionInfo['public_object']);
-            $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
-            $port = $versionInfo['port'] ?? 80;
-            $client = new Client($versionInfo['server'], $port, $port == 443);
-            $client->set(['timeout' => -1]);
-            $client->setHeaders([
-                'Host' => $versionInfo['server'],
-                'User-Agent' => 'Chrome/49.0.2587.3',
-                'Accept' => '*',
-                'Accept-Encoding' => 'gzip'
-            ]);
-            $client->download($versionInfo['public_object'], $publicFilePath);
-            $code = $client->getStatusCode();
-            if ($code !== 200) {
-                Log::instance()->error('【Server】升级失败:资源包下载失败:' . $client->errMsg . '(' . $code . ')');
-                return false;
+        $appFile = App::core($version);
+        $publicBackupDir = null;
+        $appBackupFile = null;
+        $publicFilePath = null;
+        $publicStageDir = null;
+        $updateFilePath = null;
+        $appStageFile = null;
+        $publicUpdated = false;
+        $appUpdated = false;
+        $preservePublicBackup = false;
+        $preserveAppBackup = false;
+        try {
+            if ($versionInfo['public_object']) {
+                $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
+                $publicStageDir = $this->createTemporaryPath(APP_UPDATE_DIR . '/public-stage-' . $version);
+                $this->prepareDirectory($publicStageDir);
+                $this->downloadPackage($versionInfo, $versionInfo['public_object'], $publicFilePath, '资源包');
+                $this->extractZipArchive($publicFilePath, $publicStageDir, $app->app_auth_key);
+                if (!$this->directoryHasContent($publicStageDir)) {
+                    throw new \RuntimeException('资源包解压后为空');
+                }
             }
-            //Log::instance()->info("资源包下载完成:" . $publicFilePath);
-            //解压缩
-            try {
-                $this->clearPublic();
-                $this->extractZipArchive($publicFilePath, APP_PUBLIC_PATH, $app->app_auth_key);
-            } catch (Throwable $e) {
-                Log::instance()->error("【Server】资源包解压失败:" . Color::red($e->getMessage()));
-                return false;
+            if ($versionInfo['app_object']) {
+                $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
+                $appStageFile = $this->createTemporaryPath(APP_UPDATE_DIR . '/app-v' . $version . '.app');
+                $this->downloadPackage($versionInfo, $versionInfo['app_object'], $updateFilePath, '源码包');
+                $updateContent = File::read($updateFilePath);
+                if ($updateContent === false) {
+                    throw new \RuntimeException('源码包读取失败');
+                }
+                $code = Auth::decode($updateContent, $app->app_auth_key);
+                if ($code === false) {
+                    throw new \RuntimeException('源码解析失败');
+                }
+                if (!File::write($appStageFile, $code)) {
+                    throw new \RuntimeException('更新写入失败');
+                }
             }
-            @unlink($publicFilePath);
-            $installer = App::installer();
-            $installer->public_version = $publicVersion;
-            $installer->updated = date('Y-m-d H:i:s');
-            if (!$installer->update()) {
-                Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
-                return false;
+            if ($appStageFile) {
+                $appBackupFile = $this->replaceFileAtomically($appStageFile, $appFile);
+                $appStageFile = null;
+                $appUpdated = true;
+            }
+            if ($publicStageDir) {
+                $publicBackupDir = $this->replaceDirectoryAtomically($publicStageDir, APP_PUBLIC_PATH);
+                $publicStageDir = null;
+                $publicUpdated = true;
+            }
+            if ($publicUpdated || $appUpdated) {
+                $installer = App::installer();
+                if ($publicUpdated) {
+                    $installer->public_version = $publicVersion;
+                }
+                if ($appUpdated) {
+                    $installer->version = $version;
+                }
+                $installer->updated = date('Y-m-d H:i:s');
+                if (!$installer->update()) {
+                    throw new \RuntimeException('更新版本配置文件失败');
+                }
+            }
+            $log = [
+                'date' => date('Y-m-d H:i:s'),
+                'version' => $version,
+                'remark' => $versionInfo['remark']
+            ];
+            File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
+            clearstatcache();
+            return true;
+        } catch (Throwable $e) {
+            $this->setLastError($e->getMessage());
+            if ($publicUpdated) {
+                if ($this->rollbackDirectory($publicBackupDir, APP_PUBLIC_PATH)) {
+                    $publicBackupDir = null;
+                } else {
+                    $preservePublicBackup = true;
+                    Log::instance()->error('【Server】资源目录回滚失败,请检查备份目录:' . Color::red((string)$publicBackupDir));
+                }
+                $publicUpdated = false;
+            }
+            if ($appUpdated) {
+                if ($this->rollbackFile($appBackupFile, $appFile)) {
+                    $appBackupFile = null;
+                } else {
+                    $preserveAppBackup = true;
+                    Log::instance()->error('【Server】核心文件回滚失败,请检查备份文件:' . Color::red((string)$appBackupFile));
+                }
+                $appUpdated = false;
+            }
+            Log::instance()->error('【Server】升级失败:' . Color::red($e->getMessage()));
+            return false;
+        } finally {
+            $this->removePath($publicFilePath);
+            $this->removePath($updateFilePath);
+            $this->removePath($publicStageDir);
+            $this->removePath($appStageFile);
+            if (!$preservePublicBackup) {
+                $this->removePath($publicBackupDir);
+            }
+            if (!$preserveAppBackup) {
+                $this->removePath($appBackupFile);
             }
         }
-        if ($versionInfo['app_object']) {
-            //Log::instance()->info("开始下载源码包:" . $versionInfo['server'] . $versionInfo['app_object']);
-            $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
-            $host = $versionInfo['server'];
-            $port = $versionInfo['port'] ?? 80;
-            $client = new Client($host, $port, $port == 443);
-            $client->set(['timeout' => -1]);
-            $client->setHeaders([
-                'Host' => $host,
-                'User-Agent' => 'Chrome/49.0.2587.3',
-                'Accept' => '*',
-                'Accept-Encoding' => 'gzip'
-            ]);
-            $client->download($versionInfo['app_object'], $updateFilePath);
-            $code = $client->getStatusCode();
-            if ($code !== 200) {
-                Log::instance()->error('【Server】升级失败:源码包下载失败:' . $client->errMsg . '(' . $code . ')');
-                return false;
-            }
-            //Log::instance()->info("开始写入文件:" . $appFile);
-            //Log::instance()->info("源码包下载完成:" . $updateFilePath);
-            if (file_exists($appFile)) {
-                unlink($appFile);
-            }
-            $updateContent = File::read($updateFilePath);
-            if (!$code = Auth::decode($updateContent, $app->app_auth_key)) {
-                Log::instance()->error('【Server】升级失败:源码解析失败');
-                return false;
-            }
-            if (!File::write($appFile, $code)) {
-                Log::instance()->error('【Server】升级失败:更新写入失败');
-                return false;
-            }
-            //Log::instance()->info("源码包更新成功");
-            //更新本地配置文件
-            $app = App::installer();
-            $app->version = $version;
-            $app->updated = date('Y-m-d H:i:s');
-            if (!$app->update()) {
-                Log::instance()->error('【Server】升级失败:更新版本配置文件失败');
-                return false;
-            }
-        }
-        $log = [
-            'date' => date('Y-m-d H:i:s'),
-            'version' => $version,
-            'remark' => $versionInfo['remark']
-        ];
-        File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
-        clearstatcache();
-        return true;
     }
 
     /**
@@ -194,15 +228,18 @@ class Updater {
      * @return bool
      */
     public function appointUpdateTo($type, $version): bool {
+        $this->resetLastError();
         if ($type == 'framework') {
             $saveDir = SCF_ROOT . '/build';
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
+                $this->setLastError('创建更新目录失败');
                 Console::warning('【updater】创建更新目录失败');
                 return false;
             }
             $client = Http::create(ENV_VARIABLES['scf_update_server']);
             $remoteVersionResponse = $client->get();
             if ($remoteVersionResponse->hasError()) {
+                $this->setLastError('远程版本获取失败:' . $remoteVersionResponse->getMessage());
                 Console::warning('【updater】远程版本获取失败:' . $remoteVersionResponse->getMessage());
                 return false;
             }
@@ -211,6 +248,7 @@ class Updater {
             $client = Http::create($remoteVersion['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
+                $this->setLastError('框架升级包下载失败:' . $downloadResult->getMessage());
                 Console::warning('【updater】框架升级包下载失败:' . $downloadResult->getMessage());
                 return false;
             }
@@ -219,39 +257,47 @@ class Updater {
             $client = Http::create($remoteVersion['boot']);
             $downloadResult = $client->download($bootFile, 1800);
             if ($downloadResult->hasError()) {
+                $this->setLastError('引导文件下载失败:' . $downloadResult->getMessage());
                 Console::warning('【updater】引导文件下载失败:' . $downloadResult->getMessage());
                 return false;
             }
             return true;
         }
-        $currentVersion = $this->getCurrentInstalledVersionByType($type);
-        if (!is_null($currentVersion) && strcmp($currentVersion, $version) === 0) {
+        $requestedVersion = $this->normalizeVersion((string)$version);
+        $currentVersion = $this->normalizeVersion((string)$this->getCurrentInstalledVersionByType($type));
+        if ($requestedVersion !== '' && !is_null($currentVersion) && strcmp($currentVersion, $requestedVersion) === 0) {
+            $this->setLastError('已是当前版本:' . $version);
             Console::warning("【Server】已是当前版本:" . $version);
             return false;
         }
         $result = $this->getRemoteVersionsRecord();
         if ($result->hasError()) {
+            $this->setLastError($result->getMessage());
             Console::warning('【updater】' . $result->getMessage());
             return false;
         }
         $versions = $result->getData();
         if (!$versions) {
+            $this->setLastError('版本清单获取失败');
             Console::warning('【updater】版本清单获取失败');
             return false;
         }
-        $versionInfo = $this->findVersionInfo($versions, $version);
+        $versionInfo = $this->findVersionInfo($versions, $requestedVersion, $type);
         if (is_null($versionInfo)) {
+            $this->setLastError('未匹配到版本记录');
             Console::warning('【updater】未匹配到版本记录');
             return false;
         }
         if ($type == 'app' && !$versionInfo['app_object']) {
+            $this->setLastError('未匹配到内核文件');
             Console::warning('【updater】未匹配到内核文件');
             return false;
         } else if ($type == 'public' && !$versionInfo['public_object']) {
+            $this->setLastError('未匹配到资源文件');
             Console::warning('【updater】未匹配到资源文件');
             return false;
         }
-        if (!$this->applyVersionUpdate($version, $versions, $versionInfo, false, $type)) {
+        if (!$this->applyVersionUpdate($versionInfo['version'], $versions, $versionInfo, false, $type)) {
             Console::warning('【updater】更新失败');
             return false;
         }
@@ -266,13 +312,26 @@ class Updater {
         };
     }
 
-    protected function findVersionInfo(array $versions, string $version): ?array {
+    protected function findVersionInfo(array $versions, string $version, ?string $type = 'all'): ?array {
+        $normalizedVersion = $this->normalizeVersion($version);
+        if ($normalizedVersion === '') {
+            return null;
+        }
+        $matched = [];
         foreach ($versions as $item) {
-            if (($item['version'] ?? '') === $version) {
+            if ($this->normalizeVersion((string)($item['version'] ?? '')) === $normalizedVersion) {
+                $matched[] = $item;
+            }
+        }
+        if (!$matched) {
+            return null;
+        }
+        foreach ($matched as $item) {
+            if ($this->versionRecordMatchesType($item, $type)) {
                 return $item;
             }
         }
-        return null;
+        return $matched[0];
     }
 
     /**
@@ -398,6 +457,143 @@ class Updater {
             }
         }
         return true;
+    }
+
+    protected function prepareDirectory(string $dir): void {
+        if (is_dir($dir)) {
+            $this->removePath($dir);
+        }
+        if (!mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new \RuntimeException('创建临时目录失败:' . $dir);
+        }
+    }
+
+    protected function createTemporaryPath(string $prefix): string {
+        return $prefix . '.' . date('YmdHis') . '.' . bin2hex(random_bytes(4));
+    }
+
+    protected function downloadPackage(array $versionInfo, string $remotePath, string $savePath, string $label): void {
+        $host = $versionInfo['server'];
+        $port = $versionInfo['port'] ?? 80;
+        $client = new Client($host, $port, $port == 443);
+        $client->set(['timeout' => -1]);
+        $client->setHeaders([
+            'Host' => $host,
+            'User-Agent' => 'Chrome/49.0.2587.3',
+            'Accept' => '*',
+            'Accept-Encoding' => 'gzip'
+        ]);
+        $client->download($remotePath, $savePath);
+        $statusCode = $client->getStatusCode();
+        if ($statusCode !== 200) {
+            $message = $client->errMsg ?: 'unknown error';
+            throw new \RuntimeException($label . '下载失败:' . $message . '(' . $statusCode . ')');
+        }
+        if (!file_exists($savePath) || filesize($savePath) <= 0) {
+            throw new \RuntimeException($label . '下载失败:文件为空');
+        }
+    }
+
+    protected function replaceFileAtomically(string $source, string $target): ?string {
+        $backup = null;
+        if (file_exists($target)) {
+            $backup = $this->createTemporaryPath($target . '.bak');
+            if (!@rename($target, $backup)) {
+                throw new \RuntimeException('备份旧核心文件失败');
+            }
+        }
+        if (!@rename($source, $target)) {
+            if ($backup && file_exists($backup)) {
+                @rename($backup, $target);
+            }
+            throw new \RuntimeException('切换核心文件失败');
+        }
+        return $backup;
+    }
+
+    protected function replaceDirectoryAtomically(string $sourceDir, string $targetDir): ?string {
+        $backupDir = null;
+        if (is_dir($targetDir)) {
+            $backupDir = $this->createTemporaryPath($targetDir . '.bak');
+            if (!@rename($targetDir, $backupDir)) {
+                throw new \RuntimeException('备份旧资源目录失败');
+            }
+        }
+        if (!@rename($sourceDir, $targetDir)) {
+            if ($backupDir && is_dir($backupDir)) {
+                @rename($backupDir, $targetDir);
+            }
+            throw new \RuntimeException('切换资源目录失败');
+        }
+        return $backupDir;
+    }
+
+    protected function rollbackDirectory(?string $backupDir, string $targetDir): bool {
+        $this->removePath($targetDir);
+        if (!$backupDir) {
+            return true;
+        }
+        if (!is_dir($backupDir)) {
+            return false;
+        }
+        return @rename($backupDir, $targetDir);
+    }
+
+    protected function rollbackFile(?string $backupFile, string $targetFile): bool {
+        if (file_exists($targetFile)) {
+            @unlink($targetFile);
+        }
+        if (!$backupFile) {
+            return true;
+        }
+        if (!file_exists($backupFile)) {
+            return false;
+        }
+        return @rename($backupFile, $targetFile);
+    }
+
+    protected function removePath(?string $path): void {
+        if (!$path || !file_exists($path)) {
+            return;
+        }
+        if (is_dir($path)) {
+            $this->clearPublic($path);
+            @rmdir($path);
+            return;
+        }
+        @unlink($path);
+    }
+
+    protected function directoryHasContent(string $dir): bool {
+        if (!is_dir($dir)) {
+            return false;
+        }
+        $files = scandir($dir);
+        if ($files === false) {
+            return false;
+        }
+        foreach ($files as $file) {
+            if ($file !== '.' && $file !== '..') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected function normalizeVersion(string $version): string {
+        $version = trim($version);
+        if ($version === '') {
+            return '';
+        }
+        return ltrim($version, "vV");
+    }
+
+    protected function versionRecordMatchesType(array $item, ?string $type): bool {
+        return match ($type) {
+            'app' => !empty($item['app_object']),
+            'public' => !empty($item['public_object']),
+            default => true,
+        };
     }
 
     protected function fetchRemoteAppVersions(bool $refresh = false): Result {

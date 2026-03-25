@@ -22,7 +22,7 @@ if (json_last_error() == JSON_ERROR_NONE) {
         }
     }
 }
-define("SCF_VERSION", $scfVersion);
+define("SCF_COMPOSER_VERSION", $scfVersion);
 const APP_MODULE_STYLE_SINGLE = 1;
 const APP_MODULE_STYLE_MULTI = 2;
 const NETWORK_MODE_SINGLE = 'single';

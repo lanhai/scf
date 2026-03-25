@@ -251,7 +251,7 @@ class Log extends Component {
             if ($this->_config['dingtalk_enable_notify'] && $this->_config['dingtalk_group_id'] && Redis::pool()->lock('LOG:ACCESS:' . md5($log['file']), 60)) {
                 $notifyMsg = ['📖日志通知📖', 'app:' . (Env::isDev() ? 'dev' : 'prod') . '@' . APP_ID];
                 foreach ($m as $k => $v) {
-                    $notifyMsg[] = $k . ':' . $v;
+                    $notifyMsg[] = $k . ':' . $this->stringifyNotifyValue($v);
                 }
                 Dingtalk::instance()->sendGroupMessage($this->_config['dingtalk_group_id'], 'inner_app_template_action_card', [
                     'title' => '📖日志通知📖',
@@ -292,13 +292,24 @@ class Log extends Component {
         if ($this->_config['dingtalk_enable_notify'] && $this->_config['dingtalk_group_id'] && Redis::pool()->lock('LOG:ERROR:' . md5($log['file']), 60)) {
             $notifyMsg = ['⚠️慢日志⚠️', 'app:' . (Env::isDev() ? 'dev' : 'prod') . '@' . APP_ID];
             foreach ($log as $k => $v) {
-                $notifyMsg[] = $k . ':' . $v;
+                $notifyMsg[] = $k . ':' . $this->stringifyNotifyValue($v);
             }
             Dingtalk::instance()->sendGroupMessage($this->_config['dingtalk_group_id'], 'inner_app_template_action_card', [
                 'title' => '⚠️慢日志⚠️',
                 'markdown' => implode("\n\n", $notifyMsg),
             ]);
         }
+    }
+
+    protected function stringifyNotifyValue(mixed $value): string {
+        if (is_string($value)) {
+            return $value;
+        }
+        $json = JsonHelper::toJson($value);
+        if ($json !== false) {
+            return $json;
+        }
+        return var_export($value, true);
     }
 
     /**

@@ -4,8 +4,6 @@ namespace Scf\Util;
 
 use Scf\Core\Exception;
 use Scf\Helper\JsonHelper;
-use Swoole\Coroutine\System;
-use Swoole\Event;
 
 
 /**

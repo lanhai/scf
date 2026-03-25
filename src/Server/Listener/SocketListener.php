@@ -73,7 +73,7 @@ class SocketListener extends Listener {
                     $taskId = $data['data']['task_id'] ?? uniqid('update_', true);
                     $slaveHosts = $this->connectedSlaveHosts($server);
                     $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
-                    $nodeCount = Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+                    Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
                         'type' => $data['data']['type'],
                         'version' => $data['data']['version'],
                         'task_id' => $taskId,
@@ -81,8 +81,12 @@ class SocketListener extends Listener {
                     $timeout = $data['data']['timeout'] ?? 300;
                     $masterUpdateDone = false;
                     $masterUpdateSuccess = false;
-                    Coroutine::create(function () use ($data, &$masterUpdateDone, &$masterUpdateSuccess) {
+                    $masterUpdateError = null;
+                    Coroutine::create(function () use ($data, &$masterUpdateDone, &$masterUpdateSuccess, &$masterUpdateError) {
                         $masterUpdateSuccess = App::appointUpdateTo($data['data']['type'], $data['data']['version'], false);
+                        if (!$masterUpdateSuccess) {
+                            $masterUpdateError = App::getLastUpdateError() ?: '未知原因';
+                        }
                         $masterUpdateDone = true;
                     });
                     //等待所有节点升级完成
@@ -108,23 +112,44 @@ class SocketListener extends Listener {
                         Console::success("【Server】{$slaveSuccessCount} 个子节点更新完成，版本号:{$data['data']['version']}");
                     }
                     $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
-                    if ($summary['failed_hosts']) {
-                        Console::warning("【Server】以下节点升级失败:" . implode(',', $summary['failed_hosts']));
+                    if ($summary['failed_nodes']) {
+                        $failedDetails = array_map(static function ($item) {
+                            $error = $item['error'] ?? '';
+                            return $item['host'] . ($error ? '(' . $error . ')' : '');
+                        }, $summary['failed_nodes']);
+                        Console::warning("【Server】以下节点升级失败:" . implode('; ', $failedDetails));
                     }
                     if ($summary['pending_hosts']) {
                         Console::warning("【Server】以下节点升级超时未完成:" . implode(',', $summary['pending_hosts']));
                     }
-                    $nodeCount = $slaveSuccessCount;
+                    $masterState = 'pending';
                     if ($masterUpdateSuccess) {
-                        $nodeCount++;
+                        $masterState = 'success';
                     } elseif ($masterUpdateDone) {
-                        Console::warning("【Server】当前节点升级失败:{$data['data']['type']} => {$data['data']['version']}");
+                        $masterState = 'failed';
+                        Console::warning("【Server】当前节点升级失败:{$data['data']['type']} => {$data['data']['version']},原因:{$masterUpdateError}");
                     } else {
                         Console::warning("【Server】当前节点升级超时未完成:{$data['data']['type']} => {$data['data']['version']}");
                     }
+                    $responsePayload = [
+                        'task_id' => $taskId,
+                        'type' => $data['data']['type'],
+                        'version' => $data['data']['version'],
+                        'total_nodes' => count($slaveHosts) + 1,
+                        'success_count' => $summary['success'] + ($masterState === 'success' ? 1 : 0),
+                        'failed_count' => count($summary['failed_nodes']) + ($masterState === 'failed' ? 1 : 0),
+                        'pending_count' => count($summary['pending_hosts']) + ($masterState === 'pending' ? 1 : 0),
+                        'failed_nodes' => $summary['failed_nodes'],
+                        'pending_hosts' => $summary['pending_hosts'],
+                        'master' => [
+                            'host' => SERVER_HOST,
+                            'state' => $masterState,
+                            'error' => $masterState === 'failed' ? $masterUpdateError : '',
+                        ]
+                    ];
                     $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
                     if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
-                        $server->push($frame->fd, $nodeCount);
+                        $server->push($frame->fd, JsonHelper::toJson($responsePayload));
                     }
                     if ($masterUpdateSuccess && $data['data']['type'] !== 'public') {
                         App::scheduleUpdateReload($data['data']['type']);
@@ -225,7 +250,7 @@ class SocketListener extends Listener {
 
     private function summarizeNodeUpdateTask(string $taskId, array $hosts): array {
         $success = 0;
-        $failedHosts = [];
+        $failedNodes = [];
         $pendingHosts = [];
         foreach ($hosts as $host) {
             $state = Runtime::instance()->get($this->nodeUpdateTaskStateKey($taskId, $host));
@@ -239,7 +264,12 @@ class SocketListener extends Listener {
                 continue;
             }
             if ($current === 'failed') {
-                $failedHosts[] = $host;
+                $failedNodes[] = [
+                    'host' => $host,
+                    'error' => $state['error'] ?? '',
+                    'message' => $state['message'] ?? '',
+                    'updated_at' => $state['updated_at'] ?? 0,
+                ];
                 continue;
             }
             $pendingHosts[] = $host;
@@ -247,7 +277,7 @@ class SocketListener extends Listener {
         return [
             'finished' => empty($pendingHosts),
             'success' => $success,
-            'failed_hosts' => $failedHosts,
+            'failed_nodes' => $failedNodes,
             'pending_hosts' => $pendingHosts,
         ];
     }
