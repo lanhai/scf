@@ -78,7 +78,7 @@ class Framework implements CommandInterface {
             $version = JsonHelper::recover(File::read($versionJson));
             if ($version['md5'] == $md5) {
                 Console::success('文件一致,无需更新');
-                exit();
+                return;
             }
         }
         $version['md5'] = $md5;

@@ -242,15 +242,13 @@ class DashboardController extends Controller {
         Request::get([
             'type' => 'app',
         ])->assign($type);
-        $result = Updater::instance()->getRemoteVersionsRecord();
+        // 版本弹窗要和首页“最新版本”保持一致，不能吃进程缓存。
+        $result = Updater::instance()->getRemoteVersionsRecord(true);
         if ($result->hasError()) {
             return Result::error($result->getMessage());
         }
         if ($result->getData()) {
             foreach ($result->getData() as $item) {
-                if (count($list) >= 20) {
-                    break;
-                }
                 $item['build_type'] = (int)$item['build_type'];
                 if ($type == 'app' && ($item['build_type'] != 1 && $item['build_type'] != 3)) {
                     continue;
@@ -259,6 +257,9 @@ class DashboardController extends Controller {
                     continue;
                 }
                 $list[] = $item;
+                if (count($list) >= 20) {
+                    break;
+                }
             }
         }
         return Result::success($list);

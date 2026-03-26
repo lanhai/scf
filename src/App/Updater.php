@@ -270,7 +270,8 @@ class Updater {
             Console::warning("【Server】已是当前版本:" . $version);
             return false;
         }
-        $result = $this->getRemoteVersionsRecord();
+        // 升级是长驻节点触发，不能复用旧缓存，否则新发布版本会查不到。
+        $result = $this->getRemoteVersionsRecord(true);
         if ($result->hasError()) {
             $this->setLastError($result->getMessage());
             Console::warning('【updater】' . $result->getMessage());
@@ -284,8 +285,8 @@ class Updater {
         }
         $versionInfo = $this->findVersionInfo($versions, $requestedVersion, $type);
         if (is_null($versionInfo)) {
-            $this->setLastError('未匹配到版本记录');
-            Console::warning('【updater】未匹配到版本记录');
+            $this->setLastError("未匹配到版本记录:type={$type},version={$requestedVersion}");
+            Console::warning("【updater】未匹配到版本记录:type={$type},version={$requestedVersion}");
             return false;
         }
         if ($type == 'app' && !$versionInfo['app_object']) {

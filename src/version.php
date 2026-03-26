@@ -1,7 +1,7 @@
 <?php
   return array (
   'build' => 'development',
-  'version' => '1.2.58',
-  'url' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/1.2.58.update',
+  'version' => '1.2.62',
+  'url' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/1.2.62.update',
   'boot' => 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/boot',
 );

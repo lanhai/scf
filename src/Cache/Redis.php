@@ -637,18 +637,12 @@ class Redis extends Cache {
      */
     public function hScan(string $key, int $cursor = 0, int $count = 200): array|false {
         try {
-            $args = [$this->setPrefix($key), (string)max(0, $cursor)];
-            if ($count > 0) {
-                $args[] = 'COUNT';
-                $args[] = (string)$count;
-            }
-            $data = $this->connection->rawCommand('HSCAN', ...$args);
-            if (!is_array($data) || count($data) < 2) {
+            $iterator = max(0, $cursor);
+            $rawItems = $this->connection->hScan($this->setPrefix($key), $iterator, null, $count > 0 ? $count : null);
+            if ($rawItems === false) {
                 return false;
             }
-            $nextCursor = (int)($data[0] ?? 0);
             $items = [];
-            $rawItems = $data[1] ?? [];
             if (is_array($rawItems)) {
                 $isSequential = array_keys($rawItems) === range(0, count($rawItems) - 1);
                 if ($isSequential) {
@@ -668,7 +662,7 @@ class Redis extends Cache {
                 }
             }
             return [
-                'cursor' => $nextCursor,
+                'cursor' => (int)$iterator,
                 'items' => $items,
             ];
         } catch (Throwable $exception) {
@@ -686,7 +680,7 @@ class Redis extends Cache {
      */
     public function zAdd(string $key, int|float $score, string $member): bool|int {
         try {
-            return (int)$this->connection->rawCommand('ZADD', $this->setPrefix($key), (string)$score, $member);
+            return (int)$this->connection->zAdd($this->setPrefix($key), $score, $member);
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
@@ -701,7 +695,7 @@ class Redis extends Cache {
      */
     public function zRem(string $key, string $member): bool|int {
         try {
-            return (int)$this->connection->rawCommand('ZREM', $this->setPrefix($key), $member);
+            return (int)$this->connection->zRem($this->setPrefix($key), $member);
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
@@ -715,10 +709,27 @@ class Redis extends Cache {
      */
     public function zCard(string $key): int {
         try {
-            return (int)$this->connection->rawCommand('ZCARD', $this->setPrefix($key));
+            return (int)$this->connection->zCard($this->setPrefix($key));
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return 0;
+        }
+    }
+
+    /**
+     * 正序读取有序集合成员
+     * @param string $key
+     * @param int $start
+     * @param int $stop
+     * @return array|false
+     */
+    public function zRange(string $key, int $start, int $stop): array|false {
+        try {
+            $data = $this->connection->zRange($this->setPrefix($key), $start, $stop);
+            return is_array($data) ? $data : false;
+        } catch (Throwable $exception) {
+            $this->onExecuteError($exception);
+            return false;
         }
     }
 
@@ -731,7 +742,7 @@ class Redis extends Cache {
      */
     public function zRevRange(string $key, int $start, int $stop): array|false {
         try {
-            $data = $this->connection->rawCommand('ZREVRANGE', $this->setPrefix($key), (string)$start, (string)$stop);
+            $data = $this->connection->zRevRange($this->setPrefix($key), $start, $stop);
             return is_array($data) ? $data : false;
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
@@ -747,7 +758,7 @@ class Redis extends Cache {
      */
     public function rename(string $from, string $to): bool {
         try {
-            return (bool)$this->connection->rawCommand('RENAME', $this->setPrefix($from), $this->setPrefix($to));
+            return (bool)$this->connection->rename($this->setPrefix($from), $this->setPrefix($to));
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
