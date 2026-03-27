@@ -54,10 +54,13 @@ class Dashboard {
         });
         $masterPid = $process->start();
         $pid = "";
-        Timer::after(500, function () use (&$pid) {
+        for ($i = 0; $i < 10; $i++) {
+            usleep(1000 * 100);
             $pid = File::read(SERVER_DASHBOARD_PID_FILE);
-        });
-        Event::wait();
+            if ($pid) {
+                break;
+            }
+        }
         if (!$pid || !Process::kill((int)$pid, 0)) {
             Console::info("【Dashboard】" . Color::red("服务启动失败"));
             exit();
@@ -203,8 +206,9 @@ class Dashboard {
                             } else {
                                 $client->post(Request::post()->pack());
                             }
-                            $headers = $client->responseHeaders();
-                            $response->header('Content-Type', $headers['content-type']);
+                            $headers = (array)$client->responseHeaders();
+                            $contentType = (string)($headers['content-type'] ?? $headers['Content-Type'] ?? 'application/json;charset=utf-8');
+                            $response->header('Content-Type', $contentType);
                             $response->status((int)$client->statusCode());
                             $response->end($client->body());
                         } else {

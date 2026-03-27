@@ -12,12 +12,15 @@ use Scf\Core\Key;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
+use Scf\Core\Table\ServerNodeTable;
+use Scf\Core\Table\SocketConnectionTable;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
+use Scf\Server\Proxy\ConsoleRelay;
+use Scf\Server\Task\CrontabManager;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
-use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
 use Symfony\Component\Console\Helper\Table;
@@ -26,6 +29,8 @@ use Throwable;
 
 
 class Http extends \Scf\Core\Server {
+    protected const RELOAD_DIAGNOSTIC_GRACE_SECONDS = 10;
+    protected const RELOAD_DIAGNOSTIC_INTERVAL_MS = 5000;
 
     /**
      * @var Server
@@ -63,6 +68,12 @@ class Http extends \Scf\Core\Server {
     protected int $started = 0;
 
     protected SubProcessManager $subProcessManager;
+    protected ?int $reloadDiagnosticTimerId = null;
+    protected int $reloadDiagnosticStartedAt = 0;
+
+    protected function isProxyUpstreamMode(): bool {
+        return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
+    }
 
     /**
      * @param string $role
@@ -127,9 +138,12 @@ class Http extends \Scf\Core\Server {
 //            'Scf\Core\Table\RequestAtomic',
 //        ]);
         Runtime::instance()->serverIsReady(false);
+        Runtime::instance()->serverIsDraining(false);
         Runtime::instance()->serverIsAlive(true);
         //启动master节点管理面板服务器
-        Dashboard::start();
+        if (!$this->isProxyUpstreamMode()) {
+            Dashboard::start();
+        }
         //加载服务器配置
         $serverConfig = Config::server();
         if (defined('APP_MODULE_STYLE') === false) {
@@ -145,6 +159,18 @@ class Http extends \Scf\Core\Server {
         define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
         //开启日志推送
         Console::enablePush($serverConfig['enable_log_push'] ?? STATUS_ON);
+        if ($this->isProxyUpstreamMode()) {
+            ConsoleRelay::setGatewayPort((int)(Manager::instance()->getOpt('gateway_port') ?: 0));
+            Console::setPushHandler(static function (string $time, string $message): void {
+                $gatewayPort = ConsoleRelay::gatewayPort();
+                ConsoleRelay::reportToLocalGateway(
+                    $time,
+                    $message,
+                    'upstream',
+                    SERVER_HOST . ':' . ($gatewayPort > 0 ? $gatewayPort : Runtime::instance()->httpPort())
+                );
+            });
+        }
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
@@ -197,7 +223,7 @@ class Http extends \Scf\Core\Server {
             exit(1);
         }
         //监听RPC服务(tcp)请求
-        $rport = RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0);
+        $rport = $this->isProxyUpstreamMode() ? (RPC_PORT ?: 0) : (RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0));
         if ($rport) {
             try {
                 $rpcPort = $rport;
@@ -210,8 +236,9 @@ class Http extends \Scf\Core\Server {
                         exit(1);
                     }
                 }
+                $rpcBindHost = $this->isProxyUpstreamMode() ? '127.0.0.1' : '0.0.0.0';
                 /** @var Server $rpcServer */
-                $rpcServer = $this->server->listen('0.0.0.0', $rpcPort, SWOOLE_SOCK_TCP);
+                $rpcServer = $this->server->listen($rpcBindHost, $rpcPort, SWOOLE_SOCK_TCP);
                 $rpcServer->set([
                     'package_max_length' => $serverConfig['package_max_length'] ?? 20 * 1024 * 1024,
                     'open_http_protocol' => false,
@@ -240,23 +267,17 @@ class Http extends \Scf\Core\Server {
         $this->server->on("BeforeReload", function (Server $server) {
             $this->log(Color::yellow('服务器正在重启'));
             Runtime::instance()->serverIsReady(false);
+            Runtime::instance()->serverIsDraining(true);
             //增加服务器重启次数计数
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
-            //断开所有客户端连接
-            $clients = $this->server->getClientList();
-            if ($clients) {
-                foreach ($clients as $fd) {
-                    if ($server->isEstablished($fd)) {
-                        \Scf\Server\Manager::instance()->removeNodeClient($fd);
-                        \Scf\Server\Manager::instance()->removeDashboardClient($fd);
-                        $server->disconnect($fd);
-                    }
-                }
-            }
+            $disconnected = $this->disconnectAllClients($server);
+            $disconnected > 0 and $this->log(Color::yellow("已断开 {$disconnected} 个客户端连接"));
+            $this->startReloadDiagnostics($server);
         });
         $this->server->on("AfterReload", function () {
             //重置执行中的请求数统计
             Counter::instance()->set(Key::COUNTER_REQUEST_PROCESSING, 0);
+            $this->stopReloadDiagnostics('服务器重启诊断结束：worker 已完成重载');
             $this->log('第' . Counter::instance()->get(Key::COUNTER_SERVER_RESTART) . '次重启完成');
         });
 //        $this->server->on('pipeMessage', function ($server, $src_worker_id, $data) {
@@ -265,6 +286,9 @@ class Http extends \Scf\Core\Server {
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
             $this->log(Color::red('服务器即将关闭'));
+            $this->stopReloadDiagnostics();
+            $disconnected = $this->disconnectAllClients($server);
+            $disconnected > 0 and $this->log(Color::yellow("已断开 {$disconnected} 个客户端连接"));
         });
         $this->server->on("ManagerStart", function (Server $server) {
             //Console::info('ManagerStart');
@@ -285,6 +309,16 @@ class Http extends \Scf\Core\Server {
                 }
                 Runtime::instance()->set('SERVER_STATS', $server->stats());
             });
+            if ($this->isProxyUpstreamMode()) {
+                ConsoleRelay::refreshSubscriptionFromGateway();
+                Timer::tick(1000 * 5, function ($tid) {
+                    if (!Runtime::instance()->serverIsAlive()) {
+                        Timer::clear($tid);
+                        return;
+                    }
+                    ConsoleRelay::refreshSubscriptionFromGateway();
+                });
+            }
 
             $masterPid = $server->master_pid;
             $managerPid = $server->manager_pid;
@@ -337,11 +371,15 @@ INFO;
                 ->setRows($renderData);
             $table->render();
             //自动更新
-            APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
+            !$this->isProxyUpstreamMode() && APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
 
         try {
-            $this->subProcessManager = new SubProcessManager($this->server, $serverConfig);
+            $subProcessOptions = [];
+            if ($this->isProxyUpstreamMode()) {
+                $subProcessOptions['include_processes'] = ['MemoryUsageCount', 'CrontabManager', 'RedisQueue'];
+            }
+            $this->subProcessManager = new SubProcessManager($this->server, $serverConfig, $subProcessOptions);
             $this->subProcessManager->start();
             $this->server->start();
         } catch (Throwable $exception) {
@@ -370,8 +408,11 @@ INFO;
      */
     public function shutdown(): void {
         Runtime::instance()->serverIsReady(false);
+        Runtime::instance()->serverIsDraining(true);
         Runtime::instance()->serverIsAlive(false);
-        $this->subProcessManager->shutdown();
+        $this->stopReloadDiagnostics();
+        isset($this->subProcessManager) && $this->subProcessManager->shutdown();
+        $this->disconnectAllClients($this->server);
         Timer::after(1000, function () {
             $this->server->shutdown();
         });
@@ -383,6 +424,7 @@ INFO;
      */
     public function reload(): void {
         Runtime::instance()->serverIsReady(false);
+        Runtime::instance()->serverIsDraining(true);
         if (!Env::isDev()) {
             $countdown = 3;
             Console::info('【Server】' . Color::yellow($countdown) . '秒后重启服务器');
@@ -400,10 +442,10 @@ INFO;
         } else {
             Console::info('【Server】' . Color::yellow('正在重启服务器'));
         }
-        $this->subProcessManager->sendCommand('upgrade');
+        isset($this->subProcessManager) && $this->subProcessManager->sendCommand('upgrade');
         $this->server->reload();
         //重启控制台
-        if (App::isMaster()) {
+        if (!$this->isProxyUpstreamMode() && App::isMaster()) {
             $dashboardHost = 'http://localhost:' . Runtime::instance()->dashboardPort() . '/reload';
             $client = \Scf\Client\Http::create($dashboardHost);
             $client->get();
@@ -411,27 +453,148 @@ INFO;
     }
 
     /**
-     * 清除worker定时器
-     * @return void
+     * 分页断开所有连接，避免 reload 窗口内遗留长连接阻塞 worker 退出。
      */
-    public function clearWorkerTimer(): void {
-        $server = $this->server;
-        // 向所有 worker 广播清理定时器（通过 SIGUSR1）
-        $workerNum = (int)($server->setting['worker_num'] ?? 0);
-        $taskNum = (int)($server->setting['task_worker_num'] ?? 0);
-        // 普通 worker
-        for ($i = 0; $i < $workerNum; $i++) {
-            //$server->sendMessage('cleanTimer', $i);
-            $pid = $server->getWorkerPid($i);
-            if ($pid > 0) Process::kill($pid, SIGUSR2);
+    protected function disconnectAllClients(Server $server): int {
+        $startFd = 0;
+        $disconnected = 0;
+        while (true) {
+            $clients = $server->getClientList($startFd, 100);
+            if (!$clients) {
+                break;
+            }
+            foreach ($clients as $fd) {
+                $fd = (int)$fd;
+                $startFd = max($startFd, $fd);
+                \Scf\Server\Manager::instance()->removeNodeClient($fd);
+                \Scf\Server\Manager::instance()->removeDashboardClient($fd);
+                if (!$server->exist($fd)) {
+                    continue;
+                }
+                if ($server->isEstablished($fd)) {
+                    $server->disconnect($fd);
+                } else {
+                    $server->close($fd);
+                }
+                $disconnected++;
+            }
+            if (count($clients) < 100) {
+                break;
+            }
         }
-        // task worker
-        for ($i = 0; $i < $taskNum; $i++) {
-            //$server->sendMessage('cleanTimer', $workerNum + $i);
-            $pid = $server->getWorkerPid($workerNum + $i);
-            if ($pid > 0) Process::kill($pid, SIGUSR2);
+        return $disconnected;
+    }
+
+    protected function startReloadDiagnostics(Server $server): void {
+        $this->stopReloadDiagnostics();
+        $this->reloadDiagnosticStartedAt = time();
+        $graceSeconds = static::RELOAD_DIAGNOSTIC_GRACE_SECONDS;
+        $this->scheduleNextReloadDiagnostic($server, $graceSeconds);
+    }
+
+    protected function stopReloadDiagnostics(?string $message = null): void {
+        if (!is_null($this->reloadDiagnosticTimerId)) {
+            Timer::clear($this->reloadDiagnosticTimerId);
+            $this->reloadDiagnosticTimerId = null;
         }
-        Console::info('【Server】已向所有worker发送清理定时器指令');
+        $this->reloadDiagnosticStartedAt = 0;
+        if ($message) {
+            $this->log(Color::green($message));
+        }
+    }
+
+    protected function scheduleNextReloadDiagnostic(Server $server, int $graceSeconds): void {
+        if ($this->reloadDiagnosticStartedAt <= 0) {
+            return;
+        }
+        $elapsed = time() - $this->reloadDiagnosticStartedAt;
+        $delayMs = $elapsed < $graceSeconds
+            ? max(1000, ($graceSeconds - $elapsed) * 1000)
+            : static::RELOAD_DIAGNOSTIC_INTERVAL_MS;
+        $intervalSeconds = (int)(static::RELOAD_DIAGNOSTIC_INTERVAL_MS / 1000);
+        $this->reloadDiagnosticTimerId = Timer::after($delayMs, function () use ($server, $graceSeconds, $intervalSeconds) {
+            $this->reloadDiagnosticTimerId = null;
+            if ($this->reloadDiagnosticStartedAt <= 0) {
+                return;
+            }
+            $elapsed = time() - $this->reloadDiagnosticStartedAt;
+            if ($elapsed >= $graceSeconds) {
+                $snapshot = $this->buildReloadDiagnosticSnapshot($server, $elapsed);
+                $this->log(Color::yellow("重启超过 {$graceSeconds}s 未完成，以下每 {$intervalSeconds}s 输出一次诊断:\n{$snapshot}"));
+            }
+            if ($this->reloadDiagnosticStartedAt > 0) {
+                $this->scheduleNextReloadDiagnostic($server, $graceSeconds);
+            }
+        });
+    }
+
+    protected function buildReloadDiagnosticSnapshot(Server $server, int $elapsed): string {
+        $connectionStats = $this->countCurrentConnections($server);
+        $serverStats = $server->stats();
+        $requestProcessing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
+        $requestReject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
+        $mysqlProcessing = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
+        $nodeClients = ServerNodeTable::instance()->count();
+        $dashboardClients = count(Runtime::instance()->get('DASHBOARD_CLIENTS') ?: []);
+        $socketRoutes = SocketConnectionTable::instance()->count();
+        $socketWorkers = SocketConnectionTable::instance()->workerConnectionStats();
+        ksort($socketWorkers);
+        $crontabs = CrontabManager::allStatus();
+        $busyCrontabs = array_values(array_filter($crontabs, static function ($task) {
+            return (int)($task['is_busy'] ?? 0) === 1;
+        }));
+        $deadCrontabs = array_values(array_filter($crontabs, static function ($task) {
+            return isset($task['process_is_alive']) && (int)$task['process_is_alive'] === STATUS_OFF;
+        }));
+        $busyCrontabLabels = array_map(static function ($task) {
+            return ($task['name'] ?? $task['namespace'] ?? 'unknown') . '#' . ($task['pid'] ?? '--');
+        }, array_slice($busyCrontabs, 0, 5));
+        $deadCrontabLabels = array_map(static function ($task) {
+            return ($task['name'] ?? $task['namespace'] ?? 'unknown') . '#' . ($task['pid'] ?? '--');
+        }, array_slice($deadCrontabs, 0, 5));
+
+        $lines = [
+            "已等待: {$elapsed}s",
+            "HTTP处理中: {$requestProcessing}, 最近拒绝: {$requestReject}, 最近MySQL处理中: {$mysqlProcessing}",
+            "当前连接: total={$connectionStats['total']}, established={$connectionStats['established']}, websocket_routes={$socketRoutes}, node_clients={$nodeClients}, dashboard_clients={$dashboardClients}",
+            "ServerStats: connection_num=" . ($serverStats['connection_num'] ?? 0) . ", tasking_num=" . ($serverStats['tasking_num'] ?? 0) . ", idle_worker_num=" . ($serverStats['idle_worker_num'] ?? 0) . ", task_idle_worker_num=" . ($serverStats['task_idle_worker_num'] ?? 0),
+            "Socket worker分布: " . ($socketWorkers ? json_encode($socketWorkers, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '[]'),
+            "Crontab: total=" . count($crontabs) . ", busy=" . count($busyCrontabs) . ", dead=" . count($deadCrontabs),
+        ];
+        if ($busyCrontabLabels) {
+            $lines[] = "Busy crontab(最多5个): " . implode(', ', $busyCrontabLabels);
+        }
+        if ($deadCrontabLabels) {
+            $lines[] = "Dead crontab(最多5个): " . implode(', ', $deadCrontabLabels);
+        }
+        return implode("\n", $lines);
+    }
+
+    protected function countCurrentConnections(Server $server): array {
+        $startFd = 0;
+        $total = 0;
+        $established = 0;
+        while (true) {
+            $clients = $server->getClientList($startFd, 100);
+            if (!$clients) {
+                break;
+            }
+            foreach ($clients as $fd) {
+                $fd = (int)$fd;
+                $startFd = max($startFd, $fd);
+                $total++;
+                if ($server->isEstablished($fd)) {
+                    $established++;
+                }
+            }
+            if (count($clients) < 100) {
+                break;
+            }
+        }
+        return [
+            'total' => $total,
+            'established' => $established,
+        ];
     }
 
     /**

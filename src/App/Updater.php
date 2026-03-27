@@ -102,19 +102,36 @@ class Updater {
         if ($isInstall) {
             $latestAppVersion = null;
             $latestPublicVersion = null;
+            $latestAppPackageVersion = null;
+            $latestPublicPackageVersion = null;
             //$versionServer = JsonHelper::recover(File::read(VERSION_FILE));
             foreach ($appVersions as $v) {
                 if (!empty($v['app_object']) && is_null($latestAppVersion)) {
                     $latestAppVersion = $v['app_object'];
+                    $latestAppPackageVersion = (string)($v['version'] ?? '');
                     $version = $v['version'];
                 }
                 if (!empty($v['public_object']) && is_null($latestPublicVersion)) {
                     $latestPublicVersion = $v['public_object'];
+                    $latestPublicPackageVersion = (string)($v['version'] ?? '');
                     $publicVersion = $v['version'];
                 }
             }
             $versionInfo['public_object'] = $latestPublicVersion;
             $versionInfo['app_object'] = $latestAppVersion;
+            $requestedInstallVersion = (string)($versionInfo['version'] ?? '');
+            if ($latestAppPackageVersion && $latestAppPackageVersion !== $requestedInstallVersion) {
+                Console::warning("【updater】安装模式提示: {$requestedInstallVersion} 未提供核心包, 回退使用 {$latestAppPackageVersion} 的核心包");
+            }
+            if ($latestPublicPackageVersion && $latestPublicPackageVersion !== $requestedInstallVersion) {
+                Console::warning("【updater】安装模式提示: {$requestedInstallVersion} 未提供资源包, 回退使用 {$latestPublicPackageVersion} 的资源包");
+            }
+            if (!$latestAppVersion) {
+                Console::warning("【updater】安装模式提示: 当前版本链未找到可用核心包");
+            }
+            if (!$latestPublicVersion) {
+                Console::warning("【updater】安装模式提示: 当前版本链未找到可用资源包");
+            }
         }
         $appFile = App::core($version);
         $publicBackupDir = null;
@@ -175,6 +192,9 @@ class Updater {
                 $installer->updated = date('Y-m-d H:i:s');
                 if (!$installer->update()) {
                     throw new \RuntimeException('更新版本配置文件失败');
+                }
+                if ($isInstall && !$installer->isInstalled()) {
+                    throw new \RuntimeException('安装未完成: 应用核心文件未就绪');
                 }
             }
             $log = [

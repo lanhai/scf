@@ -279,10 +279,7 @@ class CrontabManager {
         ]);
         $sendError = new Process(function () use ($processTask, $errorInfo) {
             App::mount();
-            go(function () use ($processTask, $errorInfo) {
-                Log::instance()->error("{$processTask['name']}[{$processTask['namespace']}]致命错误: " . $errorInfo);
-            });
-            Event::wait();
+            Log::instance()->error("{$processTask['name']}[{$processTask['namespace']}]致命错误: " . $errorInfo);
         });
         $sendError->start();
         Process::wait();

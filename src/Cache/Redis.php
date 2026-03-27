@@ -751,6 +751,59 @@ class Redis extends Cache {
     }
 
     /**
+     * 正序弹出一个有序集合成员
+     * @param string $key
+     * @return array|false
+     */
+    public function zPopMin(string $key): array|false {
+        try {
+            $data = $this->connection->zPopMin($this->setPrefix($key), 1);
+            return $this->normalizeZPopResult($data);
+        } catch (Throwable $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    /**
+     * 倒序弹出一个有序集合成员
+     * @param string $key
+     * @return array|false
+     */
+    public function zPopMax(string $key): array|false {
+        try {
+            $data = $this->connection->zPopMax($this->setPrefix($key), 1);
+            return $this->normalizeZPopResult($data);
+        } catch (Throwable $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+    }
+
+    protected function normalizeZPopResult(mixed $data): array|false {
+        if (!is_array($data) || !$data) {
+            return false;
+        }
+        $isSequential = array_keys($data) === range(0, count($data) - 1);
+        if ($isSequential) {
+            $member = (string)($data[0] ?? '');
+            if ($member === '') {
+                return false;
+            }
+            return [
+                $member => (float)($data[1] ?? 0),
+            ];
+        }
+        $member = (string)array_key_first($data);
+        if ($member === '') {
+            return false;
+        }
+        return [
+            $member => (float)($data[$member] ?? 0),
+        ];
+    }
+
+    /**
      * 重命名key
      * @param string $from
      * @param string $to

@@ -19,6 +19,20 @@ class Console {
     use Singleton;
 
     protected static string $enablePushKey = 'CONSOLE_LOG_PUSH_ENABLE';
+    protected static $pushHandler = null;
+
+    protected static function shouldPushConsole(): bool {
+        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+            return true;
+        }
+        if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
+            return true;
+        }
+        if (defined('IS_GATEWAY_SUB_PROCESS') && IS_GATEWAY_SUB_PROCESS === true) {
+            return true;
+        }
+        return defined('IS_HTTP_SERVER') && IS_HTTP_SERVER;
+    }
 
     /**
      * 开启日志推送
@@ -27,6 +41,10 @@ class Console {
      */
     public static function enablePush(int $status = 1): void {
         Runtime::instance()->set(self::$enablePushKey, $status);
+    }
+
+    public static function setPushHandler(?callable $handler): void {
+        self::$pushHandler = $handler;
     }
 
 
@@ -215,9 +233,15 @@ class Console {
      * @param null $color
      */
     public static function log(string $str, bool $push = true, $color = null): void {
-        if ($push && IS_HTTP_SERVER && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
+        if ($push && self::shouldPushConsole() && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
             try {
-                Http::instance()->pushConsoleLog(date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3), Log::filter($str));
+                $time = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3);
+                $message = Log::filter($str);
+                if (is_callable(self::$pushHandler)) {
+                    (self::$pushHandler)($time, $message);
+                } else {
+                    Http::instance()->pushConsoleLog($time, $message);
+                }
             } catch (Throwable $e) {
                 Console::warning("控制台消息推送失败:" . $e->getMessage(), false);
             }

@@ -29,7 +29,7 @@ require SCF_ROOT . '/vendor/autoload.php';
 scf_bootstrap($argv);
 
 function scf_bootstrap(array $argv): void {
-    if (!scf_bool_constant('IS_HTTP_SERVER')) {
+    if (!scf_bool_constant('IS_SERVER_PROCESS_LOOP')) {
         scf_run($argv);
         return;
     }
@@ -55,7 +55,11 @@ function scf_define_runtime_constants(array $argv): void {
     defined('IS_PACK') || define('IS_PACK', scf_has_arg($argv, '-pack'));
     defined('NO_PACK') || define('NO_PACK', (scf_bool_constant('IS_DEV') && !scf_bool_constant('IS_PACK')) || scf_has_arg($argv, '-nopack'));
     defined('IS_HTTP_SERVER') || define('IS_HTTP_SERVER', scf_has_arg($argv, 'server'));
+    defined('IS_GATEWAY_SERVER') || define('IS_GATEWAY_SERVER', scf_has_arg($argv, 'gateway'));
     defined('IS_HTTP_SERVER_START') || define('IS_HTTP_SERVER_START', scf_has_arg($argv, 'start'));
+    defined('IS_GATEWAY_SERVER_START') || define('IS_GATEWAY_SERVER_START', scf_bool_constant('IS_GATEWAY_SERVER') && scf_has_arg($argv, 'start'));
+    defined('IS_SERVER_PROCESS_LOOP') || define('IS_SERVER_PROCESS_LOOP', scf_bool_constant('IS_HTTP_SERVER') || scf_bool_constant('IS_GATEWAY_SERVER'));
+    defined('IS_SERVER_PROCESS_START') || define('IS_SERVER_PROCESS_START', scf_bool_constant('IS_HTTP_SERVER_START') || scf_bool_constant('IS_GATEWAY_SERVER_START'));
     defined('RUNNING_BUILD') || define('RUNNING_BUILD', scf_has_arg($argv, 'build'));
     defined('RUNNING_INSTALL') || define('RUNNING_INSTALL', scf_has_arg($argv, 'install'));
     defined('RUNNING_TOOLBOX') || define('RUNNING_TOOLBOX', scf_has_arg($argv, 'toolbox'));
@@ -117,6 +121,10 @@ function scf_run(array $argv): void {
 }
 
 function scf_run_server_process_loop(array $argv): void {
+    $stopFlag = scf_process_control_flag_path($argv, 'stop');
+    if ($stopFlag !== '' && file_exists($stopFlag)) {
+        @unlink($stopFlag);
+    }
     while (true) {
         $managerProcess = new Process(static function () use ($argv): void {
             $serverBuildVersion = require Scf\Root::dir() . '/version.php';
@@ -130,7 +138,10 @@ function scf_run_server_process_loop(array $argv): void {
         if ($ret) {
             scf_stdout("[manager] child exit pid={$ret['pid']} code={$ret['code']} signal={$ret['signal']}");
         }
-        if (!scf_bool_constant('IS_HTTP_SERVER_START')) {
+        if (scf_should_stop_server_process_loop($argv)) {
+            break;
+        }
+        if (!scf_bool_constant('IS_SERVER_PROCESS_START')) {
             break;
         }
         try {
@@ -138,8 +149,98 @@ function scf_run_server_process_loop(array $argv): void {
         } catch (\Throwable $e) {
             scf_stderr("[manager] update failed: {$e->getMessage()}");
         }
+        scf_wait_command_ports_released($argv);
         sleep(2);
     }
+}
+
+function scf_should_stop_server_process_loop(array $argv): bool {
+    $flagFile = scf_process_control_flag_path($argv, 'stop');
+    if ($flagFile === '') {
+        return false;
+    }
+    if (!file_exists($flagFile)) {
+        return false;
+    }
+    @unlink($flagFile);
+    return true;
+}
+
+function scf_process_control_flag_path(array $argv, string $action): string {
+    $command = $argv[1] ?? '';
+    if (!in_array($command, ['server', 'gateway'], true)) {
+        return '';
+    }
+
+    $opts = scf_parse_opts($argv);
+    $app = $opts['app'] ?? (getenv('APP_DIR') ?: 'app');
+    $role = $opts['role'] ?? (getenv('SERVER_ROLE') ?: 'master');
+    return dirname(SCF_ROOT) . '/var/' . $app . '_' . $command . '_' . $role . '.' . $action;
+}
+
+function scf_parse_opts(array $argv): array {
+    $opts = [];
+    foreach ($argv as $arg) {
+        if (!is_string($arg) || !str_starts_with($arg, '-')) {
+            continue;
+        }
+        $option = ltrim($arg, '-');
+        $value = null;
+        if (str_contains($option, '=')) {
+            [$option, $value] = explode('=', $option, 2);
+        }
+        if ($option !== '') {
+            $opts[$option] = $value;
+        }
+    }
+    return $opts;
+}
+
+function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, int $intervalMs = 200): void {
+    $ports = scf_command_listen_ports($argv);
+    if (!$ports) {
+        return;
+    }
+
+    $deadline = microtime(true) + max(1, $timeoutSeconds);
+    while (microtime(true) < $deadline) {
+        $occupied = false;
+        foreach ($ports as $port) {
+            if ($port <= 0) {
+                continue;
+            }
+            if (\Scf\Core\Server::isPortInUse($port)) {
+                $occupied = true;
+                break;
+            }
+        }
+        if (!$occupied) {
+            return;
+        }
+        usleep(max(50, $intervalMs) * 1000);
+    }
+}
+
+function scf_command_listen_ports(array $argv): array {
+    $command = $argv[1] ?? '';
+    $opts = scf_parse_opts($argv);
+    $ports = [];
+
+    if ($command === 'gateway') {
+        $ports[] = (int)($opts['port'] ?? 9580);
+        $rpcPort = (int)($opts['rpc_port'] ?? ($opts['rport'] ?? 0));
+        if ($rpcPort > 0) {
+            $ports[] = $rpcPort;
+        }
+    } elseif ($command === 'server') {
+        $ports[] = (int)($opts['port'] ?? 9580);
+        $rpcPort = (int)($opts['rport'] ?? 0);
+        if ($rpcPort > 0) {
+            $ports[] = $rpcPort;
+        }
+    }
+
+    return array_values(array_unique(array_filter(array_map('intval', $ports), static fn(int $port) => $port > 0)));
 }
 
 function scf_framework_source_dir(): string {

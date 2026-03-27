@@ -1,0 +1,12 @@
+#!/bin/bash
+if [ $# -eq 0 ]; then
+  php ../boot gateway start
+  exit $?
+fi
+
+first="$1"
+if [[ "$first" == "start" || "$first" == "stop" || "$first" == "reload" || "$first" == "restart" || "$first" == "status" ]]; then
+  php ../boot gateway "$@"
+else
+  php ../boot gateway start "$@"
+fi

@@ -1,6 +1,28 @@
 #!/bin/bash
-args=""
+
+use_proxy=1
+forwarded=()
+
 for arg in "$@"; do
-  args+="$arg "
+  if [[ "$arg" == "-noproxy" ]]; then
+    use_proxy=0
+    continue
+  fi
+  forwarded+=("$arg")
 done
-php ../boot server $args
+
+if [[ $use_proxy -eq 1 ]]; then
+  if [ ${#forwarded[@]} -eq 0 ]; then
+    php ../boot gateway start
+    exit $?
+  fi
+  php ../boot gateway "${forwarded[@]}"
+  exit $?
+fi
+
+if [ ${#forwarded[@]} -eq 0 ]; then
+  php ../boot server
+  exit $?
+fi
+
+php ../boot server "${forwarded[@]}"

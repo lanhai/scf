@@ -21,6 +21,7 @@ use Scf\Root;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
+use Scf\Server\Proxy\ConsoleRelay;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\MemoryMonitor;
@@ -32,34 +33,57 @@ use Throwable;
 use function Co\run;
 
 class SubProcessManager {
+    protected const PROCESS_EXIT_GRACE_SECONDS = 8;
 
     protected array $processList = [];
     protected array $pidList = [];
+    protected ?array $includedProcesses = null;
+    protected array $excludedProcesses = [];
     protected array $serverConfig;
     protected Server $server;
-    protected Process $consolePushProcess;
+    protected ?Process $consolePushProcess = null;
+    protected $shutdownHandler = null;
+    protected $reloadHandler = null;
+    protected $commandHandler = null;
+    protected $nodeStatusBuilder = null;
 
-    public function __construct(Server $server, $serverConfig) {
+    public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
         $this->serverConfig = $serverConfig;
+        $this->shutdownHandler = $options['shutdown_handler'] ?? null;
+        $this->reloadHandler = $options['reload_handler'] ?? null;
+        $this->commandHandler = $options['command_handler'] ?? null;
+        $this->nodeStatusBuilder = $options['node_status_builder'] ?? null;
+        $this->includedProcesses = isset($options['include_processes']) ? array_fill_keys((array)$options['include_processes'], true) : null;
+        $this->excludedProcesses = isset($options['exclude_processes']) ? array_fill_keys((array)$options['exclude_processes'], true) : [];
         $runQueueInMaster = $serverConfig['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $serverConfig['redis_queue_in_slave'] ?? false;
         //内存使用情况统计
-        $this->processList['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
+        if ($this->processEnabled('MemoryUsageCount')) {
+            $this->processList['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
+        }
         //心跳检测
-        $this->processList['Heartbeat'] = $this->createHeartbeatProcess();
+        if ($this->processEnabled('Heartbeat')) {
+            $this->processList['Heartbeat'] = $this->createHeartbeatProcess();
+        }
         //日志备份
-        $this->processList['LogBackup'] = $this->createLogBackupProcess();
+        if ($this->processEnabled('LogBackup')) {
+            $this->processList['LogBackup'] = $this->createLogBackupProcess();
+        }
         //排程任务
-        $this->processList['CrontabManager'] = $this->createCrontabManagerProcess();
-        //控制台日志推送
-        $this->consolePushProcess = $this->createConsolePushProcess();
+        if ($this->processEnabled('CrontabManager')) {
+            $this->processList['CrontabManager'] = $this->createCrontabManagerProcess();
+        }
+        // 控制台日志只需要从子节点推给 master，本机 master 不必自连
+        if ($this->processEnabled('ConsolePush') && !App::isMaster() && !(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)) {
+            $this->consolePushProcess = $this->createConsolePushProcess();
+        }
         //redis队列
-        if ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave)) {
+        if ($this->processEnabled('RedisQueue') && ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave))) {
             $this->processList['RedisQueue'] = $this->createRedisQueueProcess();
         }
         //文件变更监听
-        if (Env::isDev() && APP_SRC_TYPE == 'dir') {
+        if ($this->processEnabled('FileWatch') && Env::isDev() && APP_SRC_TYPE == 'dir') {
             $this->processList['FileWatch'] = $this->createFileWatchProcess();
         }
     }
@@ -67,10 +91,10 @@ class SubProcessManager {
     public function start(): void {
         $subProcess = new Process(function () {
             while (true) {
-                if (Runtime::instance()->serverIsReady()) {
+                if (Runtime::instance()->serverIsReady() && (!(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) || App::isReady())) {
                     break;
                 }
-                sleep(1);
+                usleep(100000);
             }
             $this->run();
         });
@@ -78,7 +102,9 @@ class SubProcessManager {
     }
 
     private function run(): void {
-        $this->consolePushProcess->start();
+        if ($this->consolePushProcess) {
+            $this->consolePushProcess->start();
+        }
         foreach ($this->processList as $name => $process) {
             /** @var Process $process */
             $process->start();
@@ -86,9 +112,14 @@ class SubProcessManager {
         }
         while (true) {
             if (!Runtime::instance()->serverIsAlive()) {
+                $this->drainManagedProcesses();
                 break;
             }
-            if ($ret = Process::wait()) {
+            while ($ret = Process::wait(false)) {
+                if (!Runtime::instance()->serverIsAlive()) {
+                    $this->drainManagedProcesses();
+                    break;
+                }
                 $pid = $ret['pid'];
                 if (isset($this->pidList[$pid])) {
                     $oldProcessName = $this->pidList[$pid];
@@ -128,13 +159,166 @@ class SubProcessManager {
                     }
                 }
             }
-            sleep(1);
+            usleep(200000);
         }
+    }
+
+    protected function drainManagedProcesses(int $graceSeconds = self::PROCESS_EXIT_GRACE_SECONDS): void {
+        $deadline = microtime(true) + max(1, $graceSeconds);
+        do {
+            while ($ret = Process::wait(false)) {
+                $pid = (int)($ret['pid'] ?? 0);
+                if ($pid > 0) {
+                    unset($this->pidList[$pid]);
+                }
+            }
+
+            $remaining = $this->aliveManagedProcesses();
+            if (!$remaining) {
+                return;
+            }
+
+            usleep(200000);
+        } while (microtime(true) < $deadline);
+
+        foreach ($this->aliveManagedProcesses() as $name => $pid) {
+            Console::warning("【{$name}】子进程#{$pid}超时未退出，发送 SIGTERM");
+            @Process::kill($pid, SIGTERM);
+        }
+
+        $termDeadline = microtime(true) + 2;
+        do {
+            while ($ret = Process::wait(false)) {
+                $pid = (int)($ret['pid'] ?? 0);
+                if ($pid > 0) {
+                    unset($this->pidList[$pid]);
+                }
+            }
+
+            if (!$this->aliveManagedProcesses()) {
+                return;
+            }
+
+            usleep(200000);
+        } while (microtime(true) < $termDeadline);
+
+        foreach ($this->aliveManagedProcesses() as $name => $pid) {
+            Console::warning("【{$name}】子进程#{$pid}强制退出");
+            @Process::kill($pid, SIGKILL);
+        }
+    }
+
+    protected function aliveManagedProcesses(): array {
+        $alive = [];
+        if ($this->consolePushProcess instanceof Process) {
+            $pid = (int)($this->consolePushProcess->pid ?? 0);
+            if ($pid > 0 && @Process::kill($pid, 0)) {
+                $alive['ConsolePush'] = $pid;
+            }
+        }
+
+        foreach ($this->processList as $name => $process) {
+            if (!$process instanceof Process) {
+                continue;
+            }
+            $pid = (int)($process->pid ?? 0);
+            if ($pid > 0 && @Process::kill($pid, 0)) {
+                $alive[$name] = $pid;
+            }
+        }
+
+        return $alive;
+    }
+
+    protected function triggerShutdown(): void {
+        if (is_callable($this->shutdownHandler)) {
+            ($this->shutdownHandler)();
+            return;
+        }
+        Http::instance()->shutdown();
+    }
+
+    protected function triggerReload(): void {
+        if (is_callable($this->reloadHandler)) {
+            ($this->reloadHandler)();
+            return;
+        }
+        Http::instance()->reload();
+    }
+
+    protected function handleRemoteCommand(string $command, array $params, object $socket): bool {
+        if (is_callable($this->commandHandler)) {
+            return (bool)($this->commandHandler)($command, $params, $socket);
+        }
+
+        switch ($command) {
+            case 'shutdown':
+                $socket->push("【" . SERVER_HOST . "】start shutdown");
+                $this->triggerShutdown();
+                return true;
+            case 'restart':
+                $socket->push("【" . SERVER_HOST . "】start reload");
+                $this->triggerReload();
+                return true;
+            case 'appoint_update':
+                $taskId = $params['task_id'] ?? '';
+                $statePayload = [
+                    'event' => 'node_update_state',
+                    'data' => [
+                        'task_id' => $taskId,
+                        'host' => SERVER_HOST,
+                        'type' => $params['type'],
+                        'version' => $params['version'],
+                        'updated_at' => time(),
+                    ]
+                ];
+                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                    'data' => [
+                        'state' => 'running',
+                        'message' => "【" . SERVER_HOST . "】开始更新 {$params['type']} => {$params['version']}",
+                    ]
+                ])));
+                if (App::appointUpdateTo($params['type'], $params['version'])) {
+                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                        'data' => [
+                            'state' => 'success',
+                            'message' => "【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}",
+                            'updated_at' => time(),
+                        ]
+                    ])));
+                    $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
+                } else {
+                    $error = App::getLastUpdateError() ?: '未知原因';
+                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
+                        'data' => [
+                            'state' => 'failed',
+                            'error' => $error,
+                            'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}",
+                            'updated_at' => time(),
+                        ]
+                    ])));
+                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}");
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    protected function buildNodeStatusPayload(Node $node): array {
+        $status = $node->asArray();
+        if (is_callable($this->nodeStatusBuilder)) {
+            $customized = ($this->nodeStatusBuilder)($status, $node);
+            if (is_array($customized) && $customized) {
+                $status = array_replace_recursive($status, $customized);
+            }
+        }
+        return $status;
     }
 
     public function shutdown(): void {
         //Process::kill($this->consolePushProcess->pid, SIGTERM);
-        $this->consolePushProcess->write('shutdown');
+        $this->consolePushProcess?->write('shutdown');
         foreach ($this->processList as $process) {
             /** @var Process $process */
             $process->write('shutdown');
@@ -143,8 +327,12 @@ class SubProcessManager {
         }
     }
 
-    public function sendCommand($cmd, array $params = []): void {
-        foreach ($this->processList as $process) {
+    public function sendCommand($cmd, array $params = [], ?array $targets = null): void {
+        $targetLookup = $targets ? array_fill_keys($targets, true) : null;
+        foreach ($this->processList as $name => $process) {
+            if ($targetLookup !== null && !isset($targetLookup[$name])) {
+                continue;
+            }
             /** @var Process $process */
             $socket = $process->exportSocket();
             $socket->send(JsonHelper::toJson([
@@ -154,6 +342,27 @@ class SubProcessManager {
         }
     }
 
+    public function iterateBusinessProcesses(): void {
+        $this->sendCommand('upgrade', [], ['CrontabManager', 'RedisQueue']);
+    }
+
+    public function hasProcess(string $name): bool {
+        if ($name === 'ConsolePush') {
+            return $this->consolePushProcess instanceof Process;
+        }
+        return isset($this->processList[$name]);
+    }
+
+    protected function processEnabled(string $name): bool {
+        if (isset($this->excludedProcesses[$name])) {
+            return false;
+        }
+        if ($this->includedProcesses === null) {
+            return true;
+        }
+        return isset($this->includedProcesses[$name]);
+    }
+
     /**
      * 推送控制台日志
      * @param $time
@@ -161,7 +370,7 @@ class SubProcessManager {
      * @return bool|int
      */
     public function pushConsoleLog($time, $message): bool|int {
-        if (isset($this->consolePushProcess) && Coroutine::getCid() > 0) {
+        if ($this->consolePushProcess && Coroutine::getCid() > 0) {
             $socket = $this->consolePushProcess->exportSocket();
             return $socket->send(JsonHelper::toJson([
                 'time' => $time,
@@ -204,8 +413,7 @@ class SubProcessManager {
                                 $masterSocket->close();
                                 Console::error('【ConsolePush】管理进程退出,结束推送', false);
                                 MemoryMonitor::stop();
-                                Process::kill($process->pid, SIGTERM);
-                                //break 2;
+                                return;
                             }
                         }
                         MemoryMonitor::updateUsage('ConsolePush');
@@ -221,6 +429,9 @@ class SubProcessManager {
      */
     private function createRedisQueueProcess(): Process {
         return new Process(function (Process $process) {
+            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                define('IS_GATEWAY_SUB_PROCESS', true);
+            }
             Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
             define('IS_REDIS_QUEUE_PROCESS', true);
             while (true) {
@@ -255,6 +466,9 @@ class SubProcessManager {
         Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
         Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
         return new Process(function (Process $process) {
+            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                define('IS_GATEWAY_SUB_PROCESS', true);
+            }
             Console::info("【Crontab】排程任务管理PID:" . $process->pid, false);
             define('IS_CRONTAB_PROCESS', true);
             while (true) {
@@ -325,10 +539,8 @@ class SubProcessManager {
                     }
                     unset($socket);
                 });
-                \Swoole\Event::wait();
-
                 if ($shouldExit) {
-                    Console::error("【Crontab】服务器已关闭,结束运行");
+                    Console::error("【Crontab】服务器已关闭,结束运行", false);
                     break;
                 }
             }
@@ -342,8 +554,18 @@ class SubProcessManager {
      */
     private function createMemoryUsageCountProcess(): Process {
         return new Process(function (Process $process) {
-            register_shutdown_function(function () use ($process) {
+            $expectedShutdown = false;
+            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                define('IS_GATEWAY_SUB_PROCESS', true);
+            }
+            register_shutdown_function(function () use ($process, &$expectedShutdown) {
                 $err = error_get_last();
+                if ($expectedShutdown) {
+                    return;
+                }
+                if ($err && str_contains((string)($err['message'] ?? ''), 'swoole exit')) {
+                    return;
+                }
                 if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
                     Console::error(
                         "【MemoryMonitor】致命错误退出 [{$err['type']}]: {$err['message']} @ {$err['file']}:{$err['line']}"
@@ -352,94 +574,98 @@ class SubProcessManager {
                     Process::kill($process->pid, SIGTERM);
                 }
             });
-            Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
-            MemoryMonitor::start('MemoryMonitor');
-            run(function () use ($process) {
-                $schedule = function () use (&$schedule, $process) {
+            run(function () use ($process, &$expectedShutdown) {
+                Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
+                MemoryMonitor::start('MemoryMonitor');
+                $schedule = function () use (&$schedule, $process, &$expectedShutdown) {
                     try {
-                        // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
-                        $socket = $process->exportSocket();
-                        $msg = $socket->recv(timeout: 0.1);
-                        if ($msg === 'shutdown') {
-                            MemoryMonitor::stop();
-                            Console::error("【MemoryMonitor】收到 shutdown，安全退出");
-                            Process::kill($process->pid, SIGTERM);
-                        }
-                        // 2) 执行一次完整统计
-                        $processList = MemoryMonitorTable::instance()->rows();
-                        if ($processList) {
-                            $isDarwin = (PHP_OS_FAMILY === 'Darwin');
-                            $barrier = Coroutine\Barrier::make();
-                            foreach ($processList as $processInfo) {
-                                Coroutine::create(function () use ($barrier, $processInfo, $process, $isDarwin) {
-                                    try {
-                                        $processName = $processInfo['process'];
-                                        $limitMb = $processInfo['limit_memory_mb'] ?? 300;
-                                        $pid = (int)$processInfo['pid'];
+                            // 1) 退出条件：仅当上一轮完全完成后才安排下一轮
+                            $socket = $process->exportSocket();
+                            $msg = $socket->recv(timeout: 0.1);
+                            if ($msg === 'shutdown') {
+                                $expectedShutdown = true;
+                                Timer::clearAll();
+                                MemoryMonitor::stop();
+                                Console::error("【MemoryMonitor】收到 shutdown，安全退出", false);
+                                return;
+                            }
+                            // 2) 执行一次完整统计
+                            $processList = MemoryMonitorTable::instance()->rows();
+                            if ($processList) {
+                                $isDarwin = (PHP_OS_FAMILY === 'Darwin');
+                                $barrier = Coroutine\Barrier::make();
+                                foreach ($processList as $processInfo) {
+                                    Coroutine::create(function () use ($barrier, $processInfo, $process, $isDarwin) {
+                                        try {
+                                            $processName = $processInfo['process'];
+                                            $limitMb = $processInfo['limit_memory_mb'] ?? 300;
+                                            $pid = (int)$processInfo['pid'];
 
-                                        if (PHP_OS_FAMILY !== 'Darwin' && !Process::kill($pid, 0)) {
-                                            return;
-                                        }
+                                            if (PHP_OS_FAMILY !== 'Darwin' && !Process::kill($pid, 0)) {
+                                                return;
+                                            }
 
-                                        $mem = MemoryMonitor::getPssRssByPid($pid);
-                                        $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;
-                                        $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;
-                                        $osActualMb = $pss ?? $rss;
+                                            $mem = MemoryMonitor::getPssRssByPid($pid);
+                                            $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;
+                                            $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;
+                                            $osActualMb = $pss ?? $rss;
 
-                                        $processInfo['rss_mb'] = $rss;
-                                        $processInfo['pss_mb'] = $pss;
-                                        $processInfo['os_actual'] = $osActualMb;
-                                        $processInfo['updated'] = time();
+                                            $processInfo['rss_mb'] = $rss;
+                                            $processInfo['pss_mb'] = $pss;
+                                            $processInfo['os_actual'] = $osActualMb;
+                                            $processInfo['updated'] = time();
 
-                                        $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
-                                        if (
-                                            $autoRestart == STATUS_ON
-                                            && PHP_OS_FAMILY !== 'Darwin'
-                                            && str_starts_with($processName, 'worker:')
-                                            && $osActualMb !== null
-                                            && $osActualMb > $limitMb
-                                        ) {
-                                            if (preg_match('/^worker:(\d+)/', $processName, $m)) {
-                                                if (time() - ($processInfo['restart_ts'] ?? 0) >= 120) {
-                                                    Log::instance()->setModule('system')
-                                                        ->error("{$processName}[PID:$pid] 内存 {$osActualMb}MB ≥ {$limitMb}MB，强制重启");
-                                                    Process::kill($pid, SIGTERM);
-                                                    $processInfo['restart_ts'] = time();
-                                                    $processInfo['restart_count'] = ($processInfo['restart_count'] ?? 0) + 1;
+                                            $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
+                                            if (
+                                                $autoRestart == STATUS_ON
+                                                && PHP_OS_FAMILY !== 'Darwin'
+                                                && str_starts_with($processName, 'worker:')
+                                                && $osActualMb !== null
+                                                && $osActualMb > $limitMb
+                                            ) {
+                                                if (preg_match('/^worker:(\d+)/', $processName, $m)) {
+                                                    if (time() - ($processInfo['restart_ts'] ?? 0) >= 120) {
+                                                        Log::instance()->setModule('system')
+                                                            ->error("{$processName}[PID:$pid] 内存 {$osActualMb}MB ≥ {$limitMb}MB，强制重启");
+                                                        Process::kill($pid, SIGTERM);
+                                                        $processInfo['restart_ts'] = time();
+                                                        $processInfo['restart_count'] = ($processInfo['restart_count'] ?? 0) + 1;
+                                                    }
                                                 }
                                             }
+                                            $curr = MemoryMonitorTable::instance()->get($processName);
+                                            if ($curr && $curr['pid'] !== $processInfo['pid']) {
+                                                $processInfo['pid'] = $curr['pid'];
+                                            }
+                                            MemoryMonitorTable::instance()->set($processName, $processInfo);
+                                        } catch (Throwable $e) {
+                                            Log::instance()->error("【MemoryMonitor】统计发生错误：" . $e->getMessage());
+                                            Process::kill($process->pid, SIGTERM);
                                         }
-                                        $curr = MemoryMonitorTable::instance()->get($processName);
-                                        if ($curr && $curr['pid'] !== $processInfo['pid']) {
-                                            $processInfo['pid'] = $curr['pid'];
-                                        }
-                                        MemoryMonitorTable::instance()->set($processName, $processInfo);
-                                    } catch (Throwable $e) {
-                                        Log::instance()->error("【MemoryMonitor】统计发生错误：" . $e->getMessage());
-                                        Process::kill($process->pid, SIGTERM);
-                                    }
-                                });
+                                    });
+                                }
+                                try {
+                                    Coroutine\Barrier::wait($barrier, 60);
+                                } catch (Throwable $throwable) {
+                                    Log::instance()->error("内存统计错误:" . $throwable->getMessage());
+                                }
+                            } else {
+                                Console::warning("【MemoryMonitor】暂无待统计进程", false);
                             }
-                            try {
-                                Coroutine\Barrier::wait($barrier, 60);
-                            } catch (Throwable $throwable) {
-                                Log::instance()->error("内存统计错误:" . $throwable->getMessage());
-                            }
-                        } else {
-                            Console::warning("【MemoryMonitor】暂无待统计进程", false);
-                        }
-                        MemoryMonitor::updateUsage('MemoryMonitor');
-                        // 3) 统计完成后再安排下一轮，避免 tick 重叠
-                        Timer::after(5000, $schedule);
+                            MemoryMonitor::updateUsage('MemoryMonitor');
+                            // 3) 统计完成后再安排下一轮，避免 tick 重叠
+                            Timer::after(5000, $schedule);
                     } catch (Throwable $e) {
+                        if (str_contains($e->getMessage(), 'swoole exit')) {
+                            return;
+                        }
                         Log::instance()->error("【MemoryMonitor】调度异常:" . $e->getMessage());
                         Process::kill($process->pid, SIGTERM);
                     }
                 };
-                // 启动即执行一次，避免首轮 5 秒空窗
                 $schedule();
             });
-        });
+        }, false, SOCK_DGRAM);
     }
 
     /**
@@ -448,11 +674,27 @@ class SubProcessManager {
      */
     private function createHeartbeatProcess(): Process {
         return new Process(function (Process $process) {
-            App::mount();
-            //Config::init();
-            //var_dump(Config::get('app'));
-            Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
             run(function () use ($process) {
+                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                    define('IS_GATEWAY_SUB_PROCESS', true);
+                }
+                App::mount();
+                Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
+                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !App::isMaster()) {
+                    MemoryMonitor::start('Heatbeat');
+                    $processSocket = $process->exportSocket();
+                    while (true) {
+                        $cmd = $processSocket->recv(timeout: 0.1);
+                        if ($cmd == 'shutdown') {
+                            Timer::clearAll();
+                            Console::error('【Heatbeat】服务器已关闭,终止心跳', false);
+                            MemoryMonitor::stop();
+                            return;
+                        }
+                        MemoryMonitor::updateUsage('Heatbeat');
+                        Coroutine::sleep(5);
+                    }
+                }
                 MemoryMonitor::start('Heatbeat');
                 $node = Node::factory();
                 $node->appid = APP_ID;
@@ -477,12 +719,10 @@ class SubProcessManager {
                         'host' => SERVER_HOST,
                         'role' => SERVER_ROLE
                     ]]));
-                    // 定时发送 WS 心跳，避免中间层(nginx/LB/frp)与服务端心跳超时导致断开
                     $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, &$node) {
-                        $profile = App::profile();
                         $node->role = SERVER_ROLE;
-                        $node->app_version = $profile->version;
-                        $node->public_version = $profile->public_version ?: '--';
+                        $node->app_version = App::version() ?: (App::info()?->toArray()['version'] ?? App::profile()->version);
+                        $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
                         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                         $node->heart_beat = time();
                         $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
@@ -491,7 +731,7 @@ class SubProcessManager {
                         $node->stack_useage = memory_get_usage(true);
                         $node->threads = count(Coroutine::list());
                         $node->thread_status = Coroutine::stats();
-                        $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: []; //$server->stats();
+                        $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: [];
                         $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
                         $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
                         $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
@@ -501,40 +741,37 @@ class SubProcessManager {
                         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
                         $node->memory_usage = MemoryMonitor::sum();
                         $node->tasks = CrontabManager::allStatus();
+                        $payload = $this->buildNodeStatusPayload($node);
                         if ($node->role == NODE_ROLE_MASTER) {
-                            ServerNodeStatusTable::instance()->set('localhost', $node->asArray());
+                            ServerNodeStatusTable::instance()->set('localhost', $payload);
                             $socket->push('::ping');
                         } else {
                             $socket->push(JsonHelper::toJson(['event' => 'node_heart_beat', 'data' => [
                                 'host' => SERVER_HOST,
-                                'status' => $node->asArray()
+                                'status' => $payload
                             ]]));
                         }
                         MemoryMonitor::updateUsage('Heatbeat');
                     });
-                    // 读循环：直到断开
                     while (true) {
-                        // 若是非阻塞 recv，则需要小睡避免空转
                         $reply = $socket->recv();
                         if ($reply === false) {
                             Timer::clear($pingTimerId);
                             unset($pingTimerId);
-                            // 读错误：断开
                             Console::warning('【Heatbeat】已断开master节点连接', false);
                             $socket->close();
                             $processSocket = $process->exportSocket();
                             $cmd = $processSocket->recv(timeout: 0.1);
                             if ($cmd == 'shutdown') {
-                                Console::error('【Heatbeat】服务器已关闭,终止心跳');
+                                Timer::clearAll();
+                                Console::error('【Heatbeat】服务器已关闭,终止心跳', false);
                                 $socket->close();
                                 MemoryMonitor::stop();
-                                Process::kill($process->pid, SIGTERM);
-                                //break 2; // 跳出两层循环
+                                return;
                             }
                             break;
                         }
                         if ($reply && !empty($reply->data) && $reply->data !== "::pong") {
-                            // 如果服务端发来 ping 帧，立刻回 pong，保持长连接
                             if (isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
                                 $socket->push('', WEBSOCKET_OPCODE_PONG);
                             }
@@ -544,61 +781,14 @@ class SubProcessManager {
                                 if ($event == 'command') {
                                     $command = $data['data']['command'];
                                     $params = $data['data']['params'];
-                                    switch ($command) {
-                                        case 'shutdown':
-                                            $socket->push("【" . SERVER_HOST . "】start shutdown");
-                                            Http::instance()->shutdown();
-                                            break;
-                                        case 'restart':
-                                            $socket->push("【" . SERVER_HOST . "】start reload");
-                                            Http::instance()->reload();
-                                            break;
-                                        case 'appoint_update':
-                                            $taskId = $params['task_id'] ?? '';
-                                            $statePayload = [
-                                                'event' => 'node_update_state',
-                                                'data' => [
-                                                    'task_id' => $taskId,
-                                                    'host' => SERVER_HOST,
-                                                    'type' => $params['type'],
-                                                    'version' => $params['version'],
-                                                    'updated_at' => time(),
-                                                ]
-                                            ];
-                                            $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                                                'data' => [
-                                                    'state' => 'running',
-                                                    'message' => "【" . SERVER_HOST . "】开始更新 {$params['type']} => {$params['version']}",
-                                                ]
-                                            ])));
-                                            if (App::appointUpdateTo($params['type'], $params['version'])) {
-                                                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                                                    'data' => [
-                                                        'state' => 'success',
-                                                        'message' => "【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}",
-                                                        'updated_at' => time(),
-                                                    ]
-                                                ])));
-                                                $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
-                                            } else {
-                                                $error = App::getLastUpdateError() ?: '未知原因';
-                                                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                                                    'data' => [
-                                                        'state' => 'failed',
-                                                        'error' => $error,
-                                                        'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}",
-                                                        'updated_at' => time(),
-                                                    ]
-                                                ])));
-                                                $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}");
-                                            }
-                                            break;
-                                        default:
-                                            Console::warning("【Heatbeat】Command '$command' is not supported", false);
+                                    if (!$this->handleRemoteCommand($command, $params, $socket)) {
+                                        Console::warning("【Heatbeat】Command '$command' is not supported", false);
                                     }
                                 } elseif ($event == 'slave_node_report_response') {
                                     $masterHost = Manager::instance()->getMasterHost();
                                     Console::success('【Heatbeat】已与master[' . $masterHost . ']建立连接,客户端ID:' . $data['data'], false);
+                                } elseif ($event == 'console_subscription') {
+                                    ConsoleRelay::setRemoteSubscribed((bool)($data['data']['enabled'] ?? false));
                                 } else {
                                     Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
                                 }
@@ -606,18 +796,10 @@ class SubProcessManager {
                                 Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
                             }
                         }
-                        // 周期性检测主进程是否还在
-//                        static $tick = 0;
-//                        if ((++$tick % 10) === 0 && !Process::kill($this->server->manager_pid, 0)) {
-//                            Console::error('【Heatbeat】主进程退出，断开并退出');
-//                            $socket->close();
-//                            break 2; // 跳出两层循环
-//                        }
                     }
                 }
             });
-
-        });
+        }, false, SOCK_DGRAM);
     }
 
     /**
@@ -626,34 +808,36 @@ class SubProcessManager {
      */
     private function createLogBackupProcess(): Process {
         return new Process(function (Process $process) {
-            Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
-            App::mount();
-            MemoryMonitor::start('LogBackup');
-            $serverConfig = Config::server();
-            $logger = Log::instance();
+            run(function () use ($process) {
+                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                    define('IS_GATEWAY_SUB_PROCESS', true);
+                }
+                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+                App::mount();
+                MemoryMonitor::start('LogBackup');
+                $serverConfig = Config::server();
+                $logger = Log::instance();
 
-            $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
-            //清理过期日志
-            $clearCount = $logger->clear($logExpireDays);
-            if ($clearCount) {
-                Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
-            }
-            run(function () use ($logger, $process, $logExpireDays) {
+                $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
+                //清理过期日志
+                $clearCount = $logger->clear($logExpireDays);
+                if ($clearCount) {
+                    Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
+                }
                 $sock = $process->exportSocket();
                 while (true) {
                     $cmd = $sock->recv(timeout: 0.1);
                     if ($cmd == 'shutdown') {
+                        Timer::clearAll();
                         MemoryMonitor::stop();
-                        Console::error("【LogBackup】管理进程退出,结束备份");
-                        Process::kill($process->pid, SIGTERM);
-                        break;
+                        Console::error("【LogBackup】管理进程退出,结束备份", false);
+                        return;
                     }
                     if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
                         $clearCount = $logger->clear($logExpireDays);
                         if ($clearCount) {
                             Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
                         }
-                        //清理过期请求统计
                         $countKeyDay = Key::COUNTER_REQUEST . Date::leftday(2);
                         if (Counter::instance()->get($countKeyDay)) {
                             Counter::instance()->delete($countKeyDay);
@@ -664,7 +848,7 @@ class SubProcessManager {
                     Coroutine::sleep(5);
                 }
             });
-        });
+        }, false, SOCK_DGRAM);
     }
 
     /**
@@ -673,43 +857,54 @@ class SubProcessManager {
      */
     private function createFileWatchProcess(): Process {
         return new Process(function (Process $process) {
-            register_shutdown_function(function () use ($process) {
+            $expectedShutdown = false;
+            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
+                define('IS_GATEWAY_SUB_PROCESS', true);
+            }
+            register_shutdown_function(function () use ($process, &$expectedShutdown) {
                 $err = error_get_last();
+                if ($expectedShutdown) {
+                    return;
+                }
+                if ($err && str_contains((string)($err['message'] ?? ''), 'swoole exit')) {
+                    return;
+                }
                 if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
                     Console::error("【FileWatcher】子进程致命错误，退出: " . $err['message']);
                     Process::kill($process->pid, SIGTERM);
                 }
             });
-            Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
-            sleep(1);
-            App::mount();
-            MemoryMonitor::start('FileWatcher');
-            $scanDirectories = function () {
-                if (APP_SRC_TYPE == 'dir') {
-                    $appFiles = Dir::scan(APP_PATH . '/src');
-                } else {
-                    $appFiles = [];
+            run(function () use ($process, &$expectedShutdown) {
+                Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
+                sleep(1);
+                App::mount();
+                MemoryMonitor::start('FileWatcher');
+                $scanDirectories = function () {
+                    if (APP_SRC_TYPE == 'dir') {
+                        $appFiles = Dir::scan(APP_PATH . '/src');
+                    } else {
+                        $appFiles = [];
+                    }
+                    return [...$appFiles, ...Dir::scan(Root::dir())];
+                };
+                $files = $scanDirectories();
+                $fileList = [];
+                foreach ($files as $path) {
+                    $fileList[] = [
+                        'path' => $path,
+                        'mtime' => filemtime($path),
+                        'size' => filesize($path),
+                    ];
                 }
-                return [...$appFiles, ...Dir::scan(Root::dir())];
-            };
-            $files = $scanDirectories();
-            $fileList = [];
-            foreach ($files as $path) {
-                $fileList[] = [
-                    'path' => $path,
-                    'mtime' => filemtime($path),
-                    'size' => filesize($path),
-                ];
-            }
-            run(function () use ($fileList, $process, $scanDirectories) {
                 while (true) {
                     $socket = $process->exportSocket();
                     $msg = $socket->recv(timeout: 0.1);
                     if ($msg == 'shutdown') {
+                        $expectedShutdown = true;
+                        Timer::clearAll();
                         MemoryMonitor::stop();
-                        Console::error("【FileWatcher】管理进程退出,结束监听");
-                        Process::kill($process->pid, SIGTERM);
-                        break;
+                        Console::error("【FileWatcher】管理进程退出,结束监听", false);
+                        return;
                     }
                     $changed = false;
                     $changedFiles = [];
@@ -748,14 +943,13 @@ class SubProcessManager {
                             Console::write($f);
                         }
                         Console::warning('-------------------------------------------');
-                        Http::instance()->reload();
+                        $this->triggerReload();
                     }
                     MemoryMonitor::updateUsage('FileWatcher');
                     Coroutine::sleep(2);
                 }
             });
-            MemoryMonitor::stop();
-        });
+        }, false, SOCK_DGRAM);
     }
 
 }

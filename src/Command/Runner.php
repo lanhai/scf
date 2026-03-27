@@ -3,7 +3,12 @@
 namespace Scf\Command;
 
 
+require_once __DIR__ . '/DefaultCommand/Gateway.php';
+require_once __DIR__ . '/DefaultCommand/GatewayUpstream.php';
+
 use Scf\Command\DefaultCommand\Framework;
+use Scf\Command\DefaultCommand\Gateway;
+use Scf\Command\DefaultCommand\GatewayUpstream;
 use Scf\Core\Traits\Singleton;
 use Scf\Command\DefaultCommand\Bot;
 use Scf\Command\DefaultCommand\Build;
@@ -26,6 +31,8 @@ class Runner {
         Manager::instance()->addCommand(new Bot());//机器人
         Manager::instance()->addCommand(new Run());//脚本运行
         Manager::instance()->addCommand(new Framework());//框架包管理
+        Manager::instance()->addCommand(new Gateway());//代理网关
+        Manager::instance()->addCommand(new GatewayUpstream());//代理业务实例
     }
 
     private mixed $beforeCommand;

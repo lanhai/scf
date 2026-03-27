@@ -7,8 +7,10 @@ use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
+use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
+use Scf\Core\Table\SocketConnectionTable;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Mode\Web\App;
@@ -19,6 +21,7 @@ use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Server\Controller\DashboardController;
 use Scf\Server\Http as Server;
+use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
@@ -29,6 +32,9 @@ use Swoole\Timer;
 use Throwable;
 
 class CgiListener extends Listener {
+
+    protected const UPSTREAM_CONTROL_SHUTDOWN_PATH = '/_gateway/internal/upstream/shutdown';
+    protected const UPSTREAM_CONTROL_STATUS_PATH = '/_gateway/internal/upstream/status';
 
     /**
      * @param \Swoole\Http\Request $request
@@ -51,6 +57,9 @@ class CgiListener extends Listener {
         }
         Response::instance()->register($response);
         Request::instance()->register($request);
+        if ($this->handleProxyUpstreamControl($request, $response)) {
+            return;
+        }
         if ($request->server['path_info'] == '/favicon.ico' || $request->server['request_uri'] == '/favicon.ico') {
             $response->end();
             return;
@@ -171,13 +180,111 @@ class CgiListener extends Listener {
         Done:
         Event::defer(function () use ($workerId, $request) {
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
+            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+                return;
+            }
             $latestUsageUpdated = Runtime::instance()->get("worker.memory.usage.updated:{$workerId}") ?: 0;
             if (time() - $latestUsageUpdated >= 5) {
-                $processName = "worker:{$workerId}";
+                $processName = "worker:" . ($workerId + 1);
                 MemoryMonitor::updateUsage($processName);
                 Runtime::instance()->set("worker.memory.usage.updated:{$workerId}", time());
             }
         });
+    }
+
+    protected function handleProxyUpstreamControl(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
+        if (!(defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true)) {
+            return false;
+        }
+
+        $path = (string)($request->server['path_info'] ?? $request->server['request_uri'] ?? '/');
+        if (!in_array($path, [
+            self::UPSTREAM_CONTROL_SHUTDOWN_PATH,
+            self::UPSTREAM_CONTROL_STATUS_PATH,
+        ], true)) {
+            return false;
+        }
+
+        $remoteAddr = (string)($request->server['remote_addr'] ?? '');
+        if (!in_array($remoteAddr, ['127.0.0.1', '::1', 'localhost'], true)) {
+            $response->status(403);
+            $response->header('Content-Type', 'application/json;charset=utf-8');
+            $response->end(JsonHelper::toJson([
+                'errCode' => 'FORBIDDEN',
+                'message' => 'forbidden',
+                'data' => ''
+            ]));
+            return true;
+        }
+
+        if ($path === self::UPSTREAM_CONTROL_STATUS_PATH) {
+            $status = $this->buildProxyUpstreamRuntimeStatus();
+            $response->status(200);
+            $response->header('Content-Type', 'application/json;charset=utf-8');
+            $response->end(JsonHelper::toJson([
+                'errCode' => 0,
+                'message' => 'SUCCESS',
+                'data' => $status
+            ]));
+            return true;
+        }
+
+        $response->status(200);
+        $response->header('Content-Type', 'application/json;charset=utf-8');
+        $response->end(JsonHelper::toJson([
+            'errCode' => 0,
+            'message' => 'SUCCESS',
+            'data' => 'shutdown'
+        ]));
+        Timer::after(1, static function () {
+            Server::instance()->shutdown();
+        });
+        return true;
+    }
+
+    protected function buildProxyUpstreamRuntimeStatus(): array {
+        $server = Server::server();
+        $stats = $server ? $server->stats() : (Runtime::instance()->get('SERVER_STATS') ?: []);
+        $profile = \Scf\Core\App::profile();
+
+        return [
+            'id' => APP_NODE_ID,
+            'appid' => APP_ID,
+            'name' => APP_DIR_NAME,
+            'ip' => SERVER_HOST,
+            'port' => Runtime::instance()->httpPort(),
+            'socketPort' => Runtime::instance()->httpPort(),
+            'started' => file_exists(SERVER_MASTER_PID_FILE) ? filemtime(SERVER_MASTER_PID_FILE) : time(),
+            'restart_times' => Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0,
+            'heart_beat' => time(),
+            'framework_build_version' => FRAMEWORK_BUILD_VERSION,
+            'framework_update_ready' => file_exists(SCF_ROOT . '/build/update.pack'),
+            'role' => SERVER_ROLE,
+            'master_pid' => (int)($server->master_pid ?? 0),
+            'manager_pid' => (int)($server->manager_pid ?? 0),
+            'fingerprint' => APP_FINGERPRINT,
+            'app_version' => \Scf\Core\App::version() ?: $profile->version,
+            'public_version' => \Scf\Core\App::publicVersion() ?: ($profile->public_version ?: '--'),
+            'scf_version' => SCF_COMPOSER_VERSION,
+            'swoole_version' => swoole_version(),
+            'cpu_num' => function_exists('swoole_cpu_num') ? swoole_cpu_num() : 0,
+            'stack_useage' => memory_get_usage(true),
+            'tables' => ATable::list(),
+            'tasks' => \Scf\Server\Task\CrontabManager::allStatus(),
+            'threads' => class_exists(\Swoole\Coroutine::class) ? count(\Swoole\Coroutine::list()) : 0,
+            'thread_status' => class_exists(\Swoole\Coroutine::class) ? \Swoole\Coroutine::stats() : [],
+            'server_run_mode' => APP_SRC_TYPE,
+            'http_request_count_current' => Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0,
+            'http_request_count_today' => Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0,
+            'http_request_reject' => Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0,
+            'http_request_count' => Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0,
+            'http_request_processing' => Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0,
+            'mysql_execute_count' => Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0,
+            'server_stats' => array_merge((array)$stats, [
+                'long_connection_num' => SocketConnectionTable::instance()->count(),
+            ]),
+            'memory_usage' => MemoryMonitor::sum(),
+        ];
     }
 
     /**

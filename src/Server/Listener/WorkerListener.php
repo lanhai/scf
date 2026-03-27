@@ -29,18 +29,11 @@ class WorkerListener extends Listener {
                 Process::kill($server->worker_pid, SIGKILL);
             }
         });
-        //监控内存使用
-        $limitMb = Config::server()['worker_memory_limit'] ?? 256;
-        MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
-        //        Process::signal(SIGUSR2, function () use ($workerId) {
-//            try {
-//                //Console::info("【Worker#{$workerId}】收到 SIGUSR2，已清理定时器", false);
-//                MemoryMonitor::stop();
-//                Timer::clearAll();
-//            } catch (Throwable $e) {
-//                Console::error("【Worker#{$workerId}】清理定时器异常：" . $e->getMessage(), false);
-//            }
-//        });
+        if (!(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)) {
+            //监控内存使用
+            $limitMb = Config::server()['worker_memory_limit'] ?? 256;
+            MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
+        }
         //记录致命错误
         register_shutdown_function(function () use ($workerId) {
             $error = error_get_last();
@@ -79,6 +72,7 @@ class WorkerListener extends Listener {
             } catch (Throwable $throwable) {
                 Console::error($throwable->getMessage());
             }
+            Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
             $info = <<<INFO
 ---------Workers启动完成---------

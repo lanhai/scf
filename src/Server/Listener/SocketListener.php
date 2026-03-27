@@ -332,6 +332,16 @@ class SocketListener extends Listener {
      * @return false|void
      */
     protected function onHandshake(Request $request, Response $response) {
+        if (!Runtime::instance()->serverIsReady()) {
+            $response->status(503);
+            $response->header('Content-Type', 'application/json;charset=utf-8');
+            $response->end(JsonHelper::toJson([
+                'errCode' => 'SERVICE_UNAVAILABLE',
+                'message' => '服务重启中,请稍后重试',
+                'data' => ''
+            ]));
+            return false;
+        }
         $uri = $request->server['request_uri'] ?? '/';
         $connectionRoute = '';
         if ($uri !== '/' && SocketRouteTable::instance()->has($uri)) {

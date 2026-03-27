@@ -9,6 +9,7 @@ class Key {
     public const RUNTIME_MASTERDB_PORT = 'master_db_port';
     public const RUNTIME_RPC_PORT = 'rpc_port';
     public const RUNTIME_SERVER_STATUS = 'server_status';
+    public const RUNTIME_SERVER_DRAINING = 'server_draining';
     public const RUNTIME_REDIS_QUEUE_STATUS = 'redis_queue_status';
     public const RUNTIME_CRONTAB_STATUS = 'crontab_status';
     public const RUNTIME_CRONTAB_TASK_LIST = 'crontab_list';

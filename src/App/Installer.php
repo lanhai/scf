@@ -103,7 +103,8 @@ class Installer extends Struct {
         $appPath = SCF_APPS_ROOT . '/' . $path;
         $apps = [];
         if (!file_exists($appPath) && !RUNNING_INSTALL) {
-            if (!IS_HTTP_SERVER) {
+            $allowAutoCreate = IS_HTTP_SERVER || (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true);
+            if (!$allowAutoCreate) {
                 Console::error("应用目录不存在:" . $appPath);
                 exit();
             }

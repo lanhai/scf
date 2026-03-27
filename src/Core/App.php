@@ -16,7 +16,6 @@ use Scf\Util\Dir;
 use Scf\Util\File;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
-use Swoole\Event;
 use Swoole\Runtime;
 use Swoole\Timer;
 use Symfony\Component\Yaml\Yaml;
@@ -38,6 +37,18 @@ class App {
     protected static string $path;
     protected static bool $_ready = false;
     protected static ?string $_lastUpdateError = null;
+
+    protected static function runSynchronously(callable $callable) {
+        if (Coroutine::getCid() > 0) {
+            return $callable();
+        }
+
+        $result = null;
+        run(function () use (&$result, $callable) {
+            $result = $callable();
+        });
+        return $result;
+    }
 
     /**
      * 自定义更新src/public到指定版本
@@ -264,8 +275,11 @@ class App {
         //项目库路径
         !defined('APP_LIB_PATH') and define('APP_LIB_PATH', self::src() . '/lib');
         Config::init();
-        !defined('APP_MASTER_DB_HOST') and define('APP_MASTER_DB_HOST', self::isMaster() ? 'master' : (Config::get('app')['master_host'] ?? 'master'));
-        !defined('APP_MASTER_DB_PORT') and define('APP_MASTER_DB_PORT', (self::isMaster() ? \Scf\Core\Table\Runtime::instance()->masterDbPort() : (Config::get('app')['master_port'] ?? MDB_PORT)) ?: MDB_PORT);
+        $appConfig = Config::get('app', []);
+        $masterDbHost = $appConfig['master_host'] ?? Config::get('app.app.master_host', 'master');
+        $masterDbPort = $appConfig['master_port'] ?? Config::get('app.app.master_port', MDB_PORT);
+        !defined('APP_MASTER_DB_HOST') and define('APP_MASTER_DB_HOST', self::isMaster() ? 'master' : $masterDbHost);
+        !defined('APP_MASTER_DB_PORT') and define('APP_MASTER_DB_PORT', (self::isMaster() ? \Scf\Core\Table\Runtime::instance()->masterDbPort() : $masterDbPort) ?: MDB_PORT);
         //加载应用第三方库
         $vendorLoader = self::src() . '/vendor/autoload.php';
         if (file_exists($vendorLoader)) {
@@ -397,17 +411,15 @@ class App {
     }
 
     public static function getServerIp() {
-        $ip = null;
-        Coroutine\go(function () use (&$ip) {
+        $ip = self::runSynchronously(function () {
             $client = new Client('host.docker.internal', '19502');
             $client->set(['timeout' => 10]);
             if (!$client->get('/') || $client->statusCode !== 200) {
                 Console::log(Color::red('获取服务器IP地址失败,请确保宿主机myip服务已启动![' . $client->errMsg . ']'));
-            } else {
-                $ip = JsonHelper::recover($client->getBody());
+                return null;
             }
+            return JsonHelper::recover($client->getBody());
         });
-        Event::wait();
         if (is_null($ip)) {
             Console::log(Color::notice('3秒后重试'));
             sleep(3);
@@ -421,10 +433,10 @@ class App {
      * @return bool
      */
     public static function install(): bool {
-        run(function () {
+        self::runSynchronously(static function () {
             Updater::instance()->updateApp(true);
+            return null;
         });
-        Event::wait();
         if (!self::isReady()) {
             Log::instance()->error('应用安装失败');
             return false;
@@ -440,13 +452,13 @@ class App {
         if (APP_SRC_TYPE != 'phar') {
             return true;
         }
-        run(function () {
+        self::runSynchronously(static function () {
             $status = Updater::instance()->updateApp();
             if (!$status) {
                 Log::instance()->error('应用安装失败');
             }
+            return null;
         });
-        Event::wait();
         Log::instance()->info('应用安装完成');
         return true;
     }

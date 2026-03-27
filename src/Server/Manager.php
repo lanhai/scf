@@ -23,6 +23,7 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Swlib\Saber\WebSocket;
 use Swlib\SaberGM;
+use Swoole\Coroutine;
 use Swoole\Coroutine\System;
 use Throwable;
 use Swlib\Http\Exception\RequestException;
@@ -45,14 +46,54 @@ class Manager extends Component {
     public function getMasterHost(): string {
         $host = Runtime::instance()->get('_MASTER_HOST_');
         if (!$host) {
-            $host = App::isMaster() ? '127.0.0.1' : (Config::get('app')['master_host'] ?? '127.0.0.1');
-            if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
-                $port = MASTER_PORT ?: Runtime::instance()->httpPort();
-                $host = $host . ':' . $port;
-            }
+            $appConfig = Config::get('app', []);
+            $masterHost = $appConfig['master_host'] ?? Config::get('app.app.master_host', '127.0.0.1');
+            $host = App::isMaster() ? '127.0.0.1' : $masterHost;
+            $host = $this->normalizeMasterHost($host, App::isMaster());
             Runtime::instance()->set('_MASTER_HOST_', $host);
         }
         return $host;
+    }
+
+    protected function normalizeMasterHost(string $host, bool $localMaster = false): string {
+        $host = trim($host);
+        if ($host === '') {
+            return $localMaster ? ('127.0.0.1:' . $this->resolveLocalMasterPort()) : '127.0.0.1';
+        }
+
+        $parsed = parse_url(str_contains($host, '://') ? $host : 'tcp://' . $host);
+        if ($parsed === false) {
+            return $host;
+        }
+
+        $hostPart = $parsed['host'] ?? null;
+        if (!$hostPart) {
+            return $host;
+        }
+
+        $port = (int)($parsed['port'] ?? 0);
+        if ($port <= 0 && $localMaster) {
+            $port = $this->resolveLocalMasterPort();
+        } elseif ($port <= 0 && MASTER_PORT) {
+            $port = (int)MASTER_PORT;
+        }
+
+        $normalized = $hostPart . ($port > 0 ? ':' . $port : '');
+        $path = (string)($parsed['path'] ?? '');
+        if ($path !== '' && $path !== '/') {
+            $normalized .= $path;
+        }
+        if (!empty($parsed['query'])) {
+            $normalized .= '?' . $parsed['query'];
+        }
+        if (!empty($parsed['fragment'])) {
+            $normalized .= '#' . $parsed['fragment'];
+        }
+        return $normalized;
+    }
+
+    protected function resolveLocalMasterPort(): int {
+        return (int)(MASTER_PORT ?: Runtime::instance()->httpPort());
     }
 
     /**
@@ -61,7 +102,8 @@ class Manager extends Component {
      */
     public function getMasterSocketConnection(): WebSocket {
         $socketHost = $this->getMasterHost();
-        if (!str_contains($socketHost, ':')) {
+        $path = parse_url('ws://' . $socketHost, PHP_URL_PATH);
+        if (!$path || $path === '/') {
             $socketHost .= '/dashboard.socket';
         }
         $retryDelay = 1;
@@ -78,7 +120,11 @@ class Manager extends Component {
             } catch (RequestException $throwable) {
                 Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
             }
-            sleep($retryDelay);
+            if (Coroutine::getCid() > 0) {
+                Coroutine::sleep($retryDelay);
+            } else {
+                sleep($retryDelay);
+            }
             $retryDelay = min($retryDelay * 2, 30);
         }
     }

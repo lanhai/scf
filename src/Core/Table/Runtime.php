@@ -55,6 +55,18 @@ class Runtime extends ATable {
         return $this->get(Key::RUNTIME_SERVER_STATUS) ?: false;
     }
 
+    /**
+     * 服务器是否处于平滑重启/关闭排空阶段
+     * @param ?bool $status
+     * @return bool
+     */
+    public function serverIsDraining(?bool $status = null): bool {
+        if (is_bool($status)) {
+            return $this->set(Key::RUNTIME_SERVER_DRAINING, $status);
+        }
+        return $this->get(Key::RUNTIME_SERVER_DRAINING) ?: false;
+    }
+
     public function serverIsAlive(?bool $status = null) {
         if (is_bool($status)) {
             return $this->set(Key::COUNTER_SERVER_ISRUNNING, $status);
