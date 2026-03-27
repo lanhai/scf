@@ -75,7 +75,12 @@ class SubProcessManager {
             $this->processList['CrontabManager'] = $this->createCrontabManagerProcess();
         }
         // 控制台日志只需要从子节点推给 master，本机 master 不必自连
-        if ($this->processEnabled('ConsolePush') && !App::isMaster() && !(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)) {
+        if (
+            $this->processEnabled('ConsolePush')
+            && !App::isMaster()
+            && !(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)
+            && !(defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true)
+        ) {
             $this->consolePushProcess = $this->createConsolePushProcess();
         }
         //redis队列

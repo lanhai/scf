@@ -238,13 +238,27 @@ class AppServerLauncher {
 
     public function waitUntilServicesReady(string $host, int $port, int $rpcPort = 0, int $timeoutSeconds = 20, int $intervalMs = 200): bool {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $logged = false;
         while (microtime(true) < $deadline) {
             $httpReady = $this->isListening($host, $port, 0.2);
             $rpcReady = $rpcPort <= 0 || $this->isListening($host, $rpcPort, 0.2);
             if ($httpReady && $rpcReady) {
+                if ($logged) {
+                    $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
+                    echo date('m-d H:i:s') . " 【Gateway】业务实例端口就绪: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
+                }
                 return true;
             }
+            if (!$logged) {
+                $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
+                echo date('m-d H:i:s') . " 【Gateway】等待业务实例端口就绪: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
+                $logged = true;
+            }
             usleep(max(50, $intervalMs) * 1000);
+        }
+        if ($logged) {
+            $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
+            echo date('m-d H:i:s') . " 【Gateway】等待业务实例端口就绪超时: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
         }
         return false;
     }

@@ -241,9 +241,15 @@ class CliBootstrap {
 
         echo date('m-d H:i:s') . " 【Gateway】启动前清理历史托管实例: " . count($managedInstances) . PHP_EOL;
         foreach ($managedInstances as $instance) {
+            $host = (string)($instance['host'] ?? '127.0.0.1');
+            $port = (int)($instance['port'] ?? 0);
+            $rpcPort = (int)(($instance['metadata']['rpc_port'] ?? 0));
+            $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
+            echo date('m-d H:i:s') . " 【Gateway】清理历史托管实例: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
             $launcher->stop($instance, 2);
         }
         $manager->removeManagedInstances();
+        echo date('m-d H:i:s') . " 【Gateway】历史托管实例清理完成" . PHP_EOL;
     }
 
     protected static function findExistingRpcPort(AppInstanceManager $manager, string $version, string $host, int $port): int {

@@ -964,6 +964,7 @@ class GatewayServer {
             return;
         }
 
+        $logged = false;
         while (microtime(true) < $deadline) {
             $occupied = false;
             foreach ($ports as $port) {
@@ -973,22 +974,40 @@ class GatewayServer {
                 }
             }
             if (!$occupied) {
+                if ($logged) {
+                    Console::success("【Gateway】启动前端口已释放: " . implode(', ', $ports));
+                }
                 return;
             }
+            if (!$logged) {
+                Console::warning("【Gateway】启动前等待端口释放: " . implode(', ', $ports));
+                $logged = true;
+            }
             usleep(max(50, $intervalMs) * 1000);
+        }
+        if ($logged) {
+            Console::warning("【Gateway】等待端口释放超时，继续尝试启动: " . implode(', ', $ports));
         }
     }
 
     protected function createGatewaySocketServer(int $timeoutSeconds = 10, int $intervalMs = 200): Server {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $lastException = null;
+        $logged = false;
         do {
             try {
+                if ($logged) {
+                    Console::success("【Gateway】监听端口抢占成功: {$this->host}:{$this->port}");
+                }
                 return new Server($this->host, $this->port, SWOOLE_PROCESS, SWOOLE_SOCK_TCP);
             } catch (SwooleException $exception) {
                 $lastException = $exception;
                 if (!str_contains($exception->getMessage(), 'Address already in use')) {
                     throw $exception;
+                }
+                if (!$logged) {
+                    Console::warning("【Gateway】监听端口占用，等待重试: {$this->host}:{$this->port}");
+                    $logged = true;
                 }
                 usleep(max(50, $intervalMs) * 1000);
             }

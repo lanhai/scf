@@ -10,6 +10,7 @@ use Scf\Command\Util;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Env;
+use Scf\Command\DefaultCommand\Gateway;
 use Scf\Server\Http;
 use Swoole\Process;
 
@@ -49,12 +50,16 @@ class Server implements CommandInterface {
         $commandHelp->addActionOpt('-port', 'http端口,缺省:9502');
         $commandHelp->addActionOpt('-d', '作为守护进程运行');
         $commandHelp->addActionOpt('-force', '强制停止');
+        $commandHelp->addActionOpt('-noproxy', '显式关闭 Gateway 代理,回退到原 Http server');
         return $commandHelp;
     }
 
     public function exec(): ?string {
         $action = Manager::instance()->getArg(0);
         if ($action && method_exists($this, $action) && $action != 'help') {
+            if (!Manager::instance()->issetOpt('noproxy')) {
+                return (new Gateway())->exec();
+            }
             Env::initialize(MODE_CGI);
             return $this->$action();
         }
