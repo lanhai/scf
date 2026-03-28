@@ -11,10 +11,10 @@ use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
+use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Core\Table\SocketConnectionTable;
-use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Proxy\ConsoleRelay;
 use Scf\Server\Proxy\LocalIpc;
@@ -27,8 +27,6 @@ use RuntimeException;
 use Swoole\Coroutine;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
-use Symfony\Component\Console\Helper\Table;
-use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
 
@@ -75,7 +73,6 @@ class Http extends \Scf\Core\Server {
     protected ?int $reloadDiagnosticTimerId = null;
     protected int $reloadDiagnosticStartedAt = 0;
     protected ?LocalIpcServer $localIpcServer = null;
-    protected ?string $businessHttpSocketPath = null;
 
     protected function isProxyUpstreamMode(): bool {
         return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
@@ -222,7 +219,6 @@ class Http extends \Scf\Core\Server {
                 // 'heartbeat_idle_time' => 180
             ]);
             Runtime::instance()->httpPort($this->bindPort);
-            $this->startProxyUpstreamHttpSocketListener($serverConfig);
         } catch (Throwable $exception) {
             $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']监听启动失败:' . $exception->getMessage()));
             // 稍等片刻再退出/或由外层管理器重试
@@ -292,10 +288,19 @@ class Http extends \Scf\Core\Server {
 //        });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
-            $this->log(Color::yellow('服务器即将关闭'));
+            $this->log(Color::yellow('服务器正在关闭'));
             $this->stopReloadDiagnostics();
+            if ($this->isProxyUpstreamMode()) {
+                $this->stopLocalIpcServer();
+            }
             $disconnected = $this->disconnectAllClients($server);
             $disconnected > 0 and $this->log(Color::yellow("已断开 {$disconnected} 个客户端连接"));
+        });
+        $this->server->on("Shutdown", function (Server $server) {
+            if ($this->isProxyUpstreamMode()) {
+                // upstream 的本地 IPC 挂在 master/onStart；Shutdown 再补一次收口，确保 accept 协程跟随 master 退出。
+                $this->stopLocalIpcServer();
+            }
         });
         $this->server->on("ManagerStart", function (Server $server) {
             //Console::info('ManagerStart');
@@ -308,6 +313,13 @@ class Http extends \Scf\Core\Server {
         //服务器完成启动
         $this->server->on('start', function (Server $server) use ($serverConfig) {
             MemoryMonitor::start('Server:Master');
+            if ($this->isProxyUpstreamMode()) {
+                // 新 upstream 的 master/onStart 先挂载应用上下文，这样本地 IPC 读到的
+                // appid/version/modules 与业务实例本身保持同一代代码语义。
+                App::mount();
+                // upstream 控制 IPC 属于 server 自己的控制能力，直接挂在 onStart，不进入任何 worker 生命周期。
+                $this->startLocalIpcServer();
+            }
             //每三秒将服务器运行状态写入内存表
             Timer::tick(1000 * 3, function ($tid) use ($server) {
                 if (!Runtime::instance()->serverIsAlive()) {
@@ -327,67 +339,16 @@ class Http extends \Scf\Core\Server {
                 });
             }
 
-            $masterPid = $server->master_pid;
-            $managerPid = $server->manager_pid;
             File::write(SERVER_DASHBOARD_PORT_FILE, Runtime::instance()->dashboardPort());
-            $scfVersion = SCF_COMPOSER_VERSION;
-            $role = SERVER_ROLE;
-            $env = SERVER_RUN_ENV;
-            $src = APP_SRC_TYPE;
-            $dirName = APP_DIR_NAME;
-            $files = count(get_included_files());
-            $os = OS_ENV;
-            $host = SERVER_HOST;
-            $version = swoole_version();
-            $fingerprint = APP_FINGERPRINT;
-            $frameworkRoot = Root::dir();
-            $serverBuildTime = FRAMEWORK_BUILD_TIME;
-            $frameworkVersion = $serverBuildTime == 'development' ? 'development' : FRAMEWORK_BUILD_VERSION;
-            $info = <<<INFO
-------------------Server启动完成------------------
-应用指纹：{$fingerprint}
-运行系统：{$os}
-运行环境：{$env}
-应用目录：{$dirName}
-源码类型：{$src}
-节点角色：{$role}
-文件加载：{$files}
-环境版本：{$version}
-框架源码：{$frameworkRoot}
-框架版本：{$scfVersion}
-打包版本：{$frameworkVersion}
-打包时间：{$serverBuildTime}
-工作进程：{$serverConfig['worker_num']}
-任务进程：{$serverConfig['task_worker_num']}
-主机地址：{$host}
---------------------------------------------------
-INFO;
-            Console::write(Color::cyan($info));
-            $renderData = [
-                ['SERVER', Color::cyan("Master:{$masterPid},Manager:{$managerPid}"), Color::green(Runtime::instance()->httpPort())],
-                ['DASHBOARD', App::isMaster() ? Color::cyan(Runtime::instance()->get('DASHBOARD_PID')) : '--', App::isMaster() ? Color::green(Runtime::instance()->dashboardPort()) : '--'],
-            ];
-
-            if ($rpcPort = Runtime::instance()->rpcPort()) {
-                $renderData[] = ['RPC', "--", Color::green($rpcPort)];
-            }
-            $output = new ConsoleOutput();
-            $table = new Table($output);
-            $table
-                ->setHeaders([Color::cyan('服务'), Color::cyan('进程ID'), Color::cyan('端口号')])
-                ->setRows($renderData);
-            $table->render();
             //自动更新
             !$this->isProxyUpstreamMode() && APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
 
         try {
-            $subProcessOptions = [];
-            if ($this->isProxyUpstreamMode()) {
-                $subProcessOptions['include_processes'] = ['MemoryUsageCount', 'CrontabManager', 'RedisQueue'];
+            if (!$this->isProxyUpstreamMode()) {
+                $this->subProcessManager = new SubProcessManager($this->server, $serverConfig, []);
+                $this->subProcessManager->start();
             }
-            $this->subProcessManager = new SubProcessManager($this->server, $serverConfig, $subProcessOptions);
-            $this->subProcessManager->start();
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -473,54 +434,49 @@ INFO;
         ];
     }
 
+    /**
+     * 在 upstream manager 进程中启动本地 IPC server。
+     *
+     * 这条控制 socket 继续复用现有协议与 handler，但承载位置改为 server 的 manager 侧，
+     * 避免再把控制入口绑进任何 worker 生命周期。
+     *
+     * @return void
+     */
     public function startLocalIpcServer(): void {
-        // Upstream 控制面统一改走已有的 unix http socket，避免独立 accept 协程在空闲时触发 coroutine deadlock。
+        if (!$this->isProxyUpstreamMode() || $this->localIpcServer instanceof LocalIpcServer) {
+            return;
+        }
+        $port = (int)Runtime::instance()->httpPort();
+        if ($port <= 0) {
+            return;
+        }
+        // LocalIpcServer 与 LocalIpc 定义在同一文件中，这里显式载入，避免 onStart 时因自动加载找不到类。
+        require_once __DIR__ . '/Proxy/LocalIpc.php';
+        $this->localIpcServer = new LocalIpcServer(
+            LocalIpc::upstreamSocketPath($port),
+            function (array $request): array {
+                return $this->handleLocalIpcRequest($request);
+            },
+            'upstream_local_ipc'
+        );
+        $this->localIpcServer->start();
     }
 
+    /**
+     * 停止 upstream manager 进程上的本地 IPC server。
+     *
+     * @return void
+     */
     public function stopLocalIpcServer(): void {
-        $this->localIpcServer = null;
-    }
-
-    protected function startProxyUpstreamHttpSocketListener(array $serverConfig): void {
-        if (!$this->isProxyUpstreamMode() || !$this->proxyUpstreamHttpSocketEnabled()) {
-            return;
+        if ($this->localIpcServer instanceof LocalIpcServer) {
+            $this->localIpcServer->stop();
+            $this->localIpcServer = null;
         }
-        $socketPath = LocalIpc::upstreamHttpSocketPath($this->bindPort);
-        $this->businessHttpSocketPath = $socketPath;
-        @unlink($socketPath);
-        try {
-            $socketServer = $this->server->listen($socketPath, 0, SWOOLE_UNIX_STREAM);
-            if (!$socketServer) {
-                throw new RuntimeException('listen failed');
-            }
-            $socketServer->set([
-                'package_max_length' => $serverConfig['package_max_length'] ?? 10 * 1024 * 1024,
-                'open_http_protocol' => true,
-                'open_http2_protocol' => false,
-                'open_websocket_protocol' => false,
-            ]);
-            @chmod($socketPath, 0666);
-        } catch (Throwable $throwable) {
-            @unlink($socketPath);
-            $this->businessHttpSocketPath = null;
-            Console::warning("【Server】业务实例HTTP本机socket启动失败，回退TCP: {$throwable->getMessage()}", false);
-        }
-    }
-
-    protected function stopProxyUpstreamHttpSocketListener(): void {
-        if (!$this->businessHttpSocketPath) {
-            return;
-        }
-        @unlink($this->businessHttpSocketPath);
-        $this->businessHttpSocketPath = null;
-    }
-
-    protected function proxyUpstreamHttpSocketEnabled(): bool {
-        return (bool)(Config::server()['gateway_proxy_http_use_unix_socket'] ?? true);
     }
 
     protected function handleLocalIpcRequest(array $request): array {
         $action = (string)($request['action'] ?? '');
+        $payload = is_array($request['payload'] ?? null) ? $request['payload'] : [];
         return match ($action) {
             'upstream.status' => [
                 'ok' => true,
@@ -532,6 +488,13 @@ INFO;
                 'status' => 200,
                 'data' => $this->proxyUpstreamHealthStatus(),
             ],
+            'upstream.memory_rows' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => $this->buildProxyUpstreamMemoryRows(),
+                '__data_file_action' => 'upstream.memory_rows',
+            ],
+            'upstream.restart_worker' => $this->buildUpstreamWorkerRestartResponse($payload),
             'upstream.quiesce' => $this->queueLocalIpcAction(function (): void {
                 $this->quiesceBusinessPlane();
             }, 'quiesce', 5),
@@ -540,6 +503,72 @@ INFO;
             }, 'shutdown', 50),
             default => ['ok' => false, 'status' => 404, 'message' => 'unknown action'],
         };
+    }
+
+    /**
+     * 受理 gateway 下发的单 worker 平滑轮换请求。
+     *
+     * 请求会在 upstream 本地 IPC 控制链里直接调用 `server->stop($workerId, true)`，
+     * 由 upstream 自己的 server 生命周期去平滑轮换指定 worker。
+     *
+     * @param array $payload gateway 透传的 worker 定位信息。
+     * @return array<string, mixed>
+     */
+    protected function buildUpstreamWorkerRestartResponse(array $payload): array {
+        $processName = (string)($payload['process'] ?? '');
+        $pid = (int)($payload['pid'] ?? 0);
+        if (!preg_match('/^worker:(\d+)$/', $processName, $matches)) {
+            return ['ok' => false, 'status' => 400, 'message' => 'invalid worker process'];
+        }
+        $workerNumber = (int)$matches[1];
+        $workerId = $workerNumber - 1;
+        if ($workerId < 0) {
+            return ['ok' => false, 'status' => 400, 'message' => 'invalid worker id'];
+        }
+        $current = MemoryMonitorTable::instance()->get($processName);
+        if (!$current) {
+            return ['ok' => false, 'status' => 404, 'message' => 'worker not found'];
+        }
+        $currentPid = (int)($current['pid'] ?? 0);
+        if ($pid > 0 && $currentPid > 0 && $currentPid !== $pid) {
+            return ['ok' => false, 'status' => 409, 'message' => 'worker pid changed'];
+        }
+
+        return $this->queueLocalIpcAction(function () use ($workerId, $workerNumber, $currentPid): void {
+            Console::warning("【Server】收到内存治理请求, server侧平滑轮换 Worker#{$workerNumber}, PID:{$currentPid}", false);
+            $this->server->stop($workerId, true);
+        }, 'restart_worker', 1);
+    }
+
+    /**
+     * 返回 upstream 当前内存表的原始快照，供 gateway 侧按 pid 补采 OS 物理内存。
+     *
+     * 这里刻意只返回 worker 活跃时写入的表数据，不在 upstream 再做二次 /proc 采样，
+     * 这样就能移除独立的 MemoryUsageCount 子进程，同时保留现有 usage/real/peak 记录口径。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function buildProxyUpstreamMemoryRows(): array {
+        $rows = [];
+        foreach (MemoryMonitorTable::instance()->rows() as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $rows[] = [
+                'process' => (string)($row['process'] ?? ''),
+                'pid' => (int)($row['pid'] ?? 0),
+                'usage_mb' => (float)($row['usage_mb'] ?? 0),
+                'real_mb' => (float)($row['real_mb'] ?? 0),
+                'peak_mb' => (float)($row['peak_mb'] ?? 0),
+                'updated' => (int)($row['updated'] ?? 0),
+                'usage_updated' => (int)($row['usage_updated'] ?? 0),
+                'restart_ts' => (int)($row['restart_ts'] ?? 0),
+                'restart_count' => (int)($row['restart_count'] ?? 0),
+                'limit_memory_mb' => (int)($row['limit_memory_mb'] ?? 0),
+                'auto_restart' => (int)($row['auto_restart'] ?? 0),
+            ];
+        }
+        return $rows;
     }
 
     protected function queueLocalIpcAction(callable $handler, string $label, int $delayMs = 1): array {
@@ -571,8 +600,6 @@ INFO;
         Runtime::instance()->serverIsDraining(true);
         Runtime::instance()->serverIsAlive(false);
         $this->stopReloadDiagnostics();
-        $this->stopLocalIpcServer();
-        $this->stopProxyUpstreamHttpSocketListener();
         isset($this->subProcessManager) && $this->subProcessManager->shutdown();
         $this->disconnectAllClients($this->server);
         if (!$this->isProxyUpstreamMode()) {

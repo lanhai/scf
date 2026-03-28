@@ -34,7 +34,7 @@ class WorkerListener extends Listener {
             $limitMb = Config::server()['worker_memory_limit'] ?? 256;
             MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
         }
-        //记录致命错误
+        // 保留 worker 级致命错误记录能力，这和本次 rshutdown warning 根因无关。
         register_shutdown_function(function () use ($workerId) {
             $error = error_get_last();
             switch ($error['type'] ?? null) {
@@ -80,9 +80,6 @@ class WorkerListener extends Listener {
             }
             Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
-            if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
-                \Scf\Server\Http::instance()->startLocalIpcServer();
-            }
             $info = <<<INFO
 ---------Workers启动完成---------
 应用版本：{$version}
@@ -92,8 +89,6 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
-
-
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
@@ -102,17 +97,5 @@ INFO;
                 $server->stop($worker_id);
             }
         });
-    }
-
-    protected function onpipeMessage(Server $server, $workerId, $data) {
-    }
-
-    protected function onWorkerStop(Server $server, $workerId): void {
-        if ($workerId === 0 && defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
-            try {
-                \Scf\Server\Http::instance()->stopLocalIpcServer();
-            } catch (Throwable) {
-            }
-        }
     }
 }

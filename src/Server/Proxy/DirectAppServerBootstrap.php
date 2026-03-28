@@ -8,8 +8,18 @@ use Scf\Command\Manager;
 use Scf\Core\Env;
 use Scf\Server\Http;
 
+/**
+ * 直连 upstream 的启动入口。
+ *
+ * 该入口不经过 gateway 的托管与编排逻辑，直接启动业务 HTTP server。
+ */
 class DirectAppServerBootstrap {
 
+    /**
+     * 以独立 upstream 模式启动业务 server。
+     *
+     * 这里仅完成运行时常量、自动加载和参数初始化，然后交给 Http 启动。
+     */
     public static function run(array $argv): void {
         self::defineBaseConstants($argv);
         self::registerFrameworkAutoload();
@@ -27,6 +37,9 @@ class DirectAppServerBootstrap {
         Http::create(SERVER_ROLE, '0.0.0.0', SERVER_PORT)->start();
     }
 
+    /**
+     * 定义独立 upstream 所需的基础常量和运行模式。
+     */
     protected static function defineBaseConstants(array $argv): void {
         defined('SCF_ROOT') || define('SCF_ROOT', dirname(__DIR__, 3));
         defined('BUILD_PATH') || define('BUILD_PATH', dirname(SCF_ROOT) . '/build/');
@@ -58,6 +71,9 @@ class DirectAppServerBootstrap {
         defined('FRAMEWORK_IS_PHAR') || define('FRAMEWORK_IS_PHAR', false);
     }
 
+    /**
+     * 注册框架类自动加载，确保 direct upstream 只加载源码树。
+     */
     protected static function registerFrameworkAutoload(): void {
         spl_autoload_register(static function (string $class): void {
             if (!str_starts_with($class, 'Scf\\')) {
@@ -71,6 +87,11 @@ class DirectAppServerBootstrap {
         });
     }
 
+    /**
+     * 解析命令行参数与选项。
+     *
+     * 返回值结构与 CliBootstrap 保持一致，便于复用同一套参数约定。
+     */
     protected static function parseArgs(array $argv): array {
         $args = [];
         $opts = [];

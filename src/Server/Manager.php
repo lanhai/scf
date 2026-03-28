@@ -107,10 +107,6 @@ class Manager extends Component {
             return 0;
         }
         $serverConfig = Config::server();
-        $mode = strtolower(trim((string)($serverConfig['gateway_traffic_mode'] ?? 'nginx')));
-        if (!in_array($mode, ['tcp', 'nginx'], true)) {
-            return $businessPort;
-        }
         $configPort = (int)($serverConfig['port'] ?? $businessPort);
         $configuredControlPort = (int)($serverConfig['gateway_control_port'] ?? 0);
         if ($configuredControlPort > 0) {

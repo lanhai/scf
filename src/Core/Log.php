@@ -598,9 +598,28 @@ class Log extends Component {
     protected function countFileLines($file): int {
         $line = 0; //初始化行数
         if (file_exists($file)) {
-            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
-            $arr = explode(' ', $output);
-            $line = (int)$arr[0];
+            // Log 组件既会跑在 Swoole worker 协程里，也会跑在 Linux cron 这种普通 CLI 进程里。
+            // `System::exec()` 只能在协程上下文调用，因此这里需要给一次性任务保留非协程兜底路径。
+            if (class_exists(\Swoole\Coroutine::class) && \Swoole\Coroutine::getCid() > 0) {
+                $result = System::exec("wc -l " . escapeshellarg($file));
+                if ($result !== false) {
+                    $output = trim((string)($result['output'] ?? ''));
+                    $arr = preg_split('/\s+/', $output);
+                    $line = (int)($arr[0] ?? 0);
+                    return $line;
+                }
+            }
+
+            $handler = @fopen($file, 'rb');
+            if (is_resource($handler)) {
+                while (!feof($handler)) {
+                    $chunk = fgets($handler);
+                    if ($chunk !== false) {
+                        $line++;
+                    }
+                }
+                fclose($handler);
+            }
         }
         return $line;
     }

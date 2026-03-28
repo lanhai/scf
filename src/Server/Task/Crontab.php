@@ -15,6 +15,7 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
+use Swoole\Event;
 use Swoole\Timer;
 use Throwable;
 
@@ -100,6 +101,16 @@ class Crontab extends Struct {
      * @default int:0
      */
     public ?int $latest_alive;
+    /**
+     * 任务子进程是否已进入退出收口态。
+     *
+     * Crontab 子进程内部大量依赖 Timer / Coroutine 维持生命周期。
+     * 如果孤儿检测只返回 false 而不主动结束事件循环，Swoole 会在脚本 shutdown
+     * 时兜底执行 Event::wait()，从而触发 deprecated warning。
+     *
+     * @var bool
+     */
+    protected bool $shuttingDown = false;
 
     /**
      * 执行一次
@@ -144,10 +155,14 @@ class Crontab extends Struct {
         //内存占用统计
         MemoryMonitor::start('crontab:' . $this->name);
         //迭代检查计时器
-        Timer::tick(5000, function () {
+        // 长定时任务可能挂着数小时后的 Timer::after。manager 切代后，如果这里只每 5 秒
+        // 才巡检一次孤儿状态，任务子进程会在短窗口里带着事件循环进入 shutdown，
+        // 从而触发 Swoole 在 rshutdown 中兜底 Event::wait() 的 deprecated warning。
+        Timer::tick(1000, function () {
             if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
-                MemoryMonitor::stop();
-                Timer::clearAll();
+                // manager 已经切代时，任务子进程必须自己结束事件循环，
+                // 不能只留给 Swoole 在 shutdown hook 里兜底 wait。
+                $this->shutdownRuntime();
                 return;
             }
             if ($this->pid <= 0) {
@@ -259,6 +274,7 @@ class Crontab extends Struct {
     public function isAlive(int $version = 1): bool {
         if ($this->isOrphan() || $version !== $this->running_version) {
             $this->log("孤儿进程,已取消执行");
+            $this->shutdownRuntime();
             return false;
         }
         $this->latest_alive = time();
@@ -494,6 +510,28 @@ class Crontab extends Struct {
 
     public function requestCancel(): void {
         $this->cancelFlag = true;
+    }
+
+    /**
+     * 结束当前任务子进程的运行时事件循环。
+     *
+     * 定时 / 循环 crontab 依赖 Timer 和 Coroutine 持续驻留。如果只靠 return 结束当前
+     * callback，事件循环仍然会存活到脚本 shutdown，Swoole 会触发 rshutdown 中的
+     * Event::wait() 兜底逻辑并打印 deprecated warning。这里统一显式清理运行时。
+     *
+     * @return void
+     */
+    protected function shutdownRuntime(): void {
+        if ($this->shuttingDown) {
+            return;
+        }
+        $this->shuttingDown = true;
+        $this->cancelFlag = true;
+        $this->timer and Timer::clear($this->timer);
+        $this->timer = 0;
+        Timer::clearAll();
+        MemoryMonitor::stop();
+        Event::exit();
     }
 
     /**

@@ -2,11 +2,10 @@
 
 namespace Scf\Server\Proxy;
 
-use Scf\App\Updater;
+use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
-use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Result;
@@ -21,7 +20,9 @@ use Scf\Helper\StringHelper;
 use Scf\Mode\Web\App as WebApp;
 use Scf\Mode\Web\Request as WebRequest;
 use Scf\Mode\Web\Response as WebResponse;
+use Scf\Root;
 use Scf\Server\DashboardAuth;
+use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Manager;
 use Scf\Server\SubProcessManager;
 use Scf\Server\Proxy\ConsoleRelay;
@@ -31,23 +32,41 @@ use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Coroutine\Client as TcpClient;
+use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
+use Swoole\Process;
 use Swoole\Timer;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
 use Swoole\Exception as SwooleException;
 use Throwable;
 
+/**
+ * Gateway 是 proxy 模式下的总控节点。
+ *
+ * 它本身不承载业务 worker，而是负责：
+ * - 暴露控制面 HTTP/WS 与 dashboard API；
+ * - 托管 redisQueue / watcher / upstream 协调器等 gateway 子进程；
+ * - 管理 managed upstream 的启动、切流、回滚、自愈与回收；
+ * - 聚合集群节点和业务实例状态，提供给 dashboard 展示。
+ *
+ * 设计上刻意把“控制面”和“业务面”拆开：gateway 只负责调度与观测，
+ * 真正承载业务请求的仍然是 upstream。
+ */
 class GatewayServer {
     protected const ROLLING_DRAIN_GRACE_SECONDS = 30;
+    protected const ROLLING_CUTOVER_VERIFY_TIMEOUT_SECONDS = 8;
+    protected const ROLLING_CUTOVER_STABLE_CHECKS = 3;
     protected const INTERNAL_UPSTREAM_STATUS_PATH = '/_gateway/internal/upstream/status';
     protected const INTERNAL_UPSTREAM_HEALTH_PATH = '/_gateway/internal/upstream/health';
+    protected const INTERNAL_UPSTREAM_HTTP_PROBE_PATH = '/_gateway/internal/upstream/http_probe';
     protected const ACTIVE_UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS = 5;
     protected const ACTIVE_UPSTREAM_HEALTH_FAILURE_THRESHOLD = 3;
     protected const ACTIVE_UPSTREAM_HEALTH_COOLDOWN_SECONDS = 60;
     protected const ACTIVE_UPSTREAM_HEALTH_STARTUP_GRACE_SECONDS = 20;
+    protected const ACTIVE_UPSTREAM_HEALTH_ROLLING_COOLDOWN_SECONDS = 15;
     protected const UPSTREAM_SUPERVISOR_SYNC_INTERVAL_SECONDS = 15;
     protected const DASHBOARD_VERSION_CACHE_TTL_SECONDS = 30;
     protected const FRAMEWORK_VERSION_CACHE_TTL_SECONDS = 30;
@@ -58,37 +77,53 @@ class GatewayServer {
     protected array $bootstrappedManagedInstances = [];
     protected ?bool $lastConsoleSubscriptionState = null;
     protected ?UpstreamSupervisor $upstreamSupervisor = null;
-    protected mixed $masterGatewaySocket = null;
     protected int $rpcPort = 0;
     protected int $startedAt;
     protected int $serverMasterPid = 0;
     protected int $serverManagerPid = 0;
-    protected bool $clusterControlStarted = false;
-    protected bool $installWatcherStarted = false;
-    protected bool $installUpdating = false;
     protected bool $gatewayShutdownScheduled = false;
-    protected ?int $housekeepingTimerId = null;
-    protected ?int $clusterStatusTimerId = null;
+    protected bool $gatewayReloadScheduled = false;
     protected ?SubProcessManager $subProcessManager = null;
     protected ?LocalIpcServer $localIpcServer = null;
     protected array $drainingGenerationWarnState = [];
     protected array $pendingManagedRecycles = [];
     protected array $pendingManagedRecycleWatchers = [];
     protected array $pendingManagedRecycleWarnState = [];
+    protected array $pendingManagedRecycleCompletions = [];
     protected array $managedUpstreamHealthState = [];
     protected bool $managedUpstreamSelfHealing = false;
+    protected bool $managedUpstreamRolling = false;
+    protected string $lastManagedHealthActiveVersion = '';
+    protected int $lastManagedUpstreamRollingAt = 0;
     protected int $lastManagedUpstreamHealthCheckAt = 0;
     protected int $lastManagedUpstreamSelfHealAt = 0;
     protected int $lastUpstreamSupervisorSyncAt = 0;
     protected int $lastObservedUpstreamSupervisorPid = 0;
     protected int $lastObservedUpstreamSupervisorStartedAt = 0;
     protected ?string $pendingUpstreamSupervisorSyncReason = null;
-    protected ?GatewayHttpProxyHandler $httpProxyHandler = null;
     protected ?GatewayTcpRelayHandler $tcpRelayHandler = null;
     protected ?GatewayNginxProxyHandler $nginxProxyHandler = null;
     protected array $dashboardVersionStatusCache = ['expires_at' => 0, 'value' => null];
     protected array $frameworkRemoteVersionCache = ['expires_at' => 0, 'value' => null];
+    protected ?string $lastNginxSyncLogFingerprint = null;
+    protected int $lastNginxSyncLoggedAt = 0;
+    protected bool $preserveManagedUpstreamsOnShutdown = false;
+    protected bool $gatewayShutdownPrepared = false;
 
+    /**
+     * 创建并初始化 gateway 主服务实例。
+     *
+     * @param AppInstanceManager $instanceManager gateway 内存态 registry 管理器
+     * @param string $host gateway 控制面绑定地址
+     * @param int $port gateway 业务入口端口
+     * @param int $workerNum gateway worker 数
+     * @param AppServerLauncher|null $launcher managed upstream 启停器
+     * @param array<int, array<string, mixed>> $managedUpstreamPlans 启动阶段需要托管的业务实例计划
+     * @param int $rpcBindPort gateway RPC 端口
+     * @param int $controlBindPort gateway dashboard/control 端口
+     * @param string $configuredTrafficMode 入口流量模式
+     * @return void
+     */
     public function __construct(
         protected AppInstanceManager $instanceManager,
         protected string $host,
@@ -102,11 +137,21 @@ class GatewayServer {
     ) {
         $this->rpcPort = $rpcBindPort;
         $this->startedAt = time();
-        $this->httpProxyHandler = new GatewayHttpProxyHandler($this, $this->instanceManager);
         $this->tcpRelayHandler = new GatewayTcpRelayHandler($this, $this->instanceManager);
         $this->nginxProxyHandler = new GatewayNginxProxyHandler($this, $this->instanceManager);
     }
 
+    /**
+     * 启动 gateway 主服务。
+     *
+     * 启动顺序比较讲究：先等待旧端口释放，再创建控制面 server，
+     * 再注册 server 托管子进程，最后由 worker#0 仅建立 socket/cluster 入口。
+     * housekeep、安装接管、upstream 状态推进等后台职责统一下沉到 addProcess 子进程。
+     * 与 managed upstream。
+     *
+     * @return void
+     * @throws RuntimeException 当监听端口或附加监听创建失败时抛出
+     */
     public function start(): void {
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
         $this->bootstrapRuntimeState();
@@ -129,12 +174,13 @@ class GatewayServer {
             'log_file' => APP_LOG_PATH . '/gateway.log',
             'pid_file' => $this->pidFile(),
         ]);
-        $this->applyStaticHandlerSettings();
         $this->createBusinessTrafficListener();
-        if ($this->nginxProxyModeEnabled()) {
-            $this->syncNginxProxyTargets('gateway_prestart');
+        $this->warmupNginxRuntimeMeta();
+        if ($this->nginxProxyModeEnabled() && !App::isReady()) {
+            // 只有“应用尚未安装”这个特殊场景，才需要在启动前把业务入口先切到 gateway 控制面。
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
+            $this->syncNginxProxyTargets('install_takeover');
         }
-
         if ($this->rpcPort > 0) {
             $rpcListener = $this->server->listen($this->host, $this->rpcPort, SWOOLE_SOCK_TCP);
             if ($rpcListener === false) {
@@ -157,9 +203,6 @@ class GatewayServer {
         $this->server->on('Start', function (Server $server) {
             $this->serverMasterPid = (int)($server->master_pid ?? 0);
             $this->serverManagerPid = (int)($server->manager_pid ?? 0);
-            if ($this->nginxProxyModeEnabled()) {
-                $this->syncNginxProxyTargets('gateway_startup');
-            }
             $dashboardPort = $this->resolvedDashboardPort();
             if ($dashboardPort > 0) {
                 File::write(SERVER_DASHBOARD_PORT_FILE, (string)$dashboardPort);
@@ -194,29 +237,9 @@ class GatewayServer {
             }
             Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
-            $this->startClusterControlPlane();
-            $tick = function () {
-                if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                    $this->clearHousekeepingTimer();
-                    return;
-                }
-                $this->ensureLocalIpcServerStarted();
-                $this->ensureGatewaySubProcessManagerStarted();
-                $this->ensureInstallWatcher();
-                if (App::isReady()) {
-                    $this->bootstrapManagedUpstreams();
-                }
-                $this->observeUpstreamSupervisorProcess();
-                $this->syncUpstreamSupervisorState();
-                $this->refreshManagedUpstreamRuntimeStates();
-                $this->instanceManager->tick();
-                $this->pollPendingManagedRecycles();
-                $this->maintainManagedUpstreamHealth();
-                $this->warnStuckDrainingManagedUpstreams();
-                $this->cleanupOfflineManagedUpstreams();
-            };
-            $tick();
-            $this->housekeepingTimerId = Timer::tick(1000, $tick);
+        });
+        $this->server->on('PipeMessage', function (Server $server, int $srcWorkerId, mixed $message): void {
+            $this->onPipeMessage($server, $srcWorkerId, $message);
         });
 
         $this->server->on('Request', function (Request $request, Response $response): void {
@@ -237,8 +260,41 @@ class GatewayServer {
         $this->server->on('Close', function (Server $server, int $fd): void {
             $this->onClose($server, $fd);
         });
-        $this->ensureGatewaySubProcessManagerStarted();
+        $this->ensureGatewaySubProcessManagerRegistered();
         $this->server->start();
+    }
+
+    /**
+     * 处理子进程发给 worker 的 IPC 消息。
+     *
+     * gateway worker 只负责 socket 入口与 fd 级推送，cluster/business/health 等
+     * 子进程需要通过 pipe message 通知 worker 完成 dashboard 推送或离线 fd 清理。
+     *
+     * @param Server $server 当前 gateway server
+     * @param int $srcWorkerId 消息来源 worker/process id
+     * @param mixed $message 原始 pipe 消息
+     * @return void
+     */
+    protected function onPipeMessage(Server $server, int $srcWorkerId, mixed $message): void {
+        if (!is_string($message) || !JsonHelper::is($message)) {
+            return;
+        }
+        $payload = JsonHelper::recover($message);
+        $event = (string)($payload['event'] ?? '');
+        switch ($event) {
+            case 'gateway_cluster_tick':
+                $this->refreshLocalGatewayNodeStatus();
+                $this->pruneDisconnectedNodeClients();
+                if ($this->dashboardClients) {
+                    $this->pushDashboardStatus();
+                }
+                break;
+            case 'gateway_control_shutdown':
+                $this->shutdownGateway((bool)($payload['preserve_managed_upstreams'] ?? false));
+                break;
+            default:
+                break;
+        }
     }
 
     protected function onRequest(Request $request, Response $response): void {
@@ -255,125 +311,22 @@ class GatewayServer {
             $this->handleManagementRequest($request, $response);
             return;
         }
-        if ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) {
-            $this->json($response, 404, [
-                'message' => $this->nginxProxyModeEnabled() ? '业务流量已由nginx接管' : '业务流量仅在业务端口开放'
-            ]);
-            return;
-        }
-        if (!App::isReady()) {
-            $response->status(503);
-            $response->header('Content-Type', 'text/html; charset=utf-8');
-            $response->end('应用安装中...');
-            return;
-        }
-        if ($this->shouldRejectNewProxyRequest()) {
-            $this->json($response, 503, [
-                'message' => '服务繁忙',
-                'inflight' => $this->instanceManager->totalProxyHttpRequestCount(),
-                'limit' => $this->proxyMaxInflightRequests(),
-            ]);
-            return;
-        }
-
-        $upstream = $this->instanceManager->pickHttpUpstream($this->resolveAffinityKey($request));
-        if (!$upstream) {
-            $this->json($response, 503, ['message' => '没有可用的业务实例']);
-            return;
-        }
-
-        $attempted = [];
-        $affinityKey = $this->resolveAffinityKey($request);
-        $lastError = null;
-        while ($upstream) {
-            $attempted[] = (string)($upstream['id'] ?? '');
-            try {
-                $this->httpProxyHandler()->proxyHttpRequest($request, $response, $upstream);
-                return;
-            } catch (Throwable $e) {
-                $lastError = $e;
-                if (!$this->httpProxyHandler()->isTransientUpstreamUnavailable($e)) {
-                    break;
-                }
-                $retryUpstream = $this->instanceManager->pickHttpUpstreamExcluding($attempted, $affinityKey);
-                if (!$retryUpstream || (string)($retryUpstream['id'] ?? '') === (string)($upstream['id'] ?? '')) {
-                    break;
-                }
-                Console::warning(
-                    "【Gateway】业务实例切换窗口发生连接拒绝，改投新实例: old="
-                    . $this->managedPlanDescriptor([
-                        'version' => (string)($upstream['version'] ?? ''),
-                        'host' => (string)($upstream['host'] ?? '127.0.0.1'),
-                        'port' => (int)($upstream['port'] ?? 0),
-                        'rpc_port' => (int)($upstream['metadata']['rpc_port'] ?? 0),
-                    ])
-                    . ', new='
-                    . $this->managedPlanDescriptor([
-                        'version' => (string)($retryUpstream['version'] ?? ''),
-                        'host' => (string)($retryUpstream['host'] ?? '127.0.0.1'),
-                        'port' => (int)($retryUpstream['port'] ?? 0),
-                        'rpc_port' => (int)($retryUpstream['metadata']['rpc_port'] ?? 0),
-                    ])
-                );
-                $upstream = $retryUpstream;
-                continue;
+        if ($this->shouldRedirectToInstallFlow($uri)) {
+            $target = '/~/install';
+            $query = (string)($request->server['query_string'] ?? '');
+            if ($query !== '') {
+                $target .= '?' . $query;
             }
+            $response->status(302);
+            $response->header('Location', $target);
+            $response->end();
+            return;
         }
-
-        $message = $this->httpProxyHandler()->isTransientUpstreamUnavailable($lastError) ? '服务不可用' : '代理转发失败';
-        $status = $this->httpProxyHandler()->isTransientUpstreamUnavailable($lastError) ? 503 : 502;
-        $this->json($response, $status, [
-            'message' => $message,
-            'error' => $lastError?->getMessage(),
-            'upstream' => $upstream,
+        $this->json($response, 404, [
+            'message' => $this->nginxProxyModeEnabled()
+                ? '业务流量已由nginx接管'
+                : 'Gateway 不再承接 HTTP 业务流量'
         ]);
-    }
-
-    protected function proxyHttpRequestToUpstream(Request $request, Response $response, array $upstream): void {
-        $this->httpProxyHandler()->proxyHttpRequest($request, $response, $upstream);
-    }
-
-    protected function forwardHttpRequestToUpstream(Request $request, Response $response, array $upstream, Client $client): void {
-        $method = strtoupper($request->server['request_method'] ?? 'GET');
-        if ($this->shouldProxyByDownloadFile($request, $method)) {
-            $this->proxyHttpRequestToUpstreamByDownloadFile($request, $response, $upstream, $client, $method);
-            return;
-        }
-
-        $client->setHeaders($this->buildUpstreamHttpHeaders($request, $upstream));
-        $client->set(['timeout' => $this->proxyHttpTimeout()]);
-        $client->setMethod($method);
-        $body = $this->requestRawBodyForProxy($request, $method);
-        if ($body !== null && $body !== '' && $body !== false) {
-            $client->setData($body);
-        } else {
-            $client->setData('');
-        }
-        $ok = $client->execute($this->buildTargetPath($request));
-        if (!$ok) {
-            throw new RuntimeException($client->errMsg ?: 'execute failed');
-        }
-        $response->status((int)$client->statusCode);
-        foreach ($client->headers ?? [] as $key => $value) {
-            if ($this->shouldSkipResponseHeader($key)) {
-                continue;
-            }
-            $response->header($key, (string)$value);
-        }
-        $this->forwardResponseCookies($response, $client);
-        $response->end((string)$client->body);
-    }
-
-    protected function isTransientUpstreamUnavailable(?Throwable $throwable): bool {
-        if (!$throwable) {
-            return false;
-        }
-        $message = strtolower($throwable->getMessage());
-        return str_contains($message, 'connection refused')
-            || str_contains($message, 'connect failed')
-            || str_contains($message, 'connection reset')
-            || str_contains($message, 'no route to host')
-            || str_contains($message, 'timed out');
     }
 
     protected function onHandshake(Request $request, Response $response): bool {
@@ -391,26 +344,9 @@ class GatewayServer {
             $response->end('forbidden');
             return false;
         }
-        if ($this->tcpRelayModeEnabled()) {
-            $response->status(404);
-            $response->end('业务流量仅在业务端口开放');
-            return false;
-        }
-        if (!App::isReady()) {
-            $response->status(503);
-            $response->end('应用安装中...');
-            return false;
-        }
-
-        $upstream = $this->instanceManager->bindWebsocketUpstream($request->fd, $this->resolveAffinityKey($request));
-        if (!$upstream) {
-            $response->status(503);
-            $response->header('Content-Type', 'application/json;charset=utf-8');
-            $response->end(json_encode(['message' => '没有可用的业务实例'], JSON_UNESCAPED_UNICODE));
-            return false;
-        }
-
-        return $this->httpProxyHandler()->handleWebSocketHandshake($request, $response, $upstream);
+        $response->status(404);
+        $response->end($this->nginxProxyModeEnabled() ? '业务WebSocket已由nginx接管' : 'Gateway 不再承接业务WebSocket流量');
+        return false;
     }
 
     protected function onMessage(Server $server, Frame $frame): void {
@@ -422,14 +358,15 @@ class GatewayServer {
             $this->handleDashboardSocketMessage($server, $frame);
             return;
         }
-        $this->httpProxyHandler()->handleWebSocketMessage($frame);
+        if ($server->exist($frame->fd)) {
+            $server->disconnect($frame->fd);
+        }
     }
 
     protected function onClose(Server $server, int $fd): void {
         unset($this->dashboardClients[$fd]);
         unset($this->nodeClients[$fd]);
         $this->tcpRelayHandler()->handleClose($fd);
-        $this->httpProxyHandler()->handleClientClose($fd);
         $this->removeNodeClient($fd);
         if ($this->dashboardEnabled()) {
             $this->syncConsoleSubscriptionState();
@@ -466,21 +403,11 @@ class GatewayServer {
     }
 
     protected function ensureLocalIpcServerStarted(): void {
-        if ($this->localIpcServer instanceof LocalIpcServer) {
-            return;
-        }
-        $socketPath = LocalIpc::gatewaySocketPath($this->port);
-        $this->localIpcServer = new LocalIpcServer($socketPath, function (array $request): array {
-            return $this->handleLocalIpcRequest($request);
-        }, 'gateway_ipc');
-        $this->localIpcServer->start();
+        // Gateway 本地控制统一走现有内部 HTTP 接口，避免独立 LocalIpcServer 的 accept 协程
+        // 在空闲时触发 "all coroutines are asleep - deadlock"。
     }
 
     protected function stopLocalIpcServer(): void {
-        if (!$this->localIpcServer instanceof LocalIpcServer) {
-            return;
-        }
-        $this->localIpcServer->stop();
         $this->localIpcServer = null;
     }
 
@@ -493,7 +420,7 @@ class GatewayServer {
                 'status' => 200,
                 'data' => [
                     'message' => 'ok',
-                    'active_version' => $this->instanceManager->snapshot()['active_version'] ?? null,
+                    'active_version' => $this->currentGatewayStateSnapshot()['active_version'] ?? null,
                 ],
             ],
             'gateway.console.subscription' => [
@@ -518,6 +445,21 @@ class GatewayServer {
         };
     }
 
+    /**
+     * 返回 gateway 当前可见的最新 upstream 状态快照。
+     *
+     * worker 不再持有 housekeeping 定时器后，任何对外暴露的状态读取都必须先
+     * 从 registry reload，再返回 snapshot，避免读到 worker 私有的旧内存视图。
+     *
+     * @return array<string, mixed>
+     */
+    protected function currentGatewayStateSnapshot(): array {
+        if (App::isReady()) {
+            $this->instanceManager->reload();
+        }
+        return $this->instanceManager->snapshot();
+    }
+
     protected function disconnectAllClients(Server $server): int {
         $startFd = 0;
         $disconnected = 0;
@@ -529,10 +471,8 @@ class GatewayServer {
             foreach ($clients as $fd) {
                 $fd = (int)$fd;
                 $startFd = max($startFd, $fd);
-                $this->instanceManager->releaseWebsocketBinding($fd);
                 unset($this->dashboardClients[$fd], $this->nodeClients[$fd]);
                 $this->tcpRelayHandler()->handleClose($fd);
-                $this->httpProxyHandler()->handleClientClose($fd);
                 if (!$server->exist($fd)) {
                     continue;
                 }
@@ -631,6 +571,14 @@ class GatewayServer {
         });
     }
 
+    /**
+     * 返回 dashboard 视角下的节点列表。
+     *
+     * localhost 始终代表当前 gateway；其余节点来自 cluster 心跳表。
+     *
+     * @param array<int, array<string, mixed>>|null $upstreams 预留的 upstream 快照参数，便于后续扩展聚合来源
+     * @return array<int, array<string, mixed>>
+     */
     public function dashboardNodes(?array $upstreams = null): array {
         $nodes = [];
         $local = ServerNodeStatusTable::instance()->get('localhost');
@@ -654,6 +602,19 @@ class GatewayServer {
         return $nodes;
     }
 
+    /**
+     * 组装 dashboard 首页需要的聚合状态。
+     *
+     * socket_host 不能简单直接使用 Referer：
+     * dev server / 反代场景下，浏览器来源地址与 gateway websocket 地址可能不同，
+     * 这里必须按控制面真实可达地址重新计算。
+     *
+     * @param string $token dashboard websocket 鉴权 token
+     * @param string $host 当前 HTTP Host 头
+     * @param string $referer 前端页面 Referer
+     * @param string $forwardedProto 反向代理传来的协议头
+     * @return array<string, mixed>
+     */
     public function dashboardServerStatus(string $token, string $host = '', string $referer = '', string $forwardedProto = ''): array {
         $upstreams = $this->dashboardUpstreams();
         $status = $this->buildDashboardRealtimeStatus($upstreams);
@@ -664,11 +625,65 @@ class GatewayServer {
         return $status;
     }
 
+    /**
+     * dashboard 的旧排程页在 gateway 模式下不再展示常驻任务。
+     *
+     * Linux 排程已经切换为系统 crontab 托管，因此这里统一返回空列表，
+     * 避免旧页面继续把 gateway 看作 CrontabManager 的宿主。
+     *
+     * @return array<int, array<string, mixed>>
+     */
     public function dashboardCrontabs(): array {
-        $node = $this->buildGatewayNode();
-        return (array)($node['tasks'] ?? []);
+        return [];
     }
 
+    /**
+     * 将当前 Linux 排程配置广播到所有在线 slave 节点。
+     *
+     * slave 收到后会写入本地 `db/crontabs_slave.json` 并按自身 env/role
+     * 重新同步系统 crontab。这里采用异步广播，结果以后续心跳与节点排程视图为准。
+     *
+     * @return array<string, int>
+     */
+    public function replicateLinuxCrontabConfigToSlaveNodes(): array {
+        $targets = $this->connectedSlaveHosts();
+        if (!$targets) {
+            return [
+                'target_count' => 0,
+                'accepted_count' => 0,
+            ];
+        }
+
+        // slave 节点只需要维护属于自己角色的 Linux 排程定义。
+        // 这样既能减少不必要的配置噪音，也能降低本机联调时 master/slave
+        // 共用同一系统用户 crontab 带来的互相覆盖风险。
+        $payload = (new LinuxCrontabManager())->replicationPayload(NODE_ROLE_SLAVE);
+        $accepted = $this->sendCommandToAllNodeClients('linux_crontab_sync', [
+            'config' => $payload,
+        ]);
+
+        Console::info("【LinuxCrontab】已广播排程配置到 slave 节点: accepted={$accepted}, targets=" . count($targets), false);
+
+        return [
+            'target_count' => count($targets),
+            'accepted_count' => $accepted,
+        ];
+    }
+
+    /**
+     * dashboard 命令统一入口。
+     *
+     * host 可能代表：
+     * - 当前 gateway；
+     * - cluster 内其他 gateway；
+     * - 某个业务 upstream；
+     * 因此这里先归一化 host，再决定走本地执行、节点转发还是直接操作业务实例。
+     *
+     * @param string $command dashboard 下发的命令名
+     * @param string $host 命令目标，可是 gateway 节点也可是 upstream host
+     * @param array<string, mixed> $params 附带参数
+     * @return Result
+     */
     public function dashboardCommand(string $command, string $host, array $params = []): Result {
         Console::info("【Gateway】Dashboard命令: {$command}, host={$host}" . $this->formatDashboardParamsLog($params));
         $resolvedNodeHost = $this->resolveGatewayCommandNodeHost($host);
@@ -694,6 +709,12 @@ class GatewayServer {
         return $result;
     }
 
+    /**
+     * 判断 dashboard 命令中的 host 是否指向当前 gateway。
+     *
+     * @param string $host dashboard 上传入的 host
+     * @return bool
+     */
     protected function isLocalGatewayHost(string $host): bool {
         $host = trim($host);
         if ($host === '') {
@@ -702,6 +723,12 @@ class GatewayServer {
         return in_array($host, ['localhost', '127.0.0.1'], true);
     }
 
+    /**
+     * 将 dashboard 里的 host 解析成 cluster 内部使用的节点标识。
+     *
+     * @param string $host dashboard 传入的 host / ip / localhost
+     * @return string|null 返回 localhost 或标准化后的 slave host，无法识别时返回 null
+     */
     protected function resolveGatewayCommandNodeHost(string $host): ?string {
         $host = trim($host);
         if ($host === '') {
@@ -724,22 +751,39 @@ class GatewayServer {
         return null;
     }
 
+    /**
+     * 执行发往当前 gateway 的本地命令。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @return Result
+     */
     protected function dispatchLocalGatewayCommand(string $command, array $params = []): Result {
         switch ($command) {
             case 'reload':
-                Timer::after(1, function () {
-                    $this->restartGatewayBusinessPlane();
-                });
-                return Result::success('业务实例与业务子进程已开始重启');
+                return $this->dispatchGatewayBusinessCommand('reload', [], false, 0, '业务实例与业务子进程已开始重启');
+            case 'reload_gateway':
+                $reservation = $this->reserveGatewayReload();
+                if (!$reservation['accepted']) {
+                    return Result::error($reservation['message']);
+                }
+                if ($reservation['scheduled']) {
+                    $this->scheduleReservedGatewayReload((bool)$reservation['restart_managed_upstreams']);
+                }
+                return Result::success($reservation['message']);
+            case 'restart_crontab':
+                return Result::error('Gateway 已不再托管 Crontab 子进程，请改用 Linux 排程页面管理系统 crontab');
+            case 'restart_redisqueue':
+                if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
+                    return Result::error('RedisQueue 子进程未启用');
+                }
+                $this->restartGatewayRedisQueueProcess();
+                return Result::success('RedisQueue 子进程已开始重启');
             case 'restart':
-                Timer::after(1, function () {
-                    $this->shutdownGateway();
-                });
+                $this->scheduleGatewayShutdown(true);
                 return Result::success('Gateway 已开始重启');
             case 'shutdown':
-                Timer::after(1, function () {
-                    $this->shutdownGateway();
-                });
+                $this->scheduleGatewayShutdown();
                 return Result::success('Gateway 已开始关闭');
             case 'appoint_update':
                 return $this->dashboardUpdate((string)($params['type'] ?? ''), (string)($params['version'] ?? ''));
@@ -748,6 +792,237 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 生成 gateway 业务编排命令结果在 Runtime 中的存储 key。
+     *
+     * worker 只负责把命令投递给业务编排子进程，真实执行结果由子进程写回共享内存；
+     * dashboard、本地 IPC、节点转发都通过同一条 key 读取执行结果。
+     *
+     * @param string $requestId 命令请求 id
+     * @return string
+     */
+    protected function gatewayBusinessCommandResultKey(string $requestId): string {
+        return 'gateway_business_command_result:' . $requestId;
+    }
+
+    /**
+     * 生成 UpstreamSupervisor 命令结果在 Runtime 中的存储 key。
+     *
+     * 安装等“由 upstream 管理子进程执行、但需要同步返回 HTTP 结果”的场景，
+     * 统一通过 request_id + Runtime 的方式回传，worker 自身不直接执行安装流程。
+     *
+     * @param string $requestId 命令请求 id
+     * @return string
+     */
+    protected function upstreamSupervisorCommandResultKey(string $requestId): string {
+        return 'upstream_supervisor:' . md5($requestId);
+    }
+
+    /**
+     * 等待 UpstreamSupervisor 返回命令执行结果。
+     *
+     * @param string $requestId 命令请求 id
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return Result
+     */
+    protected function waitForUpstreamSupervisorCommandResult(string $requestId, int $timeoutSeconds = 120): Result {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $resultKey = $this->upstreamSupervisorCommandResultKey($requestId);
+        while (microtime(true) < $deadline) {
+            $payload = Runtime::instance()->get($resultKey);
+            if (is_array($payload) && array_key_exists('ok', $payload)) {
+                Runtime::instance()->delete($resultKey);
+                $message = (string)($payload['message'] ?? ($payload['ok'] ? 'success' : 'failed'));
+                $data = (array)($payload['data'] ?? []);
+                return !empty($payload['ok'])
+                    ? Result::success($data ?: $message)
+                    : Result::error($message, 'SERVICE_ERROR', $data);
+            }
+            usleep(100000);
+        }
+        Runtime::instance()->delete($resultKey);
+        return Result::error('UpstreamSupervisor 执行超时');
+    }
+
+    /**
+     * 向 UpstreamSupervisor 投递命令。
+     *
+     * worker 只负责校验参数、投递安装/拉起类命令并等待结果；真正执行安装、
+     * 下载更新包和拉起业务实例的动作都放在 UpstreamSupervisor 子进程内完成。
+     *
+     * @param string $action 命令动作
+     * @param array<string, mixed> $params 命令参数
+     * @param bool $waitForResult 是否等待执行结果
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return Result
+     */
+    protected function dispatchUpstreamSupervisorCommand(
+        string $action,
+        array $params = [],
+        bool $waitForResult = false,
+        int $timeoutSeconds = 120
+    ): Result {
+        if (!$this->upstreamSupervisor) {
+            return Result::error('UpstreamSupervisor 未启用');
+        }
+        $payload = ['action' => $action] + $params;
+        if (!$waitForResult) {
+            return $this->upstreamSupervisor->sendCommand($payload)
+                ? Result::success('accepted')
+                : Result::error('命令投递失败');
+        }
+        $requestId = uniqid('upstream_supervisor_', true);
+        Runtime::instance()->delete($this->upstreamSupervisorCommandResultKey($requestId));
+        $payload['request_id'] = $requestId;
+        if (!$this->upstreamSupervisor->sendCommand($payload)) {
+            Runtime::instance()->delete($this->upstreamSupervisorCommandResultKey($requestId));
+            return Result::error('命令投递失败');
+        }
+        return $this->waitForUpstreamSupervisorCommandResult($requestId, $timeoutSeconds);
+    }
+
+    /**
+     * 等待 gateway 业务编排子进程返回执行结果。
+     *
+     * 这里只有“命令分发成功但结果稍后回传”的场景，因此 worker 需要在共享内存上
+     * 轮询 request_id 对应的结果，而不是直接在 server 进程里执行编排逻辑。
+     *
+     * @param string $requestId 命令请求 id
+     * @param int $timeoutSeconds 最长等待时间
+     * @return Result
+     */
+    protected function waitForGatewayBusinessCommandResult(string $requestId, int $timeoutSeconds = 30): Result {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+        while (microtime(true) < $deadline) {
+            $payload = Runtime::instance()->get($resultKey);
+            if (is_array($payload) && array_key_exists('ok', $payload)) {
+                Runtime::instance()->delete($resultKey);
+                $message = (string)($payload['message'] ?? ($payload['ok'] ? 'success' : 'failed'));
+                $data = (array)($payload['data'] ?? []);
+                return !empty($payload['ok'])
+                    ? Result::success($data ?: $message)
+                    : Result::error($message, 'SERVICE_ERROR', $data);
+            }
+            usleep(100000);
+        }
+        Runtime::instance()->delete($resultKey);
+        return Result::error('Gateway 业务编排子进程执行超时');
+    }
+
+    /**
+     * 向 gateway 业务编排子进程投递命令。
+     *
+     * worker 不再直接承担 bootstrap / rolling / 本地业务进程重启等职责，
+     * 而是只做入口与 IPC 转发。需要同步结果时，通过 request_id 在 Runtime 上等待。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @param bool $waitForResult 是否等待子进程结果
+     * @param int $timeoutSeconds 最长等待秒数
+     * @param string|null $acceptedMessage 异步接受时返回给调用方的提示语
+     * @return Result
+     */
+    protected function dispatchGatewayBusinessCommand(
+        string $command,
+        array $params = [],
+        bool $waitForResult = false,
+        int $timeoutSeconds = 30,
+        ?string $acceptedMessage = null
+    ): Result {
+        if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('GatewayBusinessCoordinator')) {
+            return Result::error('Gateway 业务编排子进程未启用');
+        }
+        $requestId = '';
+        if ($waitForResult) {
+            $requestId = uniqid('gateway_business_', true);
+            Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
+            $params['request_id'] = $requestId;
+        }
+        $this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator']);
+        if (!$waitForResult) {
+            return Result::success($acceptedMessage ?: 'accepted');
+        }
+        return $this->waitForGatewayBusinessCommandResult($requestId, $timeoutSeconds);
+    }
+
+    /**
+     * 在业务编排子进程里执行一条本地控制命令。
+     *
+     * 这里承接的是 gateway 本机的业务编排职责，因此实现中不能依赖 dashboard fd、
+     * websocket 推送或 cluster 节点连接，只返回纯命令执行结果给 worker 汇总。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @return array<string, mixed>
+     */
+    protected function handleGatewayBusinessCommand(string $command, array $params = []): array {
+        return match ($command) {
+            'reload' => [
+                'ok' => true,
+                'message' => 'gateway business reload started',
+                'data' => $this->restartGatewayBusinessPlane(false),
+            ],
+            'appoint_update' => $this->buildGatewayBusinessCommandResult(
+                $this->executeLocalDashboardUpdate(
+                    (string)($params['task_id'] ?? ''),
+                    (string)($params['type'] ?? ''),
+                    (string)($params['version'] ?? '')
+                )
+            ),
+            default => [
+                'ok' => false,
+                'message' => '暂不支持的业务编排命令:' . $command,
+                'data' => [],
+            ],
+        };
+    }
+
+    /**
+     * 将 Result 标准化成业务编排子进程回传格式。
+     *
+     * @param Result $result 执行结果
+     * @return array<string, mixed>
+     */
+    protected function buildGatewayBusinessCommandResult(Result $result): array {
+        return [
+            'ok' => !$result->hasError(),
+            'message' => (string)$result->getMessage(),
+            'data' => (array)($result->getData() ?: []),
+        ];
+    }
+
+    /**
+     * 通过 UpstreamSupervisor 执行安装流程。
+     *
+     * gateway worker 只负责接收 dashboard 或主节点转发过来的安装请求，
+     * 然后把安装秘钥和目标角色通过 IPC 转给 UpstreamSupervisor。安装完成后，
+     * UpstreamSupervisor 会继续下载业务包并尝试拉起业务实例，worker 只负责回包。
+     *
+     * @param string $key 安装秘钥
+     * @param string $role 安装角色，master/slave
+     * @return Result
+     */
+    public function dashboardInstall(string $key, string $role = 'master'): Result {
+        $key = trim($key);
+        $role = trim($role) ?: 'master';
+        if ($key === '') {
+            return Result::error('安装秘钥不能为空');
+        }
+        return $this->dispatchUpstreamSupervisorCommand('install', [
+            'key' => $key,
+            'role' => $role,
+            'plans' => $this->managedUpstreamPlans,
+        ], true, 300);
+    }
+
+    /**
+     * 执行 dashboard 发起的版本升级流程。
+     *
+     * @param string $type 升级类型，例如 app/framework/public
+     * @param string $version 目标版本号
+     * @return Result
+     */
     public function dashboardUpdate(string $type, string $version): Result {
         $type = trim($type);
         $version = trim($version);
@@ -769,27 +1044,23 @@ class GatewayServer {
         }
 
         $this->logUpdateStage($taskId, $type, $version, 'apply_local_package');
-        if (!App::appointUpdateTo($type, $version, false)) {
-            $error = App::getLastUpdateError() ?: '更新失败';
+        $localResult = $this->dispatchGatewayBusinessCommand('appoint_update', [
+            'task_id' => $taskId,
+            'type' => $type,
+            'version' => $version,
+        ], true, 300);
+        $localData = (array)($localResult->getData() ?: []);
+        if ($localResult->hasError() && !$localData) {
+            $error = (string)($localResult->getMessage() ?: '更新失败');
+            $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
             Console::error("【Gateway】升级失败: type={$type}, version={$version}, error={$error}");
             return Result::error($error);
         }
-
-        $restartSummary = [
+        $restartSummary = (array)($localData['restart_summary'] ?? [
             'success_count' => 0,
             'failed_nodes' => [],
-        ];
-
-        if ($type !== 'public') {
-            $this->logUpdateStage($taskId, $type, $version, 'rolling_upstreams');
-            $restartSummary = $this->rollingUpdateManagedUpstreams($type, $version);
-        }
-
-        if ($type !== 'public' && $restartSummary['success_count'] > 0 && !$restartSummary['failed_nodes']) {
-            Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
-        }
-
-        if (in_array($type, ['app', 'framework'], true) && !$restartSummary['failed_nodes']) {
+        ]);
+        if (!empty($localData['iterate_business_processes']) && !$localResult->hasError()) {
             $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
             $this->iterateGatewayBusinessProcesses();
         }
@@ -797,13 +1068,10 @@ class GatewayServer {
         $this->logUpdateStage($taskId, $type, $version, 'wait_cluster_result');
         $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, 300);
         $pendingHosts = [];
-        $masterState = 'success';
-        $masterError = '';
+        $masterState = (string)($localData['master']['state'] ?? ($localResult->hasError() ? 'failed' : 'success'));
+        $masterError = (string)($localData['master']['error'] ?? ($localResult->hasError() ? (string)$localResult->getMessage() : ''));
         $totalNodes = max(1, count($slaveHosts) + 1);
-
-        if ($type === 'framework') {
-            $masterState = 'pending';
-            $masterError = 'Gateway 需重启后才会加载新框架版本';
+        if ($masterState === 'pending') {
             $pendingHosts[] = SERVER_HOST;
         }
 
@@ -842,6 +1110,129 @@ class GatewayServer {
         return Result::success($payload);
     }
 
+    /**
+     * 在业务编排子进程里执行本地升级。
+     *
+     * 这里不负责 dashboard 节点广播，也不直接碰 websocket/fd，只做：
+     * 1. 本地包替换；
+     * 2. managed upstream rolling update；
+     * 3. 给 worker 返回“是否需要迭代 gateway 业务子进程”的信号；
+     * 4. 返回给 worker 汇总的本地结果。
+     *
+     * @param string $taskId 升级任务 id
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @return Result
+     */
+    protected function executeLocalDashboardUpdate(string $taskId, string $type, string $version): Result {
+        $type = trim($type);
+        $version = trim($version);
+        if ($type === '' || $version === '') {
+            return Result::error('更新类型和版本号不能为空');
+        }
+        $taskId !== '' && $this->logUpdateStage($taskId, $type, $version, 'apply_local_package');
+        if (!App::appointUpdateTo($type, $version, false)) {
+            $error = App::getLastUpdateError() ?: '更新失败';
+            return Result::error($error, 'SERVICE_ERROR', [
+                'restart_summary' => [
+                    'success_count' => 0,
+                    'failed_nodes' => [],
+                ],
+                'master' => [
+                    'host' => SERVER_HOST,
+                    'state' => 'failed',
+                    'error' => $error,
+                ],
+            ]);
+        }
+
+        $restartSummary = [
+            'success_count' => 0,
+            'failed_nodes' => [],
+        ];
+        if ($type !== 'public') {
+            $taskId !== '' && $this->logUpdateStage($taskId, $type, $version, 'rolling_upstreams');
+            $restartSummary = $this->rollingUpdateManagedUpstreams($type, $version);
+        }
+        if ($type !== 'public' && $restartSummary['success_count'] > 0 && !$restartSummary['failed_nodes']) {
+            Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
+        }
+        $iterateBusinessProcesses = in_array($type, ['app', 'framework'], true) && !$restartSummary['failed_nodes'];
+
+        $master = [
+            'host' => SERVER_HOST,
+            'state' => $type === 'framework' ? 'pending' : ($restartSummary['failed_nodes'] ? 'failed' : 'success'),
+            'error' => $type === 'framework'
+                ? 'Gateway 需重启后才会加载新框架版本'
+                : ($restartSummary['failed_nodes'] ? '部分业务实例升级失败' : ''),
+        ];
+        $payload = [
+            'restart_summary' => $restartSummary,
+            'master' => $master,
+            'iterate_business_processes' => $iterateBusinessProcesses,
+        ];
+        if ($restartSummary['failed_nodes']) {
+            return Result::error('部分业务实例升级失败', 'SERVICE_ERROR', $payload);
+        }
+        return Result::success($payload);
+    }
+
+    /**
+     * 执行 gateway 业务编排周期任务。
+     *
+     * 当前这层只负责 managed upstream bootstrap，worker 不再直接推进这部分状态机。
+     *
+     * @return void
+     */
+    protected function runGatewayBusinessCoordinatorTick(): void {
+        if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+            return;
+        }
+
+        // 业务编排子进程统一推进 gateway 的后台状态机，worker 只保留 socket 入口。
+        if (!App::isReady()) {
+            $this->refreshGatewayInstallTakeover();
+            return;
+        }
+        if (App::isReady()) {
+            // coordinator 在子进程内持续推进 registry / recycle 状态机，
+            // 每轮先 reload，避免长生命周期子进程持有旧的 generation 视图。
+            $this->instanceManager->reload();
+        }
+        $this->observeUpstreamSupervisorProcess();
+        $this->syncUpstreamSupervisorState();
+        $this->refreshManagedUpstreamRuntimeStates();
+        $this->instanceManager->tick();
+        $this->pollPendingManagedRecycles();
+        $this->warnStuckDrainingManagedUpstreams();
+        $this->cleanupOfflineManagedUpstreams();
+        if (App::isReady()) {
+            $this->bootstrapManagedUpstreams();
+            $this->refreshGatewayInstallTakeover();
+        }
+    }
+
+    /**
+     * 执行 gateway 健康检查周期任务。
+     *
+     * active upstream 的健康探测与自愈统一下沉到单独健康子进程，worker 只保留入口职责。
+     *
+     * @return void
+     */
+    protected function runGatewayHealthMonitorTick(): void {
+        $this->maintainManagedUpstreamHealth();
+    }
+
+    /**
+     * 统一记录升级状态机日志，方便 dashboard 和终端串联阶段。
+     *
+     * @param string $taskId 升级任务 id
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @param string $stage 当前状态机阶段
+     * @param array<string, mixed> $extra 额外调试字段
+     * @return void
+     */
     protected function logUpdateStage(string $taskId, string $type, string $version, string $stage, array $extra = []): void {
         $parts = [
             "task={$taskId}",
@@ -855,20 +1246,83 @@ class GatewayServer {
         Console::info('【Gateway】升级状态机: ' . implode(', ', $parts));
     }
 
+    /**
+     * 在升级 app/framework 后，单独迭代 gateway 托管的业务子进程。
+     *
+     * @return void
+     */
     protected function iterateGatewayBusinessProcesses(): void {
-        if (!$this->subProcessManager || (!$this->subProcessManager->hasProcess('CrontabManager') && !$this->subProcessManager->hasProcess('RedisQueue'))) {
+        $processNames = $this->managedGatewayBusinessProcessNames();
+        if (!$processNames) {
             return;
         }
-        Console::info('【Gateway】开始迭代业务子进程: CrontabManager, RedisQueue');
+        Console::info('【Gateway】开始迭代业务子进程: ' . implode(', ', $processNames));
         $this->subProcessManager->iterateBusinessProcesses();
     }
 
-    protected function restartGatewayBusinessPlane(): array {
+    /**
+     * 返回当前 gateway 仍由 SubProcessManager 托管的业务型子进程。
+     *
+     * 常驻 crontab 已经迁移到 Linux 系统排程统一托管，因此这里刻意不再
+     * 暴露 `CrontabManager`，避免 gateway 在升级、重载或 dashboard 命令里
+     * 继续把它当成受控业务子进程处理。
+     *
+     * @return array<int, string>
+     */
+    protected function managedGatewayBusinessProcessNames(): array {
+        if (!$this->subProcessManager) {
+            return [];
+        }
+
+        $processNames = [];
+        if ($this->subProcessManager->hasProcess('RedisQueue')) {
+            $processNames[] = 'RedisQueue';
+        }
+        return $processNames;
+    }
+
+    /**
+     * 单独重启 gateway 下的 CrontabManager。
+     *
+     * @return bool 是否成功发起重启
+     */
+    protected function restartGatewayCrontabProcess(): bool {
+        Console::warning('【Gateway】Crontab 子进程已下线，改由 Linux 系统排程托管');
+        return true;
+    }
+
+    /**
+     * 单独重启 gateway 下的 RedisQueue 管理进程。
+     *
+     * @return bool 是否成功发起重启
+     */
+    protected function restartGatewayRedisQueueProcess(): bool {
+        if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
+            Console::warning('【Gateway】RedisQueue 子进程未启用，跳过重启');
+            return false;
+        }
+        Console::info('【Gateway】开始重启 RedisQueue 子进程');
+        $this->subProcessManager->iterateRedisQueueProcess();
+        $this->pushDashboardStatus();
+        return true;
+    }
+
+    /**
+     * 重启业务平面，只滚动 managed upstream，不触碰 gateway 自身。
+     *
+     * worker 场景下会顺带刷新 dashboard；业务编排子进程调用时必须关闭这类
+     * server fd 相关副作用，只保留纯编排逻辑。
+     *
+     * @param bool $emitDashboardStatus 是否推送 dashboard 状态
+     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     */
+    protected function restartGatewayBusinessPlane(bool $emitDashboardStatus = true): array {
         Console::info('【Gateway】开始重启业务平面');
         Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
-        $this->iterateGatewayBusinessProcesses();
         $summary = $this->restartManagedUpstreams();
-        $this->pushDashboardStatus();
+        if ($emitDashboardStatus) {
+            $this->pushDashboardStatus();
+        }
         if ($summary['failed_nodes']) {
             Console::warning("【Gateway】业务平面重启存在失败: success={$summary['success_count']}, failed=" . count($summary['failed_nodes']));
         } else {
@@ -900,6 +1354,20 @@ class GatewayServer {
                 $host = (string)($data['data']['host'] ?? '');
                 $status = (array)($data['data']['status'] ?? []);
                 if ($host !== '' && $status) {
+                    $previousStatus = (array)(ServerNodeStatusTable::instance()->get($host) ?: []);
+
+                    // Linux 排程的最近同步状态由独立 socket 事件即时回传，
+                    // 普通节点心跳不能把这段运行态覆盖掉，否则 dashboard
+                    // 刷新后会出现“已安装/已启用，但最近同步又变成空”的假象。
+                    if (!isset($status['linux_crontab_sync']) && isset($previousStatus['linux_crontab_sync'])) {
+                        $status['linux_crontab_sync'] = $previousStatus['linux_crontab_sync'];
+                    }
+
+                    // 兼容旧版 slave 心跳还没稳定带 env 的情况，避免节点弹窗里环境列反复掉成空值。
+                    if (empty($status['env']) && !empty($previousStatus['env'])) {
+                        $status['env'] = $previousStatus['env'];
+                    }
+
                     ServerNodeStatusTable::instance()->set($host, $status);
                 }
                 if ($server->isEstablished($frame->fd)) {
@@ -917,6 +1385,10 @@ class GatewayServer {
                     Console::info((string)$payload['message'], false);
                 }
                 break;
+            case 'linux_crontab_sync_state':
+                $payload = (array)($data['data'] ?? []);
+                $this->acceptLinuxCrontabSyncState($payload);
+                break;
             case 'console_log':
                 $this->acceptConsolePayload((array)($data['data'] ?? []));
                 break;
@@ -925,218 +1397,105 @@ class GatewayServer {
         }
     }
 
-    protected function startClusterControlPlane(): void {
-        if ($this->clusterControlStarted) {
-            return;
-        }
-        $this->clusterControlStarted = true;
-
-        if ($this->dashboardEnabled()) {
-            $this->refreshLocalGatewayNodeStatus();
-            $this->clusterStatusTimerId = Timer::tick(5000, function () {
-                $this->pruneDisconnectedNodeClients();
-                if ($this->dashboardClients) {
-                    $this->pushDashboardStatus();
-                }
-            });
-            return;
-        }
-
-        Coroutine::create(function () {
-            $this->runSlaveGatewayBridge();
-        });
-    }
-
-    protected function runSlaveGatewayBridge(): void {
-        while (true) {
-            if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                $this->masterGatewaySocket = null;
-                return;
-            }
-            try {
-                $socket = Manager::instance()->getMasterSocketConnection();
-                if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                    try {
-                        $socket->close();
-                    } catch (Throwable) {
-                    }
-                    $this->masterGatewaySocket = null;
-                    return;
-                }
-                $this->masterGatewaySocket = $socket;
-                $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => [
-                    'host' => APP_NODE_ID,
-                    'ip' => SERVER_HOST,
-                    'role' => SERVER_ROLE,
-                ]]));
-                $sendHeartbeat = function () use ($socket): void {
-                    $socket->push(JsonHelper::toJson(['event' => 'node_heart_beat', 'data' => [
-                        'host' => APP_NODE_ID,
-                        'status' => $this->buildGatewayClusterNode(),
-                    ]]));
-                };
-                $sendHeartbeat();
-                $heartbeatTimerId = Timer::tick(5000, function () use ($sendHeartbeat, $socket) {
-                    try {
-                        $sendHeartbeat();
-                    } catch (Throwable) {
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                    }
-                });
-                while (true) {
-                    if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                        Timer::clear($heartbeatTimerId);
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                        $this->masterGatewaySocket = null;
-                        return;
-                    }
-                    $reply = $socket->recv();
-                    if ($reply === false) {
-                        Timer::clear($heartbeatTimerId);
-                        $socket->close();
-                        $this->masterGatewaySocket = null;
-                        break;
-                    }
-                    if (!$reply || $reply->data === '' || $reply->data === '::pong') {
-                        continue;
-                    }
-                    $this->handleMasterGatewayMessage($socket, (string)$reply->data);
-                }
-            } catch (Throwable $throwable) {
-                $this->masterGatewaySocket = null;
-                if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                    return;
-                }
-                Console::warning("【Gateway】与master gateway连接失败:" . $throwable->getMessage(), false);
-            }
-            if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                return;
-            }
-            Coroutine::sleep(1);
-        }
-    }
-
-    protected function handleMasterGatewayMessage(object $socket, string $payload): void {
-        if (!JsonHelper::is($payload)) {
-            return;
-        }
-        $data = JsonHelper::recover($payload);
-        $event = (string)($data['event'] ?? '');
-        if ($event === 'slave_node_report_response') {
-            Console::success('【Gateway】已与master gateway建立连接,客户端ID:' . ($data['data'] ?? ''), false);
-            return;
-        }
-        if ($event === 'console_subscription') {
-            ConsoleRelay::setRemoteSubscribed((bool)($data['data']['enabled'] ?? false));
-            return;
-        }
-        if ($event === 'console') {
-            return;
-        }
-        if ($event !== 'command') {
+    /**
+     * 接收 slave 回传的 Linux 排程同步状态。
+     *
+     * slave 侧完成配置落地与系统 crontab 同步后，会立即把最新节点状态推回 master。
+     * 这里既要更新节点状态表，也要把最后一次同步结果挂到节点状态上，方便 dashboard
+     * 直接看到这轮配置是否已经在对应节点真正生效。
+     *
+     * @param array<string, mixed> $payload slave 回传的同步结果
+     * @return void
+     */
+    protected function acceptLinuxCrontabSyncState(array $payload): void {
+        $host = (string)($payload['host'] ?? '');
+        if ($host === '') {
             return;
         }
 
-        $command = (string)($data['data']['command'] ?? '');
-        $params = (array)($data['data']['params'] ?? []);
-        switch ($command) {
-            case 'shutdown':
-                Console::warning('【Gateway】收到master关闭指令', false);
-                $this->shutdownGateway();
-                break;
-            case 'reload':
-                Console::info('【Gateway】收到master业务重载指令', false);
-                $this->restartGatewayBusinessPlane();
-                break;
-            case 'restart':
-                Console::warning('【Gateway】收到master重启指令', false);
-                $this->shutdownGateway();
-                break;
-            case 'appoint_update':
-                $this->handleRemoteAppointUpdate($socket, $params);
-                break;
-            default:
-                Console::warning("【Gateway】暂不支持的master命令:{$command}", false);
-        }
-    }
-
-    protected function handleRemoteAppointUpdate(object $socket, array $params): void {
-        $taskId = (string)($params['task_id'] ?? '');
-        $type = (string)($params['type'] ?? '');
-        $version = (string)($params['version'] ?? '');
-        if ($taskId === '' || $type === '' || $version === '') {
-            return;
-        }
-
-        $statePayload = [
-            'event' => 'node_update_state',
-            'data' => [
-                'task_id' => $taskId,
-                'host' => APP_NODE_ID,
-                'type' => $type,
-                'version' => $version,
-                'updated_at' => time(),
-            ]
+        $syncState = [
+            'state' => (string)($payload['state'] ?? ''),
+            'message' => (string)($payload['message'] ?? ''),
+            'error' => (string)($payload['error'] ?? ''),
+            'item_count' => (int)($payload['item_count'] ?? 0),
+            'sync' => (array)($payload['sync'] ?? []),
+            'updated_at' => (int)($payload['updated_at'] ?? time()),
         ];
-        $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-            'data' => [
-                'state' => 'running',
-                'message' => "【" . SERVER_HOST . "】开始更新 {$type} => {$version}",
-            ]
-        ])));
+        Runtime::instance()->set($this->nodeLinuxCrontabSyncStateKey($host), $syncState);
 
-        $result = $this->dashboardUpdate($type, $version);
-        if ($result->hasError()) {
-            $error = $result->getMessage() ?: '未知原因';
-            $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                'data' => [
-                    'state' => 'failed',
-                    'error' => $error,
-                    'message' => "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}",
-                    'updated_at' => time(),
-                ]
-            ])));
-            return;
+        $status = (array)($payload['status'] ?? []);
+        if (!$status) {
+            $status = (array)(ServerNodeStatusTable::instance()->get($host) ?: []);
+        }
+        if ($status) {
+            $status['linux_crontab_sync'] = $syncState;
+            ServerNodeStatusTable::instance()->set($host, $status);
         }
 
-        $resultData = (array)($result->getData() ?: []);
-        $masterState = (string)($resultData['master']['state'] ?? 'success');
-        $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-            'data' => [
-                'state' => $masterState === 'pending' ? 'pending' : 'success',
-                'message' => $masterState === 'pending'
-                    ? "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}"
-                    : "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}",
-                'updated_at' => time(),
-            ]
-        ])));
+        if ($syncState['message'] !== '') {
+            if ($syncState['state'] === 'failed') {
+                Console::warning($syncState['message'], false);
+            } else {
+                Console::info($syncState['message'], false);
+            }
+        }
+
+        $this->pushDashboardStatus();
     }
 
-    protected function shutdownGateway(): void {
+    /**
+     * 生成节点最近一次 Linux 排程同步状态的运行时 key。
+     *
+     * @param string $host 节点 host
+     * @return string
+     */
+    protected function nodeLinuxCrontabSyncStateKey(string $host): string {
+        return 'linux_crontab_sync_state:' . $host;
+    }
+
+    /**
+     * 关闭 gateway。
+     *
+     * preserveManagedUpstreams=true 主要用于“只重启控制面”的场景，
+     * 例如 gateway 文件变动后由外层 boot 重新拉起控制面，而业务实例继续存活。
+     *
+     * @param bool $preserveManagedUpstreams 是否保留已托管的业务实例，仅关闭 gateway 控制面
+     * @return void
+     */
+    protected function shutdownGateway(bool $preserveManagedUpstreams = false): void {
         if ($this->gatewayShutdownScheduled) {
             return;
         }
+        $this->preserveManagedUpstreamsOnShutdown = $preserveManagedUpstreams;
         $this->gatewayShutdownScheduled = true;
         $this->prepareGatewayShutdown();
-
-        $deadline = microtime(true) + 15;
-        Timer::tick(200, function (int $timerId) use ($deadline) {
-            if (!$this->managedUpstreamPortsReleased() && microtime(true) < $deadline) {
-                return;
-            }
-            Timer::clear($timerId);
-            $this->server->shutdown();
-        });
+        Runtime::instance()->serverIsAlive(false);
+        $masterPid = (int)($this->server->master_pid ?? 0);
+        if ($masterPid > 0 && $masterPid !== getmypid() && @Process::kill($masterPid, SIGTERM)) {
+            return;
+        }
+        $this->server->shutdown();
     }
 
-    protected function closeProxyHttpClientPools(): void {
-        $this->httpProxyHandler()->closeAllPooledClients();
+    /**
+     * 将 gateway 关停动作 defer 到当前事件循环尾部。
+     *
+     * dashboard HTTP / 本地命令接口需要先把响应写回调用方，再开始真正的控制面关闭。
+     * 这里直接用 Event::defer() 把 shutdown 推到当前事件循环尾部，避免：
+     * 1. 用 Timer 再挂一个 shutdown 期残留 timer；
+     * 2. 单 worker gateway 对自己 sendMessage() 时触发 "can't send messages to self"。
+     *
+     * @param bool $preserveManagedUpstreams 是否保留业务实例，仅重启控制面
+     * @return void
+     */
+    protected function scheduleGatewayShutdown(bool $preserveManagedUpstreams = false): void {
+        try {
+            Event::defer(function () use ($preserveManagedUpstreams): void {
+                $this->shutdownGateway($preserveManagedUpstreams);
+            });
+        } catch (Throwable) {
+            $this->shutdownGateway($preserveManagedUpstreams);
+        }
     }
 
     protected function waitForGatewayPortsReleased(int $timeoutSeconds = 15, int $intervalMs = 200): void {
@@ -1176,34 +1535,50 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 创建 gateway 控制面 server。
+     *
+     * Gateway 已不再承接 HTTP 业务转发，因此控制面始终监听独立的 controlPort()。
+     *
+     * @param int $timeoutSeconds 最长等待监听端口释放的秒数
+     * @param int $intervalMs 每次重试的毫秒间隔
+     * @return Server
+     * @throws RuntimeException 当底层 server 创建失败时抛出
+     */
     protected function createGatewaySocketServer(int $timeoutSeconds = 10, int $intervalMs = 200): Server {
-        $listenPort = ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) ? $this->controlPort() : $this->port;
+        $listenPort = $this->controlPort();
         $deadline = microtime(true) + max(1, $timeoutSeconds);
-        $lastException = null;
         $logged = false;
-        do {
-            try {
-                if ($logged) {
-                    Console::success("【Gateway】监听端口抢占成功: {$this->host}:{$listenPort}");
-                }
-                return new Server($this->host, $listenPort, SWOOLE_PROCESS, SWOOLE_SOCK_TCP);
-            } catch (SwooleException $exception) {
-                $lastException = $exception;
-                if (!str_contains($exception->getMessage(), 'Address already in use')) {
-                    throw $exception;
-                }
-                if (!$logged) {
-                    Console::warning("【Gateway】监听端口占用，等待重试: {$this->host}:{$listenPort}");
-                    $logged = true;
-                }
-                usleep(max(50, $intervalMs) * 1000);
-            }
-        } while (microtime(true) < $deadline);
 
-        throw $lastException ?: new RuntimeException("Gateway 监听失败: {$this->host}:{$listenPort}");
+        while (microtime(true) < $deadline) {
+            if (!CoreServer::isListeningPortInUse($listenPort)) {
+                break;
+            }
+            if (!$logged) {
+                Console::warning("【Gateway】监听端口占用，等待重试: {$this->host}:{$listenPort}");
+                $logged = true;
+            }
+            usleep(max(50, $intervalMs) * 1000);
+        }
+
+        if ($logged && !CoreServer::isListeningPortInUse($listenPort)) {
+            Console::success("【Gateway】监听端口已释放，准备启动: {$this->host}:{$listenPort}");
+        }
+
+        try {
+            return new Server($this->host, $listenPort, SWOOLE_PROCESS, SWOOLE_SOCK_TCP);
+        } catch (SwooleException $exception) {
+            if (str_contains($exception->getMessage(), 'Address already in use')) {
+                throw new RuntimeException("Gateway 监听失败，端口仍被占用: {$this->host}:{$listenPort}", previous: $exception);
+            }
+            throw $exception;
+        }
     }
 
     protected function managedUpstreamPortsReleased(): bool {
+        if ($this->preserveManagedUpstreamsOnShutdown) {
+            return true;
+        }
         $plans = $this->managedUpstreamPlans;
         if (!$plans) {
             return true;
@@ -1224,18 +1599,32 @@ class GatewayServer {
         return true;
     }
 
-    protected function clearHousekeepingTimer(): void {
-        if ($this->housekeepingTimerId) {
-            Timer::clear($this->housekeepingTimerId);
-            $this->housekeepingTimerId = null;
+    /**
+     * 判断 gateway 自身托管的附属进程是否已经全部退出。
+     *
+     * Gateway 的 addProcess 及其派生子进程会继承 server 的监听 FD；只有等待这些
+     * 进程真正退出，新的 gateway 才不会在 10580/9585 上撞到旧 FD 残留。
+     *
+     * @return bool
+     */
+    protected function gatewayAuxiliaryProcessesReleased(): bool {
+        if ($this->subProcessManager) {
+            $subprocessShuttingDown = (bool)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN) ?: false);
+            $subprocessAliveCount = (int)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT) ?: 0);
+            // Runtime 里的 alive_count 只覆盖 manager 下面托管的直系子进程，
+            // addProcess 根进程自身若仍存活，同样会继续持有旧 gateway 继承下来的监听 FD。
+            if (
+                $this->subProcessManager->isManagerProcessAlive()
+                || $subprocessShuttingDown
+                || $subprocessAliveCount > 0
+            ) {
+                return false;
+            }
         }
-    }
-
-    protected function clearClusterStatusTimer(): void {
-        if ($this->clusterStatusTimerId) {
-            Timer::clear($this->clusterStatusTimerId);
-            $this->clusterStatusTimerId = null;
+        if ($this->upstreamSupervisor && $this->upstreamSupervisor->isAlive()) {
+            return false;
         }
+        return true;
     }
 
     protected function clearPendingManagedRecycleWatchers(): void {
@@ -1243,19 +1632,40 @@ class GatewayServer {
             Timer::clear($timerId);
             unset($this->pendingManagedRecycleWatchers[$key]);
         }
+        $this->pendingManagedRecycleCompletions = [];
     }
 
     protected function prepareGatewayShutdown(): void {
+        if ($this->gatewayShutdownPrepared) {
+            return;
+        }
+        $this->gatewayShutdownPrepared = true;
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(true);
-        Runtime::instance()->serverIsAlive(false);
-        $this->closeProxyHttpClientPools();
         $this->stopLocalIpcServer();
-        $this->clearHousekeepingTimer();
-        $this->clearClusterStatusTimer();
         $this->clearPendingManagedRecycleWatchers();
-        isset($this->subProcessManager) && $this->subProcessManager->shutdown();
-        $this->shutdownManagedUpstreams();
+        isset($this->subProcessManager) && $this->subProcessManager->shutdown(true);
+        if ($this->preserveManagedUpstreamsOnShutdown) {
+            $this->detachUpstreamSupervisor();
+        } else {
+            $this->shutdownManagedUpstreams();
+        }
+    }
+
+    /**
+     * 在“只重启 gateway 控制面”场景下，让 UpstreamSupervisor 自身退出，
+     * 但保留已托管的业务实例继续运行。
+     *
+     * @return void
+     */
+    protected function detachUpstreamSupervisor(): void {
+        if (!$this->upstreamSupervisor) {
+            return;
+        }
+        $result = $this->dispatchUpstreamSupervisorCommand('detach', [], true, 15);
+        if ($result->hasError()) {
+            Console::warning('【Gateway】等待 UpstreamSupervisor 脱离控制面失败，将继续按关停流程推进: ' . $result->getMessage());
+        }
     }
 
     public function server(): Server {
@@ -1272,7 +1682,7 @@ class GatewayServer {
 
     public function trafficMode(): string {
         $mode = strtolower(trim($this->configuredTrafficMode));
-        return in_array($mode, ['http', 'tcp', 'nginx'], true) ? $mode : 'nginx';
+        return in_array($mode, ['tcp', 'nginx'], true) ? $mode : 'nginx';
     }
 
     public function tcpRelayModeEnabled(): bool {
@@ -1284,9 +1694,7 @@ class GatewayServer {
     }
 
     public function controlPort(): int {
-        return ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled())
-            ? max(1, $this->controlBindPort ?: ($this->port + 1000))
-            : $this->port;
+        return max(1, $this->controlBindPort ?: ($this->port + 1000));
     }
 
     protected function resolvedDashboardPort(): int {
@@ -1301,13 +1709,6 @@ class GatewayServer {
         return $path === '/dashboard.socket'
             || str_starts_with($path, '/_gateway')
             || str_starts_with($path, '/~');
-    }
-
-    protected function httpProxyHandler(): GatewayHttpProxyHandler {
-        if (!$this->httpProxyHandler instanceof GatewayHttpProxyHandler) {
-            $this->httpProxyHandler = new GatewayHttpProxyHandler($this, $this->instanceManager);
-        }
-        return $this->httpProxyHandler;
     }
 
     protected function tcpRelayHandler(): GatewayTcpRelayHandler {
@@ -1337,6 +1738,25 @@ class GatewayServer {
                 Console::info('【Gateway】探测到 nginx conf-path: ' . ((string)($runtimeMeta['conf_path'] ?? '')));
                 Console::info('【Gateway】探测到 nginx conf-dir: ' . ((string)($runtimeMeta['conf_dir'] ?? '')));
             }
+            $paths = array_filter([
+                (string)($result['global_file'] ?? ''),
+                (string)($result['upstream_file'] ?? ''),
+                (string)($result['server_file'] ?? ''),
+            ]);
+            $displayPaths = array_values(array_unique(array_map(static fn(string $path): string => basename($path), $paths)));
+            $fingerprint = md5(JsonHelper::toJson([
+                'reason_group' => $this->isStartupNginxSyncReason((string)($result['reason'] ?? '')) ? 'startup' : (string)($result['reason'] ?? ''),
+                'reloaded' => (bool)($result['reloaded'] ?? false),
+                'tested' => (bool)($result['tested'] ?? false),
+                'files' => $displayPaths,
+            ]));
+            $now = time();
+            if ($fingerprint === $this->lastNginxSyncLogFingerprint && ($now - $this->lastNginxSyncLoggedAt) <= 15) {
+                return;
+            }
+            $this->lastNginxSyncLogFingerprint = $fingerprint;
+            $this->lastNginxSyncLoggedAt = $now;
+
             $message = "【Gateway】nginx转发配置已同步";
             if (!empty($result['reason'])) {
                 $message .= ': reason=' . $result['reason'];
@@ -1346,13 +1766,8 @@ class GatewayServer {
             } elseif (!empty($result['tested'])) {
                 $message .= ', tested=yes';
             }
-            $paths = array_filter([
-                (string)($result['global_file'] ?? ''),
-                (string)($result['upstream_file'] ?? ''),
-                (string)($result['server_file'] ?? ''),
-            ]);
-            if ($paths) {
-                $message .= ', files=' . implode(' | ', $paths);
+            if ($displayPaths) {
+                $message .= ', files=' . implode(' | ', $displayPaths);
             }
             Console::info($message);
         } catch (Throwable $throwable) {
@@ -1360,6 +1775,49 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 启动早期只做 nginx 运行环境探测和缓存预热。
+     *
+     * 这里不触发任何配置写盘和 reload，仅把 bin/conf-path/conf-dir 等路径
+     * 预先探测出来并写入缓存文件，便于后续真正 sync 时直接复用。
+     *
+     * @return void
+     */
+    protected function warmupNginxRuntimeMeta(): void {
+        $handler = $this->nginxProxyHandler();
+        if (!$handler->enabled()) {
+            return;
+        }
+        try {
+            $result = $handler->warmupRuntimeMeta($this->nginxProxyModeEnabled());
+            $runtimeMeta = (array)($result['runtime_meta'] ?? []);
+            if (($result['runtime_meta_changed'] ?? false) && $runtimeMeta) {
+                Console::info('【Gateway】探测到 nginx: ' . ((string)($runtimeMeta['bin'] ?? 'nginx')));
+                Console::info('【Gateway】探测到 nginx conf-path: ' . ((string)($runtimeMeta['conf_path'] ?? '')));
+                Console::info('【Gateway】探测到 nginx conf-dir: ' . ((string)($runtimeMeta['conf_dir'] ?? '')));
+            }
+            if (!empty($result['started'])) {
+                Console::info('【Gateway】nginx 未运行，已按当前主配置启动');
+            }
+        } catch (Throwable $throwable) {
+            Console::warning('【Gateway】nginx 环境探测失败: ' . $throwable->getMessage());
+        }
+    }
+
+    protected function isStartupNginxSyncReason(string $reason): bool {
+        return in_array($reason, [
+            'register_managed_plan_activate',
+        ], true);
+    }
+
+    /**
+     * 重载 gateway 控制面。
+     *
+     * 是否顺带滚业务面由调用方决定：普通 gateway restart 与业务 reload 的语义并不相同。
+     *
+     * @param bool $restartManagedUpstreams 是否顺带滚动重启业务实例
+     * @return void
+     */
     protected function reloadGateway(bool $restartManagedUpstreams = true): void {
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(true);
@@ -1374,19 +1832,98 @@ class GatewayServer {
         $this->server->reload();
     }
 
+    /**
+     * 预留一次 gateway 重载名额，避免管理请求与 FileWatcher 重复排队。
+     *
+     * 当前 gateway 的 reload 链路包含业务实例滚动重启、端口就绪等待与切流校验。
+     * 这类工作必须脱离触发它的管理请求协程执行，否则请求协程会卡在等待链上，
+     * 最终在没有其他可唤醒事件时触发 coroutine deadlock。这里先只做“占位”，
+     * 真正的 reload 交给响应写回后的异步回调。
+     *
+     * @param bool $restartManagedUpstreams 是否顺带滚动重启业务实例
+     * @return array{accepted:bool,message:string,scheduled:bool,restart_managed_upstreams:bool}
+     */
+    protected function reserveGatewayReload(bool $restartManagedUpstreams = true): array {
+        if ($this->gatewayShutdownScheduled) {
+            return [
+                'accepted' => false,
+                'message' => 'Gateway 已进入关闭流程，无法再发起重载',
+                'scheduled' => false,
+                'restart_managed_upstreams' => $restartManagedUpstreams,
+            ];
+        }
+
+        if ($this->gatewayReloadScheduled || $this->managedUpstreamRolling) {
+            return [
+                'accepted' => true,
+                'message' => 'Gateway 重载已在进行中，已跳过重复触发',
+                'scheduled' => false,
+                'restart_managed_upstreams' => $restartManagedUpstreams,
+            ];
+        }
+
+        $this->gatewayReloadScheduled = true;
+        return [
+            'accepted' => true,
+            'message' => $restartManagedUpstreams
+                ? 'Gateway 与业务实例已开始重载'
+                : 'Gateway 已开始重载',
+            'scheduled' => true,
+            'restart_managed_upstreams' => $restartManagedUpstreams,
+        ];
+    }
+
+    /**
+     * 将预留好的 gateway reload 投递到当前 worker 的事件循环中异步执行。
+     *
+     * 这里使用 Timer::after 的原因不是为了延迟，而是为了确保真正的 reload
+     * 发生在 HTTP 响应已经写回之后。这样 FileWatcher 或 dashboard 的控制请求
+     * 只负责“投递 reload 意图”，不会再把滚动重启流程压在当前请求协程上。
+     *
+     * @param bool $restartManagedUpstreams 是否顺带滚动重启业务实例
+     * @return void
+     */
+    protected function scheduleReservedGatewayReload(bool $restartManagedUpstreams = true): void {
+        Timer::after(1, function () use ($restartManagedUpstreams): void {
+            try {
+                $this->reloadGateway($restartManagedUpstreams);
+            } catch (Throwable $throwable) {
+                // 异步 reload 失败时需要恢复运行态标记，避免控制面长时间停在 draining。
+                Runtime::instance()->serverIsDraining(false);
+                Runtime::instance()->serverIsReady(true);
+                Console::error('【Gateway】异步重载失败: ' . $throwable->getMessage());
+            } finally {
+                $this->gatewayReloadScheduled = false;
+            }
+        });
+    }
+
     protected function handleGatewayProcessCommand(string $command, array $params, object $socket): bool {
         switch ($command) {
             case 'shutdown':
                 $socket->push("【" . SERVER_HOST . "】start shutdown");
-                $this->shutdownGateway();
+                $this->scheduleGatewayShutdown();
                 return true;
             case 'reload':
-                $socket->push("【" . SERVER_HOST . "】start business reload");
-                $this->restartGatewayBusinessPlane();
+                $result = $this->dispatchGatewayBusinessCommand('reload', [], false, 0, 'gateway business reload started');
+                $socket->push($result->hasError()
+                    ? "【" . SERVER_HOST . "】business reload failed:" . $result->getMessage()
+                    : "【" . SERVER_HOST . "】start business reload");
+                return true;
+            case 'restart_crontab':
+                $socket->push("【" . SERVER_HOST . "】Crontab 已改由 Linux 系统排程托管");
+                return true;
+            case 'restart_redisqueue':
+                if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
+                    $socket->push("【" . SERVER_HOST . "】RedisQueue process unavailable");
+                    return true;
+                }
+                $this->restartGatewayRedisQueueProcess();
+                $socket->push("【" . SERVER_HOST . "】start redisqueue restart");
                 return true;
             case 'restart':
                 $socket->push("【" . SERVER_HOST . "】start restart");
-                $this->shutdownGateway();
+                $this->scheduleGatewayShutdown(true);
                 return true;
             case 'appoint_update':
                 $taskId = (string)($params['task_id'] ?? '');
@@ -1408,9 +1945,15 @@ class GatewayServer {
                         'message' => "【" . SERVER_HOST . "】开始更新 {$type} => {$version}",
                     ]
                 ])));
-                $result = $this->dashboardUpdate($type, $version);
+                $result = $this->dispatchGatewayBusinessCommand('appoint_update', [
+                    'task_id' => $taskId,
+                    'type' => $type,
+                    'version' => $version,
+                ], true, 300);
                 if ($result->hasError()) {
-                    $error = (string)($result->getMessage() ?: '未知原因');
+                    $resultData = (array)($result->getData() ?: []);
+                    $masterError = (string)($resultData['master']['error'] ?? '');
+                    $error = $masterError !== '' ? $masterError : (string)($result->getMessage() ?: '未知原因');
                     $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                         'data' => [
                             'state' => 'failed',
@@ -1439,6 +1982,23 @@ class GatewayServer {
     }
 
     protected function buildGatewayHeartbeatStatus(array $status): array {
+        // 心跳子进程的某一轮 tick 可能恰好与 gateway shutdown 交错。
+        // 即便上层定时器入口已经做过一次守卫，这里仍需在真正拼装业务 overlay 之前
+        // 再检查一次，避免进入 dashboardUpstreams() 时撞上 shutdown 窗口里的 upstream IPC。
+        if ($this->shouldSkipGatewayBusinessOverlayDuringShutdown()) {
+            return array_replace_recursive($status, [
+                'name' => 'Gateway',
+                'script' => 'gateway',
+                'ip' => SERVER_HOST,
+                'port' => $this->port,
+                'role' => SERVER_ROLE,
+                'server_run_mode' => APP_SRC_TYPE,
+                'proxy_mode_label' => 'gateway_proxy',
+                'manager_pid' => (int)($this->server->manager_pid ?? $this->serverManagerPid),
+                'master_pid' => (int)($this->server->master_pid ?? $this->serverMasterPid),
+                'fingerprint' => APP_FINGERPRINT . ':gateway',
+            ]);
+        }
         $status = $this->composeGatewayNodeRuntimeStatus($status, $this->dashboardUpstreams());
         return array_replace_recursive($status, [
             'name' => 'Gateway',
@@ -1668,6 +2228,50 @@ class GatewayServer {
         return in_array($path, ['/install', '/install_check'], true);
     }
 
+    /**
+     * 判断当前是否处于“安装接管”阶段。
+     *
+     * 业务应用尚未安装完成时，nginx 会把业务入口先回切到 gateway 控制面。
+     * 此时 control plane 需要接住普通业务路径，并把用户引导到安装页。
+     *
+     * @return bool
+     */
+    protected function installTakeoverActive(): bool {
+        if (!App::isReady()) {
+            return true;
+        }
+        return (bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER) ?? false);
+    }
+
+    /**
+     * 判断当前请求是否应被引导到安装页。
+     *
+     * 仅在安装接管阶段对普通业务路径生效；dashboard 与内部控制面路径仍按
+     * 原语义处理，避免把 `/~`、`/_gateway` 这类控制面请求错误重定向走。
+     *
+     * @param string $uri 当前请求 URI。
+     * @return bool
+     */
+    protected function shouldRedirectToInstallFlow(string $uri): bool {
+        if (!$this->installTakeoverActive()) {
+            return false;
+        }
+        if (str_starts_with($uri, '/~') || str_starts_with($uri, '/_gateway')) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 处理 dashboard 的 HTTP 入口。
+     *
+     * /~ 下既可能是静态资源，也可能是 API；这里先做路径归一化，
+     * 再决定返回静态文件、index.html 还是进入 dashboard API 分发。
+     *
+     * @param Request $request dashboard HTTP 请求
+     * @param Response $response dashboard HTTP 响应
+     * @return void
+     */
     protected function handleDashboardRequest(Request $request, Response $response): void {
         $path = $this->normalizeDashboardPath($request->server['request_uri'] ?? '/~');
         if (($request->server['request_method'] ?? 'GET') === 'GET' && $this->serveDashboardStaticAsset($path, $response)) {
@@ -1857,6 +2461,16 @@ class GatewayServer {
         }
     }
 
+    /**
+     * dashboard websocket 事件处理。
+     *
+     * dashboard 实时状态推送和运维命令都走这条 ws 通道，但真正执行仍然复用
+     * gateway 内部已有的命令分发与 rolling 逻辑，避免再维护一套并行状态机。
+     *
+     * @param Server $server 当前 gateway server
+     * @param Frame $frame 收到的 dashboard websocket 帧
+     * @return void
+     */
     protected function handleDashboardSocketMessage(Server $server, Frame $frame): void {
         if (!JsonHelper::is($frame->data)) {
             if ($server->isEstablished($frame->fd)) {
@@ -1882,7 +2496,35 @@ class GatewayServer {
                         'node' => SERVER_HOST,
                     ], $frame->fd);
                     $this->pushDashboardStatus();
-                    $this->restartGatewayBusinessPlane();
+                    $this->dispatchLocalGatewayCommand('reload');
+                });
+                break;
+            case 'restartCrontabAll':
+                Coroutine::create(function () use ($frame) {
+                    Console::info("【Gateway】Dashboard Socket命令: {$frame->data}");
+                    $this->sendCommandToAllNodeClients('restart_crontab');
+                    $this->pushDashboardEvent([
+                        'event' => 'console',
+                        'message' => ['data' => '已向所有子节点发送 Crontab 重启指令，当前 Gateway 开始重启本地 Crontab 子进程'],
+                        'time' => Console::timestamp(),
+                        'node' => SERVER_HOST,
+                    ], $frame->fd);
+                    $this->pushDashboardStatus();
+                    $this->dispatchLocalGatewayCommand('restart_crontab');
+                });
+                break;
+            case 'restartRedisQueueAll':
+                Coroutine::create(function () use ($frame) {
+                    Console::info("【Gateway】Dashboard Socket命令: {$frame->data}");
+                    $this->sendCommandToAllNodeClients('restart_redisqueue');
+                    $this->pushDashboardEvent([
+                        'event' => 'console',
+                        'message' => ['data' => '已向所有子节点发送 RedisQueue 重启指令，当前 Gateway 开始重启本地 RedisQueue 子进程'],
+                        'time' => Console::timestamp(),
+                        'node' => SERVER_HOST,
+                    ], $frame->fd);
+                    $this->pushDashboardStatus();
+                    $this->dispatchLocalGatewayCommand('restart_redisqueue');
                 });
                 break;
             case 'restartAll':
@@ -1895,7 +2537,7 @@ class GatewayServer {
                         'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);
-                    $this->shutdownGateway();
+                    $this->scheduleGatewayShutdown(true);
                 });
                 break;
             case 'console_subscribe':
@@ -1910,6 +2552,17 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 生成 dashboard 实时状态快照。
+     *
+     * 返回的是控制面聚合视图：
+     * - servers 代表 gateway 节点；
+     * - upstreams 代表当前被 gateway 选中的业务实例；
+     * - 日志、版本、任务、内存等都按 dashboard 所需格式封装。
+     *
+     * @param array<int, array<string, mixed>>|null $upstreams 已获取的 upstream 列表，传 null 时内部自行抓取
+     * @return array<string, mixed>
+     */
     protected function buildDashboardRealtimeStatus(?array $upstreams = null): array {
         $upstreams ??= $this->dashboardUpstreams();
         $nodes = $this->dashboardNodes($upstreams);
@@ -1951,17 +2604,11 @@ class GatewayServer {
     }
 
     protected function dashboardUpstreams(): array {
-        $this->instanceManager->reload();
-        $snapshot = $this->instanceManager->snapshot();
+        $snapshot = $this->currentGatewayStateSnapshot();
         $instances = [];
         foreach ($snapshot['generations'] ?? [] as $generation) {
             foreach (($generation['instances'] ?? []) as $instance) {
                 $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
-                $this->instanceManager->updateInstanceRuntimeStatus(
-                    (string)($instance['host'] ?? '127.0.0.1'),
-                    (int)($instance['port'] ?? 0),
-                    $runtimeStatus
-                );
                 $instances[] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus);
             }
         }
@@ -2090,14 +2737,25 @@ class GatewayServer {
         return $instances;
     }
 
+    /**
+     * 维护 active managed upstream 的健康状态。
+     *
+     * 这里不是“单次失败即重启”，而是按 active generation 连续计数，
+     * 只有达到阈值后才触发一次统一的 rolling self-heal，避免把瞬时抖动当成切代事件。
+     *
+     * @return void
+     */
     protected function maintainManagedUpstreamHealth(): void {
-        if ($this->managedUpstreamSelfHealing || !$this->launcher || !$this->upstreamSupervisor) {
+        if ($this->managedUpstreamSelfHealing || $this->managedUpstreamRolling || !$this->launcher || !$this->upstreamSupervisor) {
             return;
         }
         if (!App::isReady() || $this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
             return;
         }
         $now = time();
+        if ($this->lastManagedUpstreamRollingAt > 0 && ($now - $this->lastManagedUpstreamRollingAt) < self::ACTIVE_UPSTREAM_HEALTH_ROLLING_COOLDOWN_SECONDS) {
+            return;
+        }
         if ($this->lastManagedUpstreamHealthCheckAt > 0 && ($now - $this->lastManagedUpstreamHealthCheckAt) < self::ACTIVE_UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS) {
             return;
         }
@@ -2106,7 +2764,23 @@ class GatewayServer {
             return;
         }
 
-        $activePlans = $this->activeManagedPlans();
+        // 健康检测统一以 registry 持久化状态为准。
+        // rolling / recycle / self-heal 期间有多条协程在推进 instanceManager 内存态，
+        // 这里先 reload 一次，避免使用到尚未收敛的旧代 in-memory 视图。
+        $this->instanceManager->reload();
+        $snapshot = $this->instanceManager->snapshot();
+        $activeVersion = (string)($snapshot['active_version'] ?? '');
+        if ($activeVersion === '') {
+            $this->lastManagedHealthActiveVersion = '';
+            $this->managedUpstreamHealthState = [];
+            return;
+        }
+        if ($activeVersion !== $this->lastManagedHealthActiveVersion) {
+            // active generation 一变，历史失败计数就没有参考意义了，需要对新代重新观察。
+            $this->notifyManagedUpstreamGenerationIterated($activeVersion);
+            return;
+        }
+        $activePlans = $this->managedPlansFromSnapshot();
         if (!$activePlans) {
             $this->managedUpstreamHealthState = [];
             return;
@@ -2123,6 +2797,7 @@ class GatewayServer {
                 continue;
             }
 
+            // 健康检查采用“端口 + internal health”双重标准，避免只看 listen 就过早判定 ready。
             $probe = $this->probeManagedUpstreamHealth($plan);
             if ($probe['healthy']) {
                 $previous = $this->managedUpstreamHealthState[$key] ?? null;
@@ -2174,6 +2849,7 @@ class GatewayServer {
         Console::warning("【Gateway】检测到active业务实例连续异常，开始自动自愈: " . implode(' | ', $descriptors));
         Coroutine::create(function () use ($unhealthyPlans, $recoveryPlans) {
             try {
+                // 自愈直接复用 rolling restart，确保切流、回滚、回收语义完全一致。
                 $summary = $this->restartManagedUpstreams($recoveryPlans);
                 if ($summary['failed_nodes']) {
                     Console::warning("【Gateway】自动自愈存在失败: success={$summary['success_count']}, failed=" . count($summary['failed_nodes']));
@@ -2222,6 +2898,9 @@ class GatewayServer {
         if (!$status) {
             return ['healthy' => false, 'reason' => 'health_status_unreachable'];
         }
+        if (!$this->launcher || !$this->launcher->probeHttpConnectivity($host, $port, self::INTERNAL_UPSTREAM_HTTP_PROBE_PATH, 0.5)) {
+            return ['healthy' => false, 'reason' => 'http_probe_failed'];
+        }
         if (!(bool)($status['server_is_alive'] ?? false)) {
             return ['healthy' => false, 'reason' => 'server_not_alive'];
         }
@@ -2233,6 +2912,17 @@ class GatewayServer {
         }
 
         return ['healthy' => true, 'reason' => 'ok'];
+    }
+
+    protected function notifyManagedUpstreamGenerationIterated(string $version): void {
+        $version = trim($version);
+        if ($version === '') {
+            return;
+        }
+        $this->lastManagedHealthActiveVersion = $version;
+        $this->managedUpstreamHealthState = [];
+        $this->lastManagedUpstreamRollingAt = time();
+        $this->lastManagedUpstreamHealthCheckAt = 0;
     }
 
     protected function managedPlanKey(array $plan): string {
@@ -2251,6 +2941,7 @@ class GatewayServer {
             'name' => 'Gateway',
             'script' => 'gateway',
             'ip' => SERVER_HOST,
+            'env' => SERVER_RUN_ENV ?: 'production',
             'port' => $this->port,
             'socketPort' => $this->resolvedDashboardPort(),
             'online' => true,
@@ -2297,6 +2988,7 @@ class GatewayServer {
             'name' => 'Gateway',
             'script' => 'gateway',
             'ip' => SERVER_HOST,
+            'env' => SERVER_RUN_ENV ?: 'production',
             'port' => $this->port,
             'socketPort' => $this->resolvedDashboardPort(),
             'role' => SERVER_ROLE,
@@ -2310,9 +3002,22 @@ class GatewayServer {
     }
 
     protected function composeGatewayNodeRuntimeStatus(array $status, array $upstreams): array {
+        // gateway 已进入 shutdown/restart 时，节点状态只保留本地控制面信息。
+        // 这时继续向 upstream 做 memory/status 补采只会把退出路径重新拖进 IPC，
+        // 既没有运维价值，也会增加旧控制面迟迟不释放监听 FD 的风险。
+        if ($this->shouldSkipGatewayBusinessOverlayDuringShutdown()) {
+            return $status;
+        }
+
         $selected = $this->selectGatewayBusinessUpstreams($upstreams);
         $businessOverlay = $this->buildGatewayBusinessOverlay($upstreams);
         if ($businessOverlay) {
+            if (array_key_exists('tasks', $businessOverlay)) {
+                $businessOverlay['tasks'] = $this->mergeGatewayTasks(
+                    (array)($status['tasks'] ?? []),
+                    (array)$businessOverlay['tasks']
+                );
+            }
             $status = array_replace_recursive($status, $businessOverlay);
         }
         if ($selected) {
@@ -2328,6 +3033,36 @@ class GatewayServer {
             $upstreams
         );
         return $status;
+    }
+
+    /**
+     * 判断 gateway 是否已经进入“只允许本地收口，不再访问 upstream”的窗口。
+     *
+     * @return bool 进入 shutdown/restart 收口阶段时返回 true。
+     */
+    protected function shouldSkipGatewayBusinessOverlayDuringShutdown(): bool {
+        return $this->gatewayShutdownPrepared
+            || !Runtime::instance()->serverIsAlive()
+            || Runtime::instance()->serverIsDraining()
+            || !Runtime::instance()->serverIsReady();
+    }
+
+    protected function mergeGatewayTasks(array $localTasks, array $businessTasks): array {
+        $tasks = [];
+        foreach ([$localTasks, $businessTasks] as $taskGroup) {
+            foreach ($taskGroup as $task) {
+                if (!is_array($task)) {
+                    continue;
+                }
+                $taskId = (string)($task['id'] ?? '');
+                if ($taskId !== '') {
+                    $tasks[$taskId] = $task;
+                    continue;
+                }
+                $tasks[] = $task;
+            }
+        }
+        return array_values($tasks);
     }
 
     protected function buildUpstreamNode(array $generation, array $instance, array $runtimeStatus = []): array {
@@ -2413,48 +3148,35 @@ class GatewayServer {
         if ($this->launcher && !$this->launcher->isListening($host, $port, 0.2)) {
             return [];
         }
-        if ($this->shouldUseLocalUpstreamUnixHttp($host, $port)) {
-            $payload = $this->requestUpstreamUnixHttpJson(
-                LocalIpc::upstreamHttpSocketPath($port),
-                $path,
-                $timeoutSeconds,
-                [
-                    'Host: ' . $host . ':' . $port,
-                    'x-gateway-internal: 1',
-                    'Connection: close',
-                ]
-            );
-            if (is_array($payload['data'] ?? null)) {
-                return $payload['data'];
-            }
-        }
 
         try {
-            if (Coroutine::getCid() <= 0) {
-                return $this->fetchUpstreamInternalStatusSync($host, $port, $path);
-            }
-            $client = new Client($host, $port, false);
-            $client->set(['timeout' => 1.5]);
-            $client->setHeaders([
-                'host' => $host . ':' . $port,
-                'x-gateway-internal' => '1',
-            ]);
-            if (!$client->get($path)) {
-                $client->close();
+            $ipcAction = $this->mapUpstreamStatusPathToIpcAction($path);
+            if ($ipcAction !== '') {
+                $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $timeoutSeconds);
+                if (is_array($ipcResponse) && (int)($ipcResponse['status'] ?? 0) === 200) {
+                    $data = $ipcResponse['data'] ?? null;
+                    return is_array($data) ? $data : [];
+                }
                 return [];
             }
-            $statusCode = (int)($client->statusCode ?? 0);
-            $body = (string)($client->body ?? '');
-            $client->close();
-            if ($statusCode !== 200 || $body === '' || !JsonHelper::is($body)) {
-                return [];
-            }
-            $payload = JsonHelper::recover($body);
-            $data = $payload['data'] ?? [];
-            return is_array($data) ? $data : [];
+            return [];
         } catch (Throwable) {
             return [];
         }
+    }
+
+    /**
+     * 将 upstream 内部状态路径映射为本地 IPC action。
+     *
+     * @param string $path upstream 内部状态路径。
+     * @return string 已知路径返回对应 action，否则返回空字符串。
+     */
+    protected function mapUpstreamStatusPathToIpcAction(string $path): string {
+        return match ($path) {
+            self::INTERNAL_UPSTREAM_STATUS_PATH => 'upstream.status',
+            self::INTERNAL_UPSTREAM_HEALTH_PATH => 'upstream.health',
+            default => '',
+        };
     }
 
     protected function fetchUpstreamRuntimeStatusSync(string $host, int $port): array {
@@ -2473,7 +3195,6 @@ class GatewayServer {
                 'ignore_errors' => true,
                 'header' => implode("\r\n", [
                     'Host: ' . $host . ':' . $port,
-                    'x-gateway-internal: 1',
                     'Connection: close',
                 ]),
             ],
@@ -2495,60 +3216,6 @@ class GatewayServer {
         $payload = JsonHelper::recover($body);
         $data = $payload['data'] ?? [];
         return is_array($data) ? $data : [];
-    }
-
-    protected function shouldUseLocalUpstreamIpc(string $host): bool {
-        return in_array($host, ['127.0.0.1', 'localhost', '0.0.0.0', SERVER_HOST], true);
-    }
-
-    protected function shouldUseLocalUpstreamUnixHttp(string $host, int $port): bool {
-        return $this->shouldUseLocalUpstreamIpc($host) && $port > 0 && file_exists(LocalIpc::upstreamHttpSocketPath($port));
-    }
-
-    protected function localUpstreamIpcActionForPath(string $path): ?string {
-        return match ($path) {
-            self::INTERNAL_UPSTREAM_STATUS_PATH => 'upstream.status',
-            self::INTERNAL_UPSTREAM_HEALTH_PATH => 'upstream.health',
-            default => null,
-        };
-    }
-
-    protected function requestUpstreamUnixHttpJson(string $socketPath, string $path, float $timeoutSeconds, array $headers = []): ?array {
-        if ($socketPath === '' || !file_exists($socketPath)) {
-            return null;
-        }
-        $errno = 0;
-        $errstr = '';
-        $socket = @stream_socket_client('unix://' . $socketPath, $errno, $errstr, $timeoutSeconds, STREAM_CLIENT_CONNECT);
-        if (!is_resource($socket)) {
-            return null;
-        }
-        $seconds = max(1, (int)floor($timeoutSeconds));
-        $microseconds = max(0, (int)(($timeoutSeconds - floor($timeoutSeconds)) * 1000000));
-        stream_set_timeout($socket, $seconds, $microseconds);
-        $headerLines = array_merge([
-            'GET ' . $path . ' HTTP/1.1',
-        ], $headers, ['']);
-        $request = implode("\r\n", $headerLines) . "\r\n";
-        fwrite($socket, $request);
-        $raw = stream_get_contents($socket);
-        fclose($socket);
-        if (!is_string($raw) || !str_contains($raw, "\r\n\r\n")) {
-            return null;
-        }
-        [$head, $body] = explode("\r\n\r\n", $raw, 2);
-        $status = 0;
-        foreach (explode("\r\n", $head) as $line) {
-            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $matches)) {
-                $status = (int)$matches[1];
-                break;
-            }
-        }
-        if ($status !== 200 || $body === '') {
-            return null;
-        }
-        $decoded = json_decode($body, true);
-        return is_array($decoded) ? $decoded : null;
     }
 
     protected function buildGatewayBusinessOverlay(array $upstreams): array {
@@ -2662,7 +3329,7 @@ class GatewayServer {
             $memoryUsage = $this->normalizeMemoryUsage((array)($item['memory_usage'] ?? []));
             $systemTotalMemGb = max($systemTotalMemGb, (float)($memoryUsage['system_total_mem_gb'] ?? 0));
             $systemFreeMemGb = max($systemFreeMemGb, (float)($memoryUsage['system_free_mem_gb'] ?? 0));
-            foreach ((array)($memoryUsage['rows'] ?? []) as $row) {
+            foreach ($this->buildGatewayUpstreamMemoryRows($item, $memoryUsage) as $row) {
                 $rows[] = $row;
                 $usageTotal += $this->extractMemoryValue($row['usage'] ?? null);
                 $realTotal += $this->extractMemoryValue($row['real'] ?? null);
@@ -2704,6 +3371,202 @@ class GatewayServer {
             'system_total_mem_gb' => $systemTotalMemGb > 0 ? round($systemTotalMemGb, 2) : '--',
             'system_free_mem_gb' => $systemFreeMemGb > 0 ? round($systemFreeMemGb, 2) : '--',
         ]);
+    }
+
+    /**
+     * 基于 upstream 上报的 memory rows 快照，在 gateway 侧补采 OS 物理内存字段。
+     *
+     * upstream 只负责维持 worker 活跃时写入的 usage/real/peak/pid；
+     * 真正的 rss/pss/os_actual 在 gateway 汇总阶段按 pid 现采，避免 upstream 额外保留
+     * MemoryUsageCount 子进程。
+     *
+     * @param array $instance upstream 实例描述。
+     * @param array $fallbackMemoryUsage upstream runtime status 里附带的 memory_usage。
+     * @return array<int, array<string, mixed>>
+     */
+    protected function buildGatewayUpstreamMemoryRows(array $instance, array $fallbackMemoryUsage): array {
+        $fallbackRows = (array)($fallbackMemoryUsage['rows'] ?? []);
+        $fallbackByName = [];
+        foreach ($fallbackRows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $name = (string)($row['name'] ?? '');
+            if ($name !== '') {
+                $fallbackByName[$name] = $row;
+            }
+        }
+
+        $snapshotRows = $this->fetchUpstreamMemoryRows($instance);
+        if (!$snapshotRows) {
+            return $fallbackRows;
+        }
+
+        $rows = [];
+        $seen = [];
+        foreach ($snapshotRows as $snapshotRow) {
+            if (!is_array($snapshotRow)) {
+                continue;
+            }
+            $name = (string)($snapshotRow['process'] ?? '');
+            if ($name === '') {
+                continue;
+            }
+            $seen[$name] = true;
+            $rows[] = $this->composeGatewayUpstreamMemoryRow(
+                $instance,
+                $snapshotRow,
+                $fallbackByName[$name] ?? []
+            );
+        }
+
+        foreach ($fallbackRows as $fallbackRow) {
+            if (!is_array($fallbackRow)) {
+                continue;
+            }
+            $name = (string)($fallbackRow['name'] ?? '');
+            if ($name === '' || isset($seen[$name])) {
+                continue;
+            }
+            $rows[] = $fallbackRow;
+        }
+
+        return $rows;
+    }
+
+    /**
+     * 从 upstream 本地 IPC 读取 memory rows 快照。
+     *
+     * @param array $instance upstream 实例描述。
+     * @return array<int, array<string, mixed>>
+     */
+    protected function fetchUpstreamMemoryRows(array $instance): array {
+        $port = (int)($instance['port'] ?? 0);
+        if ($port <= 0) {
+            return [];
+        }
+        $ipcResponse = LocalIpc::request(
+            LocalIpc::upstreamSocketPath($port),
+            'upstream.memory_rows',
+            [],
+            2.0
+        );
+        if (!is_array($ipcResponse) || (int)($ipcResponse['status'] ?? 0) !== 200) {
+            return [];
+        }
+        $data = $ipcResponse['data'] ?? null;
+        return is_array($data) ? $data : [];
+    }
+
+    /**
+     * 组合 upstream 的逻辑内存快照和 gateway 现采的 OS 物理内存。
+     *
+     * @param array $instance upstream 实例描述。
+     * @param array $snapshotRow upstream 本地内存表原始行。
+     * @param array $fallbackRow upstream runtime status 已经格式化过的回退行。
+     * @return array<string, mixed>
+     */
+    protected function composeGatewayUpstreamMemoryRow(array $instance, array $snapshotRow, array $fallbackRow): array {
+        $name = (string)($snapshotRow['process'] ?? ($fallbackRow['name'] ?? ''));
+        $pid = (int)($snapshotRow['pid'] ?? ($fallbackRow['pid'] ?? 0));
+        $usage = (float)($snapshotRow['usage_mb'] ?? $this->extractMemoryValue($fallbackRow['usage'] ?? null));
+        $real = (float)($snapshotRow['real_mb'] ?? $this->extractMemoryValue($fallbackRow['real'] ?? null));
+        $peak = (float)($snapshotRow['peak_mb'] ?? $this->extractMemoryValue($fallbackRow['peak'] ?? null));
+        $usageUpdated = (int)($snapshotRow['usage_updated'] ?? ($fallbackRow['usage_updated'] ?? 0));
+        $restartTs = (int)($snapshotRow['restart_ts'] ?? ($fallbackRow['restart_ts'] ?? 0));
+        $restartCount = (int)($snapshotRow['restart_count'] ?? ($fallbackRow['restart_count'] ?? 0));
+        $limitMb = (int)($snapshotRow['limit_memory_mb'] ?? ($fallbackRow['limit_memory_mb'] ?? 0));
+        $autoRestart = (int)($snapshotRow['auto_restart'] ?? 0);
+
+        $alive = $pid > 0 && @Process::kill($pid, 0);
+        $rssMb = null;
+        $pssMb = null;
+        $osActualMb = null;
+        if ($alive) {
+            $mem = \Scf\Util\MemoryMonitor::getPssRssByPid($pid);
+            $rssMb = isset($mem['rss_kb']) && is_numeric($mem['rss_kb']) ? round(((float)$mem['rss_kb']) / 1024, 1) : null;
+            $pssMb = isset($mem['pss_kb']) && is_numeric($mem['pss_kb']) ? round(((float)$mem['pss_kb']) / 1024, 1) : null;
+            $osActualMb = $pssMb ?? $rssMb;
+        }
+
+        if (
+            $alive
+            && $autoRestart === STATUS_ON
+            && str_starts_with($name, 'worker:')
+            && $limitMb > 0
+            && $osActualMb !== null
+            && $osActualMb > $limitMb
+        ) {
+            $host = (string)($instance['host'] ?? '127.0.0.1');
+            $port = (int)($instance['port'] ?? 0);
+            $restartKey = "gateway.upstream.memory.restart:{$host}:{$port}:{$name}";
+            $lastRestartAt = (int)(Runtime::instance()->get($restartKey) ?? 0);
+            if (time() - $lastRestartAt >= 120) {
+                if ($this->requestUpstreamWorkerMemoryRestart($instance, $name, $pid, $osActualMb, $limitMb)) {
+                    Runtime::instance()->set($restartKey, time());
+                    $restartTs = time();
+                    $restartCount++;
+                }
+            }
+        }
+
+        return [
+            'name' => $name,
+            'pid' => $pid > 0 ? $pid : ($fallbackRow['pid'] ?? '--'),
+            'usage' => number_format($usage, 2) . ' MB',
+            'real' => number_format($real, 2) . ' MB',
+            'peak' => number_format($peak, 2) . ' MB',
+            'os_actual' => $osActualMb === null ? '-' : (number_format($osActualMb, 2) . ' MB'),
+            'rss' => $rssMb === null ? '-' : (number_format($rssMb, 2) . ' MB'),
+            'pss' => $pssMb === null ? '-' : (number_format($pssMb, 2) . ' MB'),
+            'updated' => time(),
+            'usage_updated' => $usageUpdated,
+            'status' => $alive ? Color::green('正常') : Color::red('离线'),
+            'connection' => (int)($fallbackRow['connection'] ?? 0),
+            'restart_ts' => $restartTs,
+            'restart_count' => $restartCount,
+            'limit_memory_mb' => $limitMb,
+        ];
+    }
+
+    /**
+     * 通过 upstream 本地 IPC 请求其自行平滑轮换指定 worker。
+     *
+     * gateway 只负责发现超限和下发命令，不直接对子进程树外的 worker pid 发信号，
+     * 这样 worker 的退出/补拉仍然由 upstream 自己的 Swoole 生命周期负责。
+     *
+     * @param array $instance upstream 实例描述。
+     * @param string $processName worker 行名，例如 worker:1。
+     * @param int $pid worker 当前 pid。
+     * @param float $osActualMb gateway 现采到的 OS 物理内存。
+     * @param int $limitMb 该 worker 的阈值。
+     * @return bool 请求被 upstream 接收时返回 true。
+     */
+    protected function requestUpstreamWorkerMemoryRestart(array $instance, string $processName, int $pid, float $osActualMb, int $limitMb): bool {
+        $host = (string)($instance['host'] ?? '127.0.0.1');
+        $port = (int)($instance['port'] ?? 0);
+        if ($port <= 0 || $processName === '' || $pid <= 0) {
+            return false;
+        }
+        $ipcResponse = LocalIpc::request(
+            LocalIpc::upstreamSocketPath($port),
+            'upstream.restart_worker',
+            [
+                'process' => $processName,
+                'pid' => $pid,
+            ],
+            1.5
+        );
+        $accepted = is_array($ipcResponse) && (int)($ipcResponse['status'] ?? 0) === 200;
+        if ($accepted) {
+            Log::instance()->setModule('system')
+                ->error("{$processName}[PID:{$pid}] 内存 {$osActualMb}MB ≥ {$limitMb}MB，Gateway 已通知 upstream 平滑轮换");
+            return true;
+        }
+        $message = is_array($ipcResponse) ? (string)($ipcResponse['message'] ?? 'request failed') : 'ipc unavailable';
+        Log::instance()->setModule('system')
+            ->warning("{$processName}[PID:{$pid}] 内存 {$osActualMb}MB ≥ {$limitMb}MB，但 upstream 平滑轮换请求失败: {$message}");
+        return false;
     }
 
     protected function shouldKeepGatewayMemoryRow(array $row): bool {
@@ -2755,6 +3618,17 @@ class GatewayServer {
         ];
     }
 
+    /**
+     * 计算 dashboard websocket 的对外地址。
+     *
+     * dev server、反向代理、本地 loopback 混用时，Referer/Host 很容易指向前端开发端口，
+     * 这里会优先保留真正的网关地址；如果只能拿到 loopback，则回退到 gateway 自己的 dashboard 端口。
+     *
+     * @param string $host 当前请求的 Host 头
+     * @param string $referer 当前页面 Referer
+     * @param string $forwardedProto 代理透传的协议头
+     * @return string
+     */
     protected function buildDashboardSocketHost(string $host, string $referer, string $forwardedProto = ''): string {
         $normalizedHost = trim($host);
         $normalizedReferer = trim($referer);
@@ -2762,7 +3636,7 @@ class GatewayServer {
 
         if ($this->isLoopbackDashboardHost($normalizedHost)) {
             $refererAuthority = $this->dashboardRefererAuthority($normalizedReferer);
-            if ($refererAuthority !== '') {
+            if ($refererAuthority !== '' && !$this->isLoopbackDashboardHost($refererAuthority)) {
                 $normalizedHost = $refererAuthority;
             }
         }
@@ -2774,6 +3648,7 @@ class GatewayServer {
         if ($normalizedHost === '') {
             $normalizedHost = '127.0.0.1:' . $this->resolvedDashboardPort();
         }
+        $normalizedHost = $this->normalizeDashboardSocketAuthority($normalizedHost);
 
         $protocol = in_array($normalizedProto, ['https', 'wss'], true)
             || (!empty($normalizedReferer) && str_starts_with($normalizedReferer, 'https'))
@@ -2781,6 +3656,29 @@ class GatewayServer {
             : 'ws://';
 
         return $protocol . $normalizedHost . '/dashboard.socket';
+    }
+
+    protected function normalizeDashboardSocketAuthority(string $authority): string {
+        $authority = trim($authority);
+        if ($authority === '') {
+            return '127.0.0.1:' . $this->resolvedDashboardPort();
+        }
+        $parts = parse_url(str_contains($authority, '://') ? $authority : ('tcp://' . $authority));
+        if (!is_array($parts)) {
+            return $authority;
+        }
+        $host = trim((string)($parts['host'] ?? ''));
+        if ($host === '') {
+            $host = trim((string)($parts['path'] ?? ''));
+        }
+        if ($host === '') {
+            return $authority;
+        }
+        $port = (int)($parts['port'] ?? 0);
+        if ($port <= 0 && $this->isLoopbackDashboardHost($host)) {
+            $port = $this->resolvedDashboardPort();
+        }
+        return $port > 0 ? ($host . ':' . $port) : $host;
     }
 
     protected function isLoopbackDashboardHost(string $host): bool {
@@ -2933,10 +3831,15 @@ class GatewayServer {
         $node = (string)($payload['node'] ?? SERVER_HOST);
         $sourceType = (string)($payload['source_type'] ?? 'gateway');
         $oldInstance = (bool)($payload['old_instance'] ?? false);
+        $instanceLabel = trim((string)($payload['instance_label'] ?? ''));
+
+        if ($oldInstance) {
+            $this->writeRelayedOldInstanceConsole($time, $message, $instanceLabel);
+        }
 
         if ($this->dashboardEnabled()) {
             if (!$this->hasConsoleSubscribers()) {
-                return false;
+                return $oldInstance;
             }
             $this->pushDashboardEvent([
                 'event' => 'console',
@@ -2950,30 +3853,31 @@ class GatewayServer {
         if (!ConsoleRelay::remoteSubscribed()) {
             return false;
         }
-
-        $socket = $this->masterGatewaySocket;
-        if (!$socket) {
+        if (
+            !$this->subProcessManager
+            || !$this->subProcessManager->hasProcess('GatewayClusterCoordinator')
+        ) {
             return false;
         }
-
-        try {
-            return (bool)$socket->push(JsonHelper::toJson([
-                'event' => 'console_log',
-                'data' => [
-                    'time' => $time,
-                    'message' => $message,
-                    'source_type' => $sourceType,
-                    'node' => $node,
-                    'old_instance' => $oldInstance,
-                ],
-            ]));
-        } catch (Throwable) {
-            return false;
-        }
+        $this->subProcessManager->sendCommand('console_log', [
+            'time' => $time,
+            'message' => $message,
+            'source_type' => $sourceType,
+            'node' => $node,
+            'old_instance' => $oldInstance,
+        ], ['GatewayClusterCoordinator']);
+        return true;
     }
 
     protected function hasConsoleSubscribers(): bool {
         return !empty($this->dashboardClients);
+    }
+
+    protected function writeRelayedOldInstanceConsole(string $time, string $message, string $instanceLabel = ''): void {
+        $prefix = $instanceLabel !== '' ? ('#' . $instanceLabel . ' ') : '';
+        $suffix = $time !== '' ? " (source_time={$time})" : '';
+        echo Console::timestamp() . ' ' . "\033[90m" . $prefix . $message . $suffix . "\e[0m" . PHP_EOL;
+        flush();
     }
 
     protected function syncConsoleSubscriptionState(bool $force = false): void {
@@ -3017,12 +3921,18 @@ class GatewayServer {
         ]));
     }
 
+    /**
+     * 判断 gateway 内部控制请求是否来自本机回环地址。
+     *
+     * `/ _gateway/internal/*` 是只服务于本机进程协作的控制平面入口，
+     * 不能再把可伪造请求头当成放行依据。远程节点协作应继续走
+     * dashboard token、node client 与本地 IPC 链路。
+     *
+     * @param Request $request 当前 HTTP 请求。
+     * @return bool 仅当来源 IP 为 loopback 时返回 true。
+     */
     protected function isInternalGatewayRequest(Request $request): bool {
-        $flag = (string)($request->header['x-gateway-internal'] ?? '');
-        if ($flag === '1') {
-            return true;
-        }
-        $clientIp = (string)($request->server['remote_addr'] ?? '');
+        $clientIp = trim((string)($request->server['remote_addr'] ?? ''));
         return in_array($clientIp, ['127.0.0.1', '::1'], true);
     }
 
@@ -3043,6 +3953,12 @@ class GatewayServer {
         return Result::success('已重启 ' . $summary['success_count'] . ' 个业务实例');
     }
 
+    /**
+     * 关闭指定 host 对应的 managed upstream。
+     *
+     * @param string $host 目标实例 host
+     * @return Result
+     */
     protected function shutdownUpstreamsByHost(string $host): Result {
         $plans = $this->matchedPlansByHost($host);
         if (!$plans) {
@@ -3058,11 +3974,31 @@ class GatewayServer {
         return Result::success('已关闭 ' . count($plans) . ' 个业务实例');
     }
 
+    /**
+     * 统一入口，当前默认等价于滚动重启。
+     *
+     * @param array<int, array<string, mixed>>|null $plans 指定的业务实例计划集合
+     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     */
     protected function restartManagedUpstreams(?array $plans = null): array {
         return $this->rollingRestartManagedUpstreams($plans);
     }
 
+    /**
+     * 对 managed upstream 做一次滚动重启。
+     *
+     * 顺序不能乱：
+     * 1. 先拉起新 generation；
+     * 2. 等待新实例 serverIsReady；
+     * 3. 切 active generation 并校验切流；
+     * 4. 再通知旧代进入 quiesce / recycle。
+     *
+     * @param array<int, array<string, mixed>>|null $plans 指定需要滚动重启的 managed plan 集合
+     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     */
     protected function rollingRestartManagedUpstreams(?array $plans = null): array {
+        $this->managedUpstreamRolling = true;
+        try {
         $basePlans = $plans ?? $this->activeManagedPlans();
         if (!$basePlans) {
             $basePlans = $this->managedPlansFromSnapshot();
@@ -3094,6 +4030,7 @@ class GatewayServer {
         }
 
         $generationVersion = $this->buildReloadGenerationVersion($basePlans);
+        $previousActiveVersion = (string)($this->instanceManager->state()['active_version'] ?? ($basePlans[0]['version'] ?? ''));
         Console::info("【Gateway】开始滚动重启业务实例: generation={$generationVersion}, count=" . count($basePlans));
         $newPlans = [];
         $registeredPlans = [];
@@ -3133,6 +4070,7 @@ class GatewayServer {
                 ];
                 continue;
             }
+            Console::success("【Gateway】新业务实例已就绪(serverIsReady)，等待切换流量: " . $this->describePlan($newPlan));
 
             $this->registerManagedPlan($newPlan, false);
             $registeredPlans[] = $newPlan;
@@ -3153,23 +4091,54 @@ class GatewayServer {
             ];
         }
 
+        // 只有在新代 ready 且即将切流时，旧代才允许进入 draining/recycle。
         $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
+        $this->notifyManagedUpstreamGenerationIterated($generationVersion);
         $this->syncNginxProxyTargets('rolling_restart_activate');
-        foreach ($basePlans as $plan) {
-            $this->quiesceManagedPlanBusinessPlane($plan);
+        if (!$this->waitForManagedGenerationCutover($generationVersion, $registeredPlans, 'rolling_restart')) {
+            Console::warning("【Gateway】滚动重启切换校验失败，回滚旧业务实例: generation={$generationVersion}");
+            $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, 'rolling_restart');
+            return [
+                'success_count' => 0,
+                'failed_nodes' => [[
+                    'host' => $generationVersion,
+                    'error' => '新业务实例切换校验失败，已回滚，旧实例保持运行',
+                ]],
+            ];
         }
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
         }
+        foreach ($basePlans as $plan) {
+            $this->quiesceManagedPlanBusinessPlane($plan);
+        }
         Console::success("【Gateway】滚动重启完成并切换流量: generation={$generationVersion}, success={$successCount}, drain_grace=" . self::ROLLING_DRAIN_GRACE_SECONDS . "s");
+        $this->logPreviousGenerationTransition($previousActiveVersion);
 
         return [
             'success_count' => $successCount,
             'failed_nodes' => [],
         ];
+        } finally {
+            $this->managedUpstreamRolling = false;
+            $this->lastManagedUpstreamRollingAt = time();
+            $this->managedUpstreamHealthState = [];
+        }
     }
 
+    /**
+     * 对 managed upstream 做滚动升级。
+     *
+     * 它和 rolling restart 的差异主要在 generation 标识和升级上下文，
+     * 切流、回滚、回收的控制流程保持一致。
+     *
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     */
     protected function rollingUpdateManagedUpstreams(string $type, string $version): array {
+        $this->managedUpstreamRolling = true;
+        try {
         $basePlans = $this->activeManagedPlans();
         $failedNodes = [];
         $successCount = 0;
@@ -3181,6 +4150,7 @@ class GatewayServer {
         }
 
         $generationVersion = $this->buildRollingGenerationVersion($type, $version);
+        $previousActiveVersion = (string)($this->instanceManager->state()['active_version'] ?? ($basePlans[0]['version'] ?? ''));
         Console::info("【Gateway】开始滚动升级业务实例: type={$type}, version={$version}, generation={$generationVersion}, base_count=" . count($basePlans));
         $newPlans = [];
         $registeredPlans = [];
@@ -3219,6 +4189,7 @@ class GatewayServer {
                 ];
                 continue;
             }
+            Console::success("【Gateway】新业务实例已就绪(serverIsReady)，等待切换流量: " . $this->describePlan($newPlan));
 
             $this->registerManagedPlan($newPlan, false);
             $registeredPlans[] = $newPlan;
@@ -3240,21 +4211,178 @@ class GatewayServer {
         }
 
         $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
+        $this->notifyManagedUpstreamGenerationIterated($generationVersion);
         $this->syncNginxProxyTargets('rolling_update_activate');
-        foreach ($basePlans as $plan) {
-            $this->quiesceManagedPlanBusinessPlane($plan);
+        if (!$this->waitForManagedGenerationCutover($generationVersion, $registeredPlans, 'rolling_update')) {
+            Console::warning("【Gateway】滚动升级切换校验失败，回滚旧业务实例: generation={$generationVersion}");
+            $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, 'rolling_update');
+            return [
+                'success_count' => 0,
+                'failed_nodes' => [[
+                    'host' => $generationVersion,
+                    'error' => '新业务实例切换校验失败，已回滚，旧实例保持运行',
+                ]],
+            ];
         }
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
         }
+        foreach ($basePlans as $plan) {
+            $this->quiesceManagedPlanBusinessPlane($plan);
+        }
         Console::success("【Gateway】滚动升级完成并切换流量: generation={$generationVersion}, success={$successCount}, drain_grace=" . self::ROLLING_DRAIN_GRACE_SECONDS . "s");
+        $this->logPreviousGenerationTransition($previousActiveVersion);
 
         return [
             'success_count' => $successCount,
             'failed_nodes' => [],
         ];
+        } finally {
+            $this->managedUpstreamRolling = false;
+            $this->lastManagedUpstreamRollingAt = time();
+            $this->managedUpstreamHealthState = [];
+        }
     }
 
+    /**
+     * 校验新 generation 是否已经真正接管流量。
+     *
+     * 不是只看 active_version 切换成功就算完成，还要连续多次确认新实例健康，
+     * 避免“刚激活就掉线”的短抖动被误判成切流成功。
+     *
+     * @param string $generationVersion 新 generation 版本号
+     * @param array<int, array<string, mixed>> $plans
+     * @param string $stage 当前校验阶段名
+     * @return bool
+     */
+    protected function waitForManagedGenerationCutover(string $generationVersion, array $plans, string $stage): bool {
+        if ($generationVersion === '' || !$plans) {
+            return false;
+        }
+        $deadline = microtime(true) + self::ROLLING_CUTOVER_VERIFY_TIMEOUT_SECONDS;
+        $stableChecks = 0;
+        $lastReason = 'unknown';
+        while (microtime(true) < $deadline) {
+            $snapshot = $this->instanceManager->snapshot();
+            if ((string)($snapshot['active_version'] ?? '') !== $generationVersion) {
+                $lastReason = 'active_version_not_switched';
+                $stableChecks = 0;
+                usleep(200000);
+                continue;
+            }
+            $allHealthy = true;
+            foreach ($plans as $plan) {
+                $probe = $this->probeManagedUpstreamHealth($plan);
+                if ($probe['healthy']) {
+                    continue;
+                }
+                $allHealthy = false;
+                $lastReason = (string)($probe['reason'] ?? 'unknown');
+                $stableChecks = 0;
+                break;
+            }
+            if (!$allHealthy) {
+                usleep(200000);
+                continue;
+            }
+            $stableChecks++;
+            if ($stableChecks >= self::ROLLING_CUTOVER_STABLE_CHECKS) {
+                Console::success("【Gateway】新业务实例切换校验通过: stage={$stage}, generation={$generationVersion}, checks={$stableChecks}");
+                return true;
+            }
+            usleep(200000);
+        }
+        Console::warning("【Gateway】新业务实例切换校验超时: stage={$stage}, generation={$generationVersion}, reason={$lastReason}");
+        return false;
+    }
+
+    /**
+     * 在新 generation 切流失败时把流量恢复到旧 generation，并清理新代。
+     *
+     * @param string $previousActiveVersion 回滚目标 generation
+     * @param string $generationVersion 本次失败的新 generation
+     * @param array<int, array<string, mixed>> $registeredPlans 已注册进 registry 的新计划
+     * @param array<int, array<string, mixed>> $newPlans 本轮启动过的新计划
+     * @param string $stage 当前切换阶段
+     * @return void
+     */
+    protected function rollbackManagedGenerationCutover(string $previousActiveVersion, string $generationVersion, array $registeredPlans, array $newPlans, string $stage): void {
+        $snapshot = $this->instanceManager->state();
+        if ($previousActiveVersion !== ''
+            && $previousActiveVersion !== $generationVersion
+            && isset(($snapshot['generations'] ?? [])[$previousActiveVersion])) {
+            $this->instanceManager->activateVersion($previousActiveVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
+            $this->notifyManagedUpstreamGenerationIterated($previousActiveVersion);
+            $this->syncNginxProxyTargets($stage . '_rollback');
+            Console::warning("【Gateway】已回滚业务流量到旧实例: generation={$previousActiveVersion}");
+        }
+        foreach ($registeredPlans as $plan) {
+            $this->stopManagedPlan($plan);
+        }
+        foreach ($newPlans as $plan) {
+            $this->removeManagedPlan($plan);
+        }
+    }
+
+    /**
+     * 记录旧 generation 进入 draining 的起止时间窗口。
+     *
+     * @param string $version 旧 generation 版本号
+     * @return void
+     */
+    protected function logDrainingGenerationSchedule(string $version): void {
+        if ($version === '') {
+            return;
+        }
+        $snapshot = $this->instanceManager->snapshot();
+        $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
+        if (($generation['status'] ?? '') !== 'draining') {
+            return;
+        }
+        Console::info(
+            "【Gateway】旧业务实例进入 draining: generation={$version}, "
+            . "started_at=" . (int)($generation['drain_started_at'] ?? 0)
+            . ", deadline_at=" . (int)($generation['drain_deadline_at'] ?? 0)
+        );
+    }
+
+    /**
+     * 记录切流后旧 generation 的状态。
+     *
+     * 旧代可能还在 draining，说明确实有尾流等待；
+     * 也可能已经 offline，说明实例已死或已无在途请求，可以直接回收。
+     *
+     * @param string $version 旧 generation 版本号
+     * @return void
+     */
+    protected function logPreviousGenerationTransition(string $version): void {
+        if ($version === '') {
+            return;
+        }
+        $snapshot = $this->instanceManager->snapshot();
+        $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
+        $status = (string)($generation['status'] ?? '');
+        if ($status === 'draining') {
+            Console::info("【Gateway】旧业务实例保持服务尾流，待 nginx 切换稳定且无在途请求后再进入 shutdown: previous={$version}");
+            $this->logDrainingGenerationSchedule($version);
+            return;
+        }
+        if ($status === 'offline') {
+            Console::info("【Gateway】旧业务实例已不可达或已无尾流，直接进入回收: previous={$version}");
+        }
+    }
+
+    /**
+     * 请求 supervisor 回收一个 managed plan。
+     *
+     * 真正的“回收完成”不是这里发完 stop 命令，而是等 checkPendingManagedRecycle()
+     * 观察到端口关闭之后，再清理 registry 和内存中的计划状态。
+     *
+     * @param array<string, mixed> $plan 目标 managed plan
+     * @param bool $removeState 回收完成后是否从 registry 中移除实例状态
+     * @param bool $removePlan 回收完成后是否从内存计划表中移除
+     * @return void
+     */
     protected function stopManagedPlan(array $plan, bool $removeState = true, bool $removePlan = true): void {
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
@@ -3266,6 +4394,7 @@ class GatewayServer {
             if (isset($this->pendingManagedRecycles[$key])) {
                 return;
             }
+            unset($this->managedUpstreamHealthState[$key]);
             if (!$this->upstreamSupervisor->sendCommand([
                 'action' => 'stop_instance',
                 'instance' => [
@@ -3319,6 +4448,12 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 根据 host 筛选当前内存里的 managed plan。
+     *
+     * @param string $host 目标 host
+     * @return array<int, array<string, mixed>>
+     */
     protected function matchedPlansByHost(string $host): array {
         $host = trim($host);
         return array_values(array_filter($this->managedUpstreamPlans, function ($plan) use ($host) {
@@ -3333,6 +4468,13 @@ class GatewayServer {
         }));
     }
 
+    /**
+     * 返回当前 active generation 对应的 managed plan 集合。
+     *
+     * 当 active generation 缺失时，会退回到当前内存里的全部有效计划。
+     *
+     * @return array<int, array<string, mixed>>
+     */
     protected function activeManagedPlans(): array {
         $activeVersion = (string)($this->instanceManager->state()['active_version'] ?? '');
         if ($activeVersion !== '') {
@@ -3349,6 +4491,11 @@ class GatewayServer {
         }));
     }
 
+    /**
+     * 从 instance snapshot 反推 managed plan，作为内存计划丢失时的兜底恢复。
+     *
+     * @return array<int, array<string, mixed>>
+     */
     protected function managedPlansFromSnapshot(): array {
         $snapshot = $this->instanceManager->snapshot();
         $activeVersion = (string)($snapshot['active_version'] ?? '');
@@ -3382,20 +4529,90 @@ class GatewayServer {
                     'role' => (string)($metadata['role'] ?? SERVER_ROLE),
                     'port' => $port,
                     'rpc_port' => (int)($metadata['rpc_port'] ?? 0),
-                    'src' => APP_SRC_TYPE,
+                    'src' => (string)($metadata['src'] ?? APP_SRC_TYPE),
                     'metadata' => array_merge($metadata, [
                         'managed' => true,
                         'managed_mode' => (string)($metadata['managed_mode'] ?? 'gateway_supervisor'),
                         'display_version' => (string)($metadata['display_version'] ?? ($instance['version'] ?? $version)),
                     ]),
-                    'start_timeout' => 25,
-                    'extra' => [],
+                    'start_timeout' => (int)($metadata['start_timeout'] ?? 25),
+                    'extra' => $this->normalizeManagedPlanExtraFlags([
+                        'src' => (string)($metadata['src'] ?? APP_SRC_TYPE),
+                        'metadata' => $metadata,
+                    ]),
                 ];
             }
         }
         return $plans;
     }
 
+    /**
+     * 归一化计划里的额外启动参数，确保 dev/pack/src/gateway_port 语义能继承到子进程。
+     *
+     * @param array<string, mixed> $plan managed plan
+     * @return array<int, string>
+     */
+    protected function normalizeManagedPlanExtraFlags(array $plan): array {
+        $flags = [];
+        foreach ((array)($plan['extra'] ?? []) as $flag) {
+            if (is_string($flag) && $flag !== '') {
+                $flags[] = $flag;
+            }
+        }
+        foreach ((array)(($plan['metadata']['extra_flags'] ?? [])) as $flag) {
+            if (is_string($flag) && $flag !== '') {
+                $flags[] = $flag;
+            }
+        }
+
+        $hasDev = false;
+        $hasDir = false;
+        $hasPhar = false;
+        $hasPackMode = false;
+        $hasGatewayPort = false;
+        foreach ($flags as $flag) {
+            $hasDev = $hasDev || $flag === '-dev';
+            $hasDir = $hasDir || $flag === '-dir';
+            $hasPhar = $hasPhar || $flag === '-phar';
+            $hasPackMode = $hasPackMode || in_array($flag, ['-pack', '-nopack'], true);
+            $hasGatewayPort = $hasGatewayPort || str_starts_with($flag, '-gateway_port=');
+        }
+
+        if (!$hasDev && SERVER_RUN_ENV === 'dev') {
+            $flags[] = '-dev';
+        }
+        if (!$hasPackMode && !(defined('FRAMEWORK_IS_PHAR') && FRAMEWORK_IS_PHAR === true)) {
+            $flags[] = '-nopack';
+        }
+        if (!$hasDir && !$hasPhar) {
+            $src = (string)($plan['src'] ?? ($plan['metadata']['src'] ?? APP_SRC_TYPE));
+            if ($src === 'dir') {
+                $flags[] = '-dir';
+            } elseif ($src === 'phar') {
+                $flags[] = '-phar';
+            }
+        }
+        if (!$hasGatewayPort && $this->businessPort() > 0) {
+            $flags[] = '-gateway_port=' . $this->businessPort();
+        }
+
+        $normalized = [];
+        foreach ($flags as $flag) {
+            if (!is_string($flag) || $flag === '') {
+                continue;
+            }
+            $normalized[$flag] = true;
+        }
+        return array_keys($normalized);
+    }
+
+    /**
+     * 构建滚动升级使用的 generation 版本号。
+     *
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @return string
+     */
     protected function buildRollingGenerationVersion(string $type, string $version): string {
         if ($type === 'app') {
             return $version;
@@ -3403,11 +4620,22 @@ class GatewayServer {
         return $type . '-' . $version . '-' . date('YmdHis');
     }
 
+    /**
+     * 构建普通 reload 使用的 generation 标识。
+     *
+     * @param array<int, array<string, mixed>> $plans 当前 active plan 集合
+     * @return string
+     */
     protected function buildReloadGenerationVersion(array $plans): string {
         $displayVersion = (string)($plans[0]['metadata']['display_version'] ?? $plans[0]['version'] ?? App::version() ?? 'reload');
         return $displayVersion . '-reload-' . date('YmdHis');
     }
 
+    /**
+     * 收集 gateway 与 managed upstream 当前占用或保留的端口。
+     *
+     * @return array<int, int>
+     */
     protected function collectReservedPorts(): array {
         $ports = [$this->port];
         if ($this->rpcPort > 0) {
@@ -3430,6 +4658,13 @@ class GatewayServer {
         return array_values(array_unique(array_filter($ports)));
     }
 
+    /**
+     * 为新的 managed upstream 分配未占用端口。
+     *
+     * @param int $startPort 起始扫描端口
+     * @param array<int, int> $reserved 已保留端口列表
+     * @return int
+     */
     protected function allocateManagedPort(int $startPort, array $reserved): int {
         $port = max(1025, $startPort);
         while (true) {
@@ -3448,6 +4683,13 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 将一个 managed plan 注册到 instance registry，并按需激活该 generation。
+     *
+     * @param array<string, mixed> $plan managed plan
+     * @param bool $activate 是否立即激活该 generation
+     * @return void
+     */
     protected function registerManagedPlan(array $plan, bool $activate = false): void {
         $version = (string)($plan['version'] ?? '');
         $host = (string)($plan['host'] ?? '127.0.0.1');
@@ -3462,14 +4704,24 @@ class GatewayServer {
         $metadata['rpc_port'] = (int)($plan['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
         $metadata['started_at'] = (int)($metadata['started_at'] ?? time());
         $metadata['managed_mode'] = 'gateway_supervisor';
+        $metadata['src'] = (string)($plan['src'] ?? ($metadata['src'] ?? APP_SRC_TYPE));
+        $metadata['start_timeout'] = (int)($plan['start_timeout'] ?? ($metadata['start_timeout'] ?? 25));
+        $metadata['extra_flags'] = $this->normalizeManagedPlanExtraFlags($plan);
         $this->instanceManager->registerUpstream($version, $host, $port, $weight, $metadata);
         if ($activate) {
             $this->instanceManager->activateVersion($version, 0);
+            $this->notifyManagedUpstreamGenerationIterated($version);
             $this->syncNginxProxyTargets('register_managed_plan_activate');
         }
         $this->bootstrappedManagedInstances[$version . '@' . $host . ':' . $port] = true;
     }
 
+    /**
+     * 把新启动的 managed plan 追加进内存计划表。
+     *
+     * @param array<string, mixed> $plan managed plan
+     * @return void
+     */
     protected function appendManagedPlan(array $plan): void {
         foreach ($this->managedUpstreamPlans as $existing) {
             if ((string)($existing['version'] ?? '') === (string)($plan['version'] ?? '')
@@ -3478,9 +4730,18 @@ class GatewayServer {
                 return;
             }
         }
+        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
         $this->managedUpstreamPlans[] = $plan;
     }
 
+    /**
+     * 将运行期探测到的 metadata 合并回内存计划表。
+     *
+     * @param string $host 实例 host
+     * @param int $port 实例端口
+     * @param array<string, mixed> $metadataPatch 需要合并的元数据补丁
+     * @return void
+     */
     protected function mergeManagedPlanMetadata(string $host, int $port, array $metadataPatch): void {
         if ($host === '' || $port <= 0 || !$metadataPatch) {
             return;
@@ -3494,10 +4755,17 @@ class GatewayServer {
         unset($plan);
     }
 
+    /**
+     * 用 registry/snapshot 中的最新运行时信息补全 managed plan。
+     *
+     * @param array<string, mixed> $plan 原始 managed plan
+     * @return array<string, mixed>
+     */
     protected function hydrateManagedPlanRuntimeMetadata(array $plan): array {
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
         if ($host === '' || $port <= 0) {
+            $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
             return $plan;
         }
         $snapshot = $this->instanceManager->snapshot();
@@ -3508,12 +4776,20 @@ class GatewayServer {
                 }
                 $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), (array)($instance['metadata'] ?? []));
                 $plan['rpc_port'] = (int)($plan['rpc_port'] ?? (($instance['metadata']['rpc_port'] ?? 0)));
+                $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
                 return $plan;
             }
         }
+        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
         return $plan;
     }
 
+    /**
+     * 从内存计划表移除指定的 managed plan。
+     *
+     * @param array<string, mixed> $plan 目标 managed plan
+     * @return void
+     */
     protected function removeManagedPlan(array $plan): void {
         $version = (string)($plan['version'] ?? '');
         $host = (string)($plan['host'] ?? '127.0.0.1');
@@ -3527,6 +4803,12 @@ class GatewayServer {
         }));
     }
 
+    /**
+     * 生成人类可读的 plan 描述，用于日志串联整条生命周期。
+     *
+     * @param array<string, mixed> $plan managed plan
+     * @return string
+     */
     protected function managedPlanDescriptor(array $plan): string {
         $version = (string)($plan['version'] ?? '');
         $host = (string)($plan['host'] ?? '127.0.0.1');
@@ -3539,6 +4821,15 @@ class GatewayServer {
         return implode(', ', $parts);
     }
 
+    /**
+     * 在新代切流成功后，让旧业务实例停止接收新业务。
+     *
+     * 正常路径下先发 quiesce，让旧代自己排空；
+     * 如果旧代已经不可达，则直接标记 offline 并进入回收，避免“死实例还挂着 draining deadline”。
+     *
+     * @param array<string, mixed> $plan 旧 generation 对应的 managed plan
+     * @return void
+     */
     protected function quiesceManagedPlanBusinessPlane(array $plan): void {
         if (!$this->launcher) {
             return;
@@ -3550,13 +4841,37 @@ class GatewayServer {
             return;
         }
         if (!$this->launcher->requestBusinessQuiesce($host, $port, 1.0)) {
+            $probe = $this->probeManagedUpstreamHealth($plan);
+            $reachability = $this->managedPlanReachability($plan);
+            $unrecoverableReasons = [
+                'http_port_down',
+                'rpc_port_down',
+                'health_status_unreachable',
+                'http_probe_failed',
+                'server_not_alive',
+                'server_not_ready',
+            ];
+            if (
+                (!$reachability['http_listening'] && !$reachability['rpc_listening'])
+                || (!$probe['healthy'] && in_array((string)($probe['reason'] ?? ''), $unrecoverableReasons, true))
+            ) {
+                Console::warning(
+                    "【Gateway】旧业务实例已不可达，直接进入回收: " . $this->managedPlanDescriptor($plan)
+                    . ", reason=" . (string)($probe['reason'] ?? 'unknown')
+                    . ", http=" . ($reachability['http_listening'] ? 'listening' : 'down')
+                    . ", rpc=" . ($reachability['rpc_port'] > 0 ? ($reachability['rpc_listening'] ? 'listening' : 'down') : 'n/a')
+                    . ", process=" . ($reachability['pid_alive'] ? 'alive' : 'down')
+                );
+                $this->instanceManager->markInstanceOffline($host, $port, $version);
+                $this->stopManagedPlan($plan, true);
+                return;
+            }
             Console::warning("【Gateway】旧业务实例业务平面静默失败: " . $this->managedPlanDescriptor($plan));
             return;
         }
         $runtimeStatus = $this->fetchUpstreamRuntimeStatus($plan);
         $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
-        $proxyHttpProcessing = $this->instanceManager->proxyHttpRequestCountFor($version, $host, $port);
-        $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0) + $proxyHttpProcessing;
+        $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0);
         $rpcProcessing = (int)($runtimeStatus['rpc_request_processing'] ?? 0);
         Console::info(
             "【Gateway】旧业务实例开始平滑回收: " . $this->managedPlanDescriptor($plan)
@@ -3572,8 +4887,39 @@ class GatewayServer {
         }
     }
 
+    /**
+     * 辅助判断旧实例当前是“还能服务但在排空”，还是“已经不可达”。
+     *
+     * @param array<string, mixed> $plan 旧实例 plan
+     * @return array{http_listening: bool, rpc_listening: bool, pid_alive: bool, rpc_port: int}
+     */
+    protected function managedPlanReachability(array $plan): array {
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
+        $pid = (int)($plan['metadata']['pid'] ?? 0);
+
+        $httpListening = $port > 0 && (
+            $this->launcher->isListening($host, $port, 0.2)
+            || $this->launcher->isListening('0.0.0.0', $port, 0.2)
+        );
+        $rpcListening = $rpcPort > 0 && (
+            $this->launcher->isListening($host, $rpcPort, 0.2)
+            || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2)
+        );
+        $pidAlive = $pid > 0 && Process::kill($pid, 0);
+
+        return [
+            'http_listening' => $httpListening,
+            'rpc_listening' => $rpcListening,
+            'pid_alive' => $pidAlive,
+            'rpc_port' => $rpcPort,
+        ];
+    }
+
     protected function cleanupOfflineManagedUpstreams(): void {
         $snapshot = $this->instanceManager->snapshot();
+        $removedVersions = [];
         foreach (($snapshot['generations'] ?? []) as $generation) {
             if (($generation['status'] ?? '') !== 'offline') {
                 continue;
@@ -3599,8 +4945,11 @@ class GatewayServer {
             }
             $this->instanceManager->removeVersion($version);
             if ($version !== '') {
-                Console::success("【Gateway】旧业务实例代际已移除 generation={$version}");
+                $removedVersions[] = $version;
             }
+        }
+        if ($removedVersions) {
+            Console::success("【Gateway】旧业务实例代际已移除: count=" . count($removedVersions) . ", generations=" . implode(' | ', $removedVersions));
         }
     }
 
@@ -3642,9 +4991,21 @@ class GatewayServer {
         unset($this->pendingManagedRecycleWatchers[$key]);
     }
 
+    /**
+     * 轮询某个 pending recycle 的最终完成态。
+     *
+     * 只要端口还在监听，就说明旧实例还没真正退出；
+     * 只有端口都关掉后，才会把 registry 与内存中的 managed plan 一并清理。
+     *
+     * @param string $key pending recycle 项唯一键
+     * @return bool true 表示 watcher 可移除；false 表示仍需继续轮询
+     */
     protected function checkPendingManagedRecycle(string $key): bool {
         if (!$this->launcher || !isset($this->pendingManagedRecycles[$key])) {
             return true;
+        }
+        if (($this->pendingManagedRecycleCompletions[$key] ?? false) === true) {
+            return false;
         }
 
         $item = $this->pendingManagedRecycles[$key];
@@ -3673,6 +5034,7 @@ class GatewayServer {
 
         $removeState = (bool)($item['remove_state'] ?? true);
         $removePlan = (bool)($item['remove_plan'] ?? true);
+        $this->pendingManagedRecycleCompletions[$key] = true;
         if ($removeState) {
             $this->instanceManager->removeInstance($host, $port);
         }
@@ -3680,9 +5042,32 @@ class GatewayServer {
         if ($removePlan) {
             $this->removeManagedPlan($plan);
         }
+        unset($this->managedUpstreamHealthState[$key]);
+        $removedGeneration = '';
+        if ($removeState) {
+            $version = (string)($plan['version'] ?? '');
+            if ($version !== '') {
+                $snapshot = $this->instanceManager->snapshot();
+                $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
+                if ($generation && empty($generation['instances'] ?? [])) {
+                    $this->instanceManager->removeVersion($version);
+                    $removedGeneration = $version;
+                }
+            }
+        }
+        unset($this->pendingManagedRecycleWarnState[$key], $this->pendingManagedRecycles[$key], $this->pendingManagedRecycleCompletions[$key]);
         Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
-        unset($this->pendingManagedRecycleWarnState[$key]);
-        unset($this->pendingManagedRecycles[$key]);
+        if ($removedGeneration !== '') {
+            Console::success("【Gateway】旧业务实例代际已移除: count=1, generations={$removedGeneration}");
+        }
+        $activeVersion = (string)($this->instanceManager->snapshot()['active_version'] ?? '');
+        if ($activeVersion !== '') {
+            $this->notifyManagedUpstreamGenerationIterated($activeVersion);
+        } else {
+            $this->lastManagedHealthActiveVersion = '';
+            $this->managedUpstreamHealthState = [];
+            $this->lastManagedUpstreamHealthCheckAt = 0;
+        }
         return true;
     }
 
@@ -3740,6 +5125,7 @@ class GatewayServer {
                 . ", rpc=" . (int)($item['rpc_processing'] ?? 0)
                 . ", queue=" . (int)($item['redis_queue_processing'] ?? 0)
                 . ", crontab=" . (int)($item['crontab_busy'] ?? 0)
+                . ", deadline_at=" . (int)($item['drain_deadline_at'] ?? 0)
             );
         }
         foreach (array_keys($this->drainingGenerationWarnState) as $version) {
@@ -3774,9 +5160,15 @@ class GatewayServer {
             '/notices' => ['GET'],
             '/logs' => ['GET'],
             '/crontabs' => ['GET'],
+            '/linux_crontabs' => ['GET'],
+            '/linux_crontab_installed' => ['GET'],
             '/crontab_run' => ['POST'],
             '/crontab_status' => ['POST'],
             '/crontab_override' => ['POST'],
+            '/linux_crontab_save' => ['POST'],
+            '/linux_crontab_delete' => ['POST'],
+            '/linux_crontab_set_enabled' => ['POST'],
+            '/linux_crontab_sync' => ['POST'],
             '/install' => ['POST'],
             '/install_check' => ['GET'],
             '/check_slave_node' => ['POST'],
@@ -3964,20 +5356,25 @@ class GatewayServer {
                     return;
                 }
                 $result = $this->dispatchInternalGatewayCommand((string)($payload['command'] ?? ''));
+                $afterWrite = isset($result['__after_write']) && is_callable($result['__after_write'])
+                    ? $result['__after_write']
+                    : null;
+                unset($result['__after_write']);
                 $this->json($response, (int)($result['status'] ?? 500), $result['data'] ?? ['message' => (string)($result['message'] ?? 'request failed')]);
+                $afterWrite && $afterWrite();
                 return;
             }
 
             if ($method === 'GET' && $path === '/_gateway/healthz') {
                 $this->json($response, 200, [
                     'message' => 'ok',
-                    'active_version' => $this->instanceManager->snapshot()['active_version'] ?? null,
+                    'active_version' => $this->currentGatewayStateSnapshot()['active_version'] ?? null,
                 ]);
                 return;
             }
 
             if ($method === 'GET' && $path === '/_gateway/upstreams') {
-                $this->json($response, 200, $this->instanceManager->snapshot());
+                $this->json($response, 200, $this->currentGatewayStateSnapshot());
                 return;
             }
 
@@ -3992,7 +5389,7 @@ class GatewayServer {
                 $this->json($response, 200, [
                     'message' => 'registered',
                     'instance' => $instance,
-                    'state' => $this->instanceManager->snapshot(),
+                    'state' => $this->currentGatewayStateSnapshot(),
                 ]);
                 return;
             }
@@ -4002,6 +5399,7 @@ class GatewayServer {
                     (string)($payload['version'] ?? ''),
                     (int)($payload['grace_seconds'] ?? 30)
                 );
+                $this->notifyManagedUpstreamGenerationIterated((string)($payload['version'] ?? ''));
                 $this->syncNginxProxyTargets('api_activate');
                 $this->json($response, 200, [
                     'message' => 'activated',
@@ -4056,57 +5454,89 @@ class GatewayServer {
 
         switch ($command) {
             case 'reload':
-                Timer::after(1, function () {
-                    $this->restartGatewayBusinessPlane();
-                });
+                return $this->formatGatewayInternalCommandResult($this->dispatchLocalGatewayCommand('reload'));
+            case 'reload_gateway':
+                $reservation = $this->reserveGatewayReload();
+                if (!$reservation['accepted']) {
+                    return ['ok' => false, 'status' => 409, 'message' => $reservation['message']];
+                }
+                $response = [
+                    'ok' => true,
+                    'status' => 200,
+                    'data' => [
+                        'accepted' => true,
+                        'message' => $reservation['message'],
+                    ],
+                ];
+                if ($reservation['scheduled']) {
+                    $response['__after_write'] = function () use ($reservation): void {
+                        $this->scheduleReservedGatewayReload((bool)$reservation['restart_managed_upstreams']);
+                    };
+                }
+                return $response;
+            case 'restart_crontab':
+                return ['ok' => false, 'status' => 409, 'message' => 'crontab now managed by linux scheduler'];
+            case 'restart_redisqueue':
+                if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
+                    return ['ok' => false, 'status' => 409, 'message' => 'redisqueue process unavailable'];
+                }
+                return $this->formatGatewayInternalCommandResult($this->dispatchLocalGatewayCommand('restart_redisqueue'));
+            case 'restart':
                 return [
                     'ok' => true,
                     'status' => 200,
-                    'data' => ['accepted' => true, 'message' => 'gateway business reload started'],
+                    'data' => ['accepted' => true, 'message' => 'gateway restart started'],
+                    '__after_write' => function (): void {
+                        $this->scheduleGatewayShutdown(true);
+                    },
                 ];
-            case 'restart':
             case 'shutdown':
-                Timer::after(1, function () {
-                    $this->shutdownGateway();
-                });
                 return [
                     'ok' => true,
                     'status' => 200,
                     'data' => ['accepted' => true, 'message' => 'gateway shutdown started'],
+                    '__after_write' => function (): void {
+                        $this->scheduleGatewayShutdown();
+                    },
                 ];
             default:
                 return ['ok' => false, 'status' => 400, 'message' => 'unsupported command'];
         }
     }
 
-    protected function applyStaticHandlerSettings(): void {
-        if ($this->trafficMode() !== 'http') {
-            return;
+    /**
+     * 将本地命令 Result 统一转成内部 HTTP 命令返回体。
+     *
+     * @param Result $result 本地命令执行结果
+     * @return array<string, mixed>
+     */
+    protected function formatGatewayInternalCommandResult(Result $result): array {
+        if ($result->hasError()) {
+            return [
+                'ok' => false,
+                'status' => 409,
+                'message' => (string)$result->getMessage(),
+                'data' => $result->getData(),
+            ];
         }
-        $locations = Config::server()['static_handler_locations'] ?? [];
-        if (!is_array($locations) || !$locations) {
-            return;
+        $message = $result->getData();
+        if (!is_string($message) || $message === '') {
+            $message = (string)$result->getMessage();
         }
-        $settings = [
-            'document_root' => APP_PATH . '/public',
-            'enable_static_handler' => true,
-            'http_index_files' => ['index.html'],
-            'static_handler_locations' => array_values($locations),
+        return [
+            'ok' => true,
+            'status' => 200,
+            'data' => [
+                'accepted' => true,
+                'message' => $message,
+            ],
         ];
-        if (Env::isDev()) {
-            $settings['http_autoindex'] = true;
-        }
-        $this->server->set($settings);
     }
 
     protected function proxyMaxInflightRequests(): int {
         $configured = Config::server()['gateway_proxy_max_inflight'] ?? 1024;
         $limit = (int)$configured;
         return $limit > 0 ? $limit : 1024;
-    }
-
-    protected function shouldRejectNewProxyRequest(): bool {
-        return $this->instanceManager->totalProxyHttpRequestCount() >= $this->proxyMaxInflightRequests();
     }
 
     protected function shouldRejectNewRelayConnection(): bool {
@@ -4149,73 +5579,77 @@ class GatewayServer {
         $response->end();
     }
 
-    protected function resolveAffinityKey(Request $request): ?string {
-        $cookie = (array)($request->cookie ?? []);
-        foreach (['_CID_', '_SESSIONID_'] as $cookieName) {
-            $value = trim((string)($cookie[$cookieName] ?? ''));
-            if ($value !== '') {
-                return $cookieName . ':' . $value;
-            }
-        }
-
-        $authorization = trim((string)($request->header['authorization'] ?? ''));
-        if ($authorization !== '') {
-            return 'authorization:' . $authorization;
-        }
-
-        $websocketKey = trim((string)($request->header['sec-websocket-key'] ?? ''));
-        if ($websocketKey !== '') {
-            return 'ws:' . $websocketKey;
-        }
-
-        return null;
-    }
-
+    /**
+     * 在 gateway 关闭阶段同步回收所有托管 upstream。
+     *
+     * 这里不能再使用“只发 shutdown 命令就立刻清空 registry”的异步语义。
+     * 否则 gateway 会先把 managed 实例从内存/状态文件里移除，而真实 upstream
+     * 还在由 UpstreamSupervisor 慢慢平滑关闭，下一轮启动就会看不到这些仍存活的
+     * 业务实例，从而留下端口残留和孤儿进程。
+     *
+     * 因此 shutdown 需要等待 UpstreamSupervisor 完成 `shutdownAll()` 并回执，
+     * 只有确认监督器已经把托管实例收口完毕，才允许清理 registry。
+     *
+     * @return void
+     */
     protected function shutdownManagedUpstreams(): void {
-        if ($this->upstreamSupervisor) {
-            $this->upstreamSupervisor->sendCommand(['action' => 'shutdown']);
+        if (!$this->upstreamSupervisor) {
+            $this->instanceManager->removeManagedInstances();
+            return;
         }
+
+        $result = $this->dispatchUpstreamSupervisorCommand('shutdown', [], true, 120);
+        if ($result->hasError()) {
+            Console::warning('【Gateway】等待 UpstreamSupervisor 回收业务实例超时或失败，保留 registry 等待下次启动继续接管: ' . $result->getMessage());
+            return;
+        }
+
         $this->instanceManager->removeManagedInstances();
     }
 
-    protected function ensureInstallWatcher(): void {
-        if (App::isReady() || $this->installWatcherStarted) {
+    /**
+     * 推进 gateway 的安装接管状态机。
+     *
+     * 当业务应用尚未安装完成时，gateway 需要先把 nginx 的业务入口接到自己，
+     * 由控制面承接安装页和安装 API；待安装完成并成功拉起业务实例后，再切回
+     * active upstream。整个过程必须在业务编排子进程里推进，不能再挂在 worker 定时器上。
+     *
+     * @return void
+     */
+    protected function refreshGatewayInstallTakeover(): void {
+        $isReady = App::isReady();
+        $takeoverActive = (bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER) ?? false);
+        if (!$isReady) {
+            if (!$takeoverActive) {
+                Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
+                Console::info('【Gateway】应用尚未安装，业务入口切换到 gateway 控制面承接安装流程');
+                $this->syncNginxProxyTargets('install_takeover');
+            }
             return;
         }
-        $this->installWatcherStarted = true;
-        Console::info('【Gateway】等待安装配置文件就绪...');
-        Coroutine::create(function () {
-            while (true) {
-                if (App::isReady()) {
-                    Console::success('【Gateway】应用安装成功!开始拉起业务实例');
-                    $this->installWatcherStarted = false;
-                    return;
-                }
 
-                $installer = App::installer();
-                if ($installer->readyToInstall() && !$this->installUpdating) {
-                    $this->installUpdating = true;
-                    $updater = Updater::instance();
-                    $version = $updater->getVersion();
-                    $targetVersion = (string)($version['remote']['app']['version'] ?? '');
-                    $targetVersion !== '' && Console::info('【Gateway】开始执行安装更新:' . $targetVersion);
-                    if ($updater->updateApp(true)) {
-                        while (!App::isReady()) {
-                            Coroutine::sleep(1);
-                        }
-                        $this->installUpdating = false;
-                        continue;
-                    }
-                    $message = $updater->getLastError() ?: ($targetVersion !== '' ? "更新失败:{$targetVersion}" : '更新失败');
-                    Console::warning('【Gateway】' . $message);
-                    $this->installUpdating = false;
-                }
-                Coroutine::sleep(1);
+        if ($takeoverActive) {
+            $snapshot = $this->instanceManager->snapshot();
+            if (((string)($snapshot['active_version'] ?? '')) === '') {
+                return;
             }
-        });
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, false);
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_UPDATING, false);
+            Console::success('【Gateway】应用安装完成，业务入口准备切回托管 upstream');
+            $this->syncNginxProxyTargets('install_takeover_release');
+        }
     }
 
-    protected function ensureGatewaySubProcessManagerStarted(): void {
+    /**
+     * 在 gateway server 启动前注册总控子进程。
+     *
+     * gateway 控制面下的 RedisQueue/MemoryUsageCount 等都挂在
+     * SubProcessManager 这棵子进程树上，因此必须先以 addProcess 模式把
+     * 根管理进程注册给 server，避免在 worker 协程环境里直接拉起新进程。
+     *
+     * @return void
+     */
+    protected function ensureGatewaySubProcessManagerRegistered(): void {
         if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
             return;
         }
@@ -4223,18 +5657,31 @@ class GatewayServer {
             return;
         }
         $this->subProcessManager = new SubProcessManager($this->server, Config::server(), [
-            'exclude_processes' => ['CrontabManager', 'RedisQueue'],
+            'exclude_processes' => ['CrontabManager'],
             'shutdown_handler' => function (): void {
-                $this->shutdownGateway();
+                $this->scheduleGatewayShutdown();
             },
             'reload_handler' => function (): void {
                 $this->restartGatewayBusinessPlane();
+            },
+            'restart_handler' => function (): void {
+                Console::warning('【Gateway】检测到控制面文件变动，准备重启 Gateway');
+                $this->scheduleGatewayShutdown(true);
             },
             'command_handler' => function (string $command, array $params, object $socket): bool {
                 return $this->handleGatewayProcessCommand($command, $params, $socket);
             },
             'node_status_builder' => function (array $status): array {
                 return $this->buildGatewayHeartbeatStatus($status);
+            },
+            'gateway_business_tick_handler' => function (): void {
+                $this->runGatewayBusinessCoordinatorTick();
+            },
+            'gateway_health_tick_handler' => function (): void {
+                $this->runGatewayHealthMonitorTick();
+            },
+            'gateway_business_command_handler' => function (string $command, array $params): array {
+                return $this->handleGatewayBusinessCommand($command, $params);
             },
         ]);
         $this->subProcessManager->start();
@@ -4301,7 +5748,6 @@ class GatewayServer {
 
             $this->registerManagedPlan($plan, true);
             $this->instanceManager->removeOtherInstances($version, $host, $port);
-            $this->syncNginxProxyTargets('bootstrap_ready');
             $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
             Console::success("【Gateway】业务实例就绪 {$version} {$host}:{$port}{$rpcInfo}");
         }
@@ -4310,24 +5756,50 @@ class GatewayServer {
     protected function renderStartupInfo(): void {
         $appInfo = App::info()?->toArray() ?: [];
         $appVersion = $this->resolveAppVersion($appInfo);
+        $publicVersion = $this->resolvePublicVersion($appInfo);
         $stateFile = $this->instanceManager->stateFile();
-        Console::success("【Gateway】服务启动完成");
-        if ($this->nginxProxyModeEnabled()) {
-            Console::info("【Gateway】业务入口监听(nginx): {$this->host}:{$this->port}");
-            Console::info("【Gateway】控制面内部监听: {$this->internalControlHost()}:{$this->controlPort()}");
-        } elseif ($this->tcpRelayModeEnabled()) {
-            Console::info("【Gateway】业务/控制入口监听: {$this->host}:{$this->port}");
-            Console::info("【Gateway】控制面内部监听: {$this->internalControlHost()}:{$this->controlPort()}");
-        } else {
-            Console::info("【Gateway】监听地址: {$this->host}:{$this->port}");
-        }
-        if ($this->rpcPort > 0) {
-            Console::info("【Gateway】RPC监听: {$this->host}:{$this->rpcPort}");
-        }
-        Console::info("【Gateway】流量模式: " . $this->trafficMode());
-        Console::info("【Gateway】运行信息: env=" . SERVER_RUN_ENV . ", role=" . SERVER_ROLE . ", app=" . APP_DIR_NAME . ", version=" . $appVersion);
-        Console::info("【Gateway】进程信息: master={$this->serverMasterPid}, manager={$this->serverManagerPid}");
-        Console::info("【Gateway】状态文件: {$stateFile}");
+        $frameworkRoot = Root::dir();
+        $frameworkBuildTime = FRAMEWORK_BUILD_TIME;
+        $packageVersion = $frameworkBuildTime === 'development' ? 'development' : FRAMEWORK_BUILD_VERSION;
+        $loadedFiles = count(get_included_files());
+        $taskWorkers = (int)(Config::server()['task_worker_num'] ?? 0);
+        $listenLabel = $this->nginxProxyModeEnabled() ? '业务入口' : '业务TCP入口';
+        $listenValue = "{$this->host}:{$this->port}";
+        $controlValue = $this->internalControlHost() . ':' . $this->controlPort();
+        $rpcValue = $this->rpcPort > 0 ? ($this->host . ':' . $this->rpcPort) : '--';
+        $info = <<<INFO
+------------------Gateway启动完成------------------
+应用指纹：{APP_FINGERPRINT}
+运行系统：{OS_ENV}
+运行环境：{SERVER_RUN_ENV}
+应用目录：{APP_DIR_NAME}
+源码类型：{APP_SRC_TYPE}
+节点角色：{SERVER_ROLE}
+文件加载：{$loadedFiles}
+环境版本：{SWOOLE_VERSION}
+框架源码：{$frameworkRoot}
+框架版本：{SCF_COMPOSER_VERSION}
+打包版本：{$packageVersion}
+打包时间：{$frameworkBuildTime}
+工作进程：{$this->workerNum}
+任务进程：{$taskWorkers}
+主机地址：{SERVER_HOST}
+应用版本：{$appVersion}
+资源版本：{$publicVersion}
+流量模式：{$this->trafficMode()}
+{$listenLabel}：{$listenValue}
+控制面：{$controlValue}
+RPC监听：{$rpcValue}
+进程信息：Master:{$this->serverMasterPid},Manager:{$this->serverManagerPid}
+状态文件：{$stateFile}
+--------------------------------------------------
+INFO;
+        $info = str_replace(
+            ['{APP_FINGERPRINT}', '{OS_ENV}', '{SERVER_RUN_ENV}', '{APP_DIR_NAME}', '{APP_SRC_TYPE}', '{SERVER_ROLE}', '{SWOOLE_VERSION}', '{SCF_COMPOSER_VERSION}', '{SERVER_HOST}'],
+            [APP_FINGERPRINT, OS_ENV, SERVER_RUN_ENV, APP_DIR_NAME, APP_SRC_TYPE, SERVER_ROLE, swoole_version(), SCF_COMPOSER_VERSION, SERVER_HOST],
+            $info
+        );
+        Console::write(Color::cyan($info));
     }
 
     protected function createBusinessTrafficListener(): void {

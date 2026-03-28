@@ -10,6 +10,7 @@ namespace Scf\Command;
  * @method static string green(string $text)
  * @method static string brown(string $text)
  * @method static string blue(string $text)
+ * @method static string gateway(string $text)
  * @method static string cyan(string $text)
  * @method static string normal(string $text)
  * @method static string yellow(string $text)
@@ -31,6 +32,7 @@ class Color {
         'green' => '0;32',
         'brown' => '0;33',
         'blue' => '0;34',
+        'gateway' => '38;2;87;137;255',
         'cyan' => '0;36',
         'normal' => '39',// no color
         'yellow' => '1;33',

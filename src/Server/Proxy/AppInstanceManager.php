@@ -2,37 +2,77 @@
 
 namespace Scf\Server\Proxy;
 
+use Scf\Core\Console;
 use RuntimeException;
 
+/**
+ * gateway 侧 upstream 的内存状态机与派生统计协调器。
+ *
+ * 这一层负责把 registry 中持久化的 generation 状态加载到内存，维护 active / draining / offline
+ * 的生命周期转换，并同步管理连接绑定、HTTP/RPC 处理量和 crontab / queue 运行态统计。
+ */
 class AppInstanceManager {
 
     protected array $state = [];
     protected array $rrIndex = [];
     protected array $connectionBindings = [];
     protected array $instanceConnectionCount = [];
-    protected array $instanceProxyHttpRequestCount = [];
     protected array $instanceRuntimeState = [];
     protected bool $hasDrainingGeneration = false;
 
+    /**
+     * 注入 registry 并加载初始状态。
+     *
+     * @param UpstreamRegistry $registry upstream 状态的持久化存取入口。
+     * @return void
+     */
     public function __construct(
         protected UpstreamRegistry $registry
     ) {
         $this->reload();
     }
 
+    /**
+     * 重新从 registry 读取状态，重建派生标记。
+     *
+     * @return void
+     */
     public function reload(): void {
         $this->state = $this->registry->load();
         $this->refreshStateFlags();
     }
 
+    /**
+     * 返回当前 registry 的原始内存态。
+     *
+     * 如需附加连接数等派生字段，请使用 snapshot()。
+     *
+     * @return array<string, mixed> 当前原始状态。
+     */
     public function state(): array {
         return $this->state;
     }
 
+    /**
+     * 返回 registry 状态文件路径。
+     *
+     * @return string 状态文件路径。
+     */
     public function stateFile(): string {
         return $this->registry->stateFile();
     }
 
+    /**
+     * 注册一个 upstream，并按需立即激活该 generation。
+     *
+     * @param string|null $version 目标 generation 版本。
+     * @param string|null $host upstream 主机名或 IP。
+     * @param int|null $port upstream HTTP 端口。
+     * @param bool $activate 是否在注册后立即激活。
+     * @param int $weight 实例权重。
+     * @param array<string, mixed> $metadata 实例元数据。
+     * @return void
+     */
     public function bootstrap(?string $version, ?string $host, ?int $port, bool $activate = true, int $weight = 100, array $metadata = []): void {
         if (!$version || !$host || !$port) {
             return;
@@ -43,6 +83,14 @@ class AppInstanceManager {
         }
     }
 
+    /**
+     * 在指定 generation 中，仅保留目标实例，其余实例移除。
+     *
+     * @param string $version generation 版本。
+     * @param string $host 目标实例主机名或 IP。
+     * @param int $port 目标实例端口。
+     * @return array<string, mixed> 更新后的状态快照。
+     */
     public function removeOtherInstances(string $version, string $host, int $port): array {
         if (!isset($this->state['generations'][$version])) {
             return $this->snapshot();
@@ -64,6 +112,14 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 获取指定实例之外的同 generation 其它实例。
+     *
+     * @param string $version generation 版本。
+     * @param string $host 目标实例主机名或 IP。
+     * @param int $port 目标实例端口。
+     * @return array<int, array<string, mixed>> 其它实例列表。
+     */
     public function otherInstances(string $version, string $host, int $port): array {
         if (!isset($this->state['generations'][$version])) {
             return [];
@@ -74,6 +130,17 @@ class AppInstanceManager {
         }));
     }
 
+    /**
+     * 注册一个 upstream 实例到 registry。
+     *
+     * @param string $version generation 版本。
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param int $weight 实例权重。
+     * @param array<string, mixed> $metadata 实例元数据。
+     * @return array<string, mixed> 注册后的实例描述。
+     * @throws RuntimeException 当 version 为空或 port 非法时抛出。
+     */
     public function registerUpstream(string $version, string $host, int $port, int $weight = 100, array $metadata = []): array {
         $version = trim($version);
         if ($version === '') {
@@ -122,6 +189,14 @@ class AppInstanceManager {
         return $instance;
     }
 
+    /**
+     * 切换 active generation，并将旧 active 标记为 draining。
+     *
+     * @param string $version 需要激活的 generation 版本。
+     * @param int $graceSeconds 旧 generation 的 draining 宽限时间，单位秒。
+     * @return array<string, mixed> 更新后的状态快照。
+     * @throws RuntimeException 当版本尚未注册时抛出。
+     */
     public function activateVersion(string $version, int $graceSeconds = 30): array {
         if (!isset($this->state['generations'][$version])) {
             throw new RuntimeException('版本未注册:' . $version);
@@ -149,6 +224,14 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 主动把某个 generation 置为 draining。
+     *
+     * @param string $version 需要进入 draining 的 generation 版本。
+     * @param int $graceSeconds draining 宽限时间，单位秒。
+     * @return array<string, mixed> 更新后的状态快照。
+     * @throws RuntimeException 当版本尚未注册时抛出。
+     */
     public function drainVersion(string $version, int $graceSeconds = 30): array {
         if (!isset($this->state['generations'][$version])) {
             throw new RuntimeException('版本未注册:' . $version);
@@ -162,6 +245,12 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 删除整个 generation。
+     *
+     * @param string $version generation 版本。
+     * @return array<string, mixed> 更新后的状态快照。
+     */
     public function removeVersion(string $version): array {
         foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
             $this->clearInstanceRuntimeStatus((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0));
@@ -174,6 +263,13 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 从所有 generation 中移除指定实例。
+     *
+     * @param string $host 目标实例主机名或 IP。
+     * @param int $port 目标实例端口。
+     * @return array<string, mixed> 更新后的状态快照。
+     */
     public function removeInstance(string $host, int $port): array {
         $this->clearInstanceRuntimeStatus($host, $port);
         foreach ($this->state['generations'] as $version => &$generation) {
@@ -192,6 +288,78 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 将指定实例直接标记为 offline，用于不可达或强制回收场景。
+     *
+     * @param string $host 目标实例主机名或 IP。
+     * @param int $port 目标实例端口。
+     * @param string|null $version 可选的 generation 过滤条件。
+     * @return array<string, mixed> 更新后的状态快照。
+     */
+    public function markInstanceOffline(string $host, int $port, ?string $version = null): array {
+        if ($host === '' || $port <= 0) {
+            return $this->snapshot();
+        }
+
+        $changed = false;
+        foreach ($this->state['generations'] as $itemVersion => &$generation) {
+            if ($version !== null && $version !== '' && $itemVersion !== $version) {
+                continue;
+            }
+
+            $matched = false;
+            $hasLiveInstance = false;
+            foreach ($generation['instances'] as &$instance) {
+                $instanceHost = (string)($instance['host'] ?? '');
+                $instancePort = (int)($instance['port'] ?? 0);
+                if ($instanceHost === $host && $instancePort === $port) {
+                    if (($instance['status'] ?? '') !== 'offline') {
+                        $instance['status'] = 'offline';
+                        $changed = true;
+                    }
+                    $matched = true;
+                }
+                if (($instance['status'] ?? '') !== 'offline') {
+                    $hasLiveInstance = true;
+                }
+            }
+            unset($instance);
+
+            if (!$matched) {
+                continue;
+            }
+
+            $this->clearInstanceRuntimeStatus($host, $port);
+            if (!$hasLiveInstance) {
+                if (($generation['status'] ?? '') !== 'offline') {
+                    $generation['status'] = 'offline';
+                    $changed = true;
+                }
+                $generation['drain_started_at'] = $generation['drain_started_at'] ?: time();
+                $generation['drain_deadline_at'] = time();
+                if (($this->state['active_version'] ?? null) === $itemVersion) {
+                    $this->state['active_version'] = null;
+                    $changed = true;
+                }
+            }
+        }
+        unset($generation);
+
+        if ($changed) {
+            $this->touchState();
+        }
+
+        return $this->snapshot();
+    }
+
+    /**
+     * 更新实例运行态统计，供 draining 判定与诊断使用。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param array<string, mixed> $runtimeStatus 运行态统计数据。
+     * @return void
+     */
     public function updateInstanceRuntimeStatus(string $host, int $port, array $runtimeStatus): void {
         if ($host === '' || $port <= 0) {
             return;
@@ -205,6 +373,14 @@ class AppInstanceManager {
         ];
     }
 
+    /**
+     * 合并实例元数据补丁。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param array<string, mixed> $metadataPatch 需要合并的元数据变更。
+     * @return void
+     */
     public function mergeInstanceMetadata(string $host, int $port, array $metadataPatch): void {
         if ($host === '' || $port <= 0 || !$metadataPatch) {
             return;
@@ -236,6 +412,13 @@ class AppInstanceManager {
         }
     }
 
+    /**
+     * 清理单个实例的运行态统计缓存。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @return void
+     */
     public function clearInstanceRuntimeStatus(string $host, int $port): void {
         if ($host === '' || $port <= 0) {
             return;
@@ -243,6 +426,12 @@ class AppInstanceManager {
         unset($this->instanceRuntimeState[$this->runtimeStateKey($host, $port)]);
     }
 
+    /**
+     * 使用外部 keeper 重建实例列表，清理不再存在的托管实例。
+     *
+     * @param callable $keeper 外部保活判定器，返回 true 表示保留实例。
+     * @return array<string, mixed> 更新后的状态快照。
+     */
     public function reconcileInstances(callable $keeper): array {
         $changed = false;
         foreach ($this->state['generations'] as $version => &$generation) {
@@ -280,6 +469,11 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 返回当前状态快照，并补充连接数等派生字段。
+     *
+     * @return array<string, mixed> 包含派生统计的完整状态快照。
+     */
     public function snapshot(): array {
         $this->tick();
         $state = $this->state;
@@ -296,6 +490,11 @@ class AppInstanceManager {
         return $state;
     }
 
+    /**
+     * 返回所有 managed upstream 实例。
+     *
+     * @return array<int, array<string, mixed>> managed 实例列表。
+     */
     public function managedInstances(): array {
         $instances = [];
         foreach ($this->state['generations'] as $generation) {
@@ -308,6 +507,11 @@ class AppInstanceManager {
         return $instances;
     }
 
+    /**
+     * 移除所有 managed upstream。
+     *
+     * @return array<string, mixed> 更新后的状态快照。
+     */
     public function removeManagedInstances(): array {
         $changed = false;
         foreach ($this->state['generations'] as $version => &$generation) {
@@ -337,6 +541,12 @@ class AppInstanceManager {
         return $this->snapshot();
     }
 
+    /**
+     * 选择当前 active generation 中的 HTTP upstream。
+     *
+     * @param string|null $affinityKey 可选亲和键，用于稳定落点。
+     * @return array<string, mixed>|null 命中的实例，失败时返回 null。
+     */
     public function pickHttpUpstream(?string $affinityKey = null): ?array {
         $this->tick();
         $activeVersion = $this->state['active_version'] ?? null;
@@ -346,15 +556,11 @@ class AppInstanceManager {
         return $this->pickGenerationInstance($this->state['generations'][$activeVersion], $affinityKey);
     }
 
-    public function pickHttpUpstreamExcluding(array $excludeInstanceIds = [], ?string $affinityKey = null): ?array {
-        $this->tick();
-        $activeVersion = $this->state['active_version'] ?? null;
-        if (!$activeVersion || !isset($this->state['generations'][$activeVersion])) {
-            return null;
-        }
-        return $this->pickGenerationInstance($this->state['generations'][$activeVersion], $affinityKey, $excludeInstanceIds);
-    }
-
+    /**
+     * 基于 HTTP upstream 选择对应 RPC upstream。
+     *
+     * @return array<string, mixed>|null 对应的 RPC 实例信息，失败时返回 null。
+     */
     public function pickRpcUpstream(): ?array {
         $upstream = $this->pickHttpUpstream();
         if (!$upstream) {
@@ -371,6 +577,13 @@ class AppInstanceManager {
         return $upstream;
     }
 
+    /**
+     * 为连接 fd 绑定一个 upstream，并增加连接计数。
+     *
+     * @param int $fd 连接文件描述符。
+     * @param string|null $affinityKey 可选亲和键。
+     * @return array<string, mixed>|null 绑定的 upstream，失败时返回 null。
+     */
     public function bindConnectionUpstream(int $fd, ?string $affinityKey = null): ?array {
         $upstream = $this->pickHttpUpstream($affinityKey);
         if (!$upstream) {
@@ -385,33 +598,14 @@ class AppInstanceManager {
         return $upstream;
     }
 
-    public function bindWebsocketUpstream(int $fd, ?string $affinityKey = null): ?array {
-        return $this->bindConnectionUpstream($fd, $affinityKey);
-    }
-
-    public function retainProxyHttpRequest(array $instance): void {
-        $instanceId = (string)($instance['id'] ?? '');
-        if ($instanceId === '') {
-            return;
-        }
-        $this->instanceProxyHttpRequestCount[$instanceId] = ($this->instanceProxyHttpRequestCount[$instanceId] ?? 0) + 1;
-    }
-
-    public function releaseProxyHttpRequest(array $instance): void {
-        $instanceId = (string)($instance['id'] ?? '');
-        if ($instanceId === '' || !isset($this->instanceProxyHttpRequestCount[$instanceId])) {
-            return;
-        }
-        $this->instanceProxyHttpRequestCount[$instanceId] = max(0, $this->instanceProxyHttpRequestCount[$instanceId] - 1);
-        if ($this->instanceProxyHttpRequestCount[$instanceId] === 0) {
-            unset($this->instanceProxyHttpRequestCount[$instanceId]);
-        }
-    }
-
-    public function websocketBinding(int $fd): ?array {
-        return $this->connectionBindings[$fd] ?? null;
-    }
-
+    /**
+     * 查询某个实例的连接绑定数量。
+     *
+     * @param string $version generation 版本。
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @return int 对应实例的连接数。
+     */
     public function gatewayConnectionCountFor(string $version, string $host, int $port): int {
         if (!isset($this->state['generations'][$version])) {
             return 0;
@@ -425,23 +619,12 @@ class AppInstanceManager {
         return 0;
     }
 
-    public function proxyHttpRequestCountFor(string $version, string $host, int $port): int {
-        if (!isset($this->state['generations'][$version])) {
-            return 0;
-        }
-        foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
-            if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
-                continue;
-            }
-            return (int)($this->instanceProxyHttpRequestCount[(string)($instance['id'] ?? '')] ?? 0);
-        }
-        return 0;
-    }
-
-    public function totalProxyHttpRequestCount(): int {
-        return array_sum($this->instanceProxyHttpRequestCount);
-    }
-
+    /**
+     * 释放连接绑定，并同步减少实例连接数。
+     *
+     * @param int $fd 连接文件描述符。
+     * @return void
+     */
     public function releaseConnectionBinding(int $fd): void {
         if (!isset($this->connectionBindings[$fd])) {
             return;
@@ -457,10 +640,11 @@ class AppInstanceManager {
         $this->tick();
     }
 
-    public function releaseWebsocketBinding(int $fd): void {
-        $this->releaseConnectionBinding($fd);
-    }
-
+    /**
+     * 推进 draining 状态机，满足条件时把 generation 迁移到 offline。
+     *
+     * @return void
+     */
     public function tick(): void {
         if (!$this->hasDrainingGeneration) {
             return;
@@ -471,10 +655,20 @@ class AppInstanceManager {
             if (($generation['status'] ?? '') !== 'draining') {
                 continue;
             }
+            $drainDeadlineAt = (int)($generation['drain_deadline_at'] ?? 0);
             $connections = $this->generationConnectionCount($generation);
             $httpProcessing = $this->generationHttpProcessingCount($generation);
             $rpcProcessing = $this->generationRpcProcessingCount($generation);
+            if ($drainDeadlineAt > 0 && $now < $drainDeadlineAt) {
+                continue;
+            }
             if ($connections === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
+                Console::info(
+                    "【Gateway】旧业务实例draining完成，准备进入 recycle: generation={$version}, "
+                    . "ws={$connections}, http={$httpProcessing}, rpc={$rpcProcessing}, "
+                    . "drain_started_at=" . (int)($generation['drain_started_at'] ?? 0)
+                    . ", drain_deadline_at={$drainDeadlineAt}"
+                );
                 $generation['status'] = 'offline';
                 $generation['drain_started_at'] = $generation['drain_started_at'] ?: $now;
                 foreach ($generation['instances'] as &$instance) {
@@ -494,6 +688,11 @@ class AppInstanceManager {
         }
     }
 
+    /**
+     * 返回当前 draining generation 的诊断摘要。
+     *
+     * @return array<int, array<string, mixed>> draining generation 诊断列表。
+     */
     public function drainingDiagnostics(): array {
         $diagnostics = [];
         foreach ($this->state['generations'] as $version => $generation) {
@@ -514,6 +713,12 @@ class AppInstanceManager {
         return $diagnostics;
     }
 
+    /**
+     * 统计某个 generation 的连接占用。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int 连接占用数。
+     */
     protected function generationConnectionCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
@@ -522,16 +727,27 @@ class AppInstanceManager {
         return $count;
     }
 
+    /**
+     * 统计某个 generation 的 HTTP 处理中请求数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int HTTP 处理中请求数。
+     */
     protected function generationHttpProcessingCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
             $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
             $count += (int)($runtime['http_request_processing'] ?? 0);
-            $count += (int)($this->instanceProxyHttpRequestCount[(string)($instance['id'] ?? '')] ?? 0);
         }
         return $count;
     }
 
+    /**
+     * 统计某个 generation 的 RPC 处理中请求数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int RPC 处理中请求数。
+     */
     protected function generationRpcProcessingCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
@@ -541,6 +757,12 @@ class AppInstanceManager {
         return $count;
     }
 
+    /**
+     * 统计某个 generation 的 RedisQueue 处理中任务数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int RedisQueue 处理中任务数。
+     */
     protected function generationRedisQueueProcessingCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
@@ -550,6 +772,12 @@ class AppInstanceManager {
         return $count;
     }
 
+    /**
+     * 统计某个 generation 的 crontab 忙碌数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int crontab 忙碌数。
+     */
     protected function generationCrontabBusyCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
@@ -559,10 +787,25 @@ class AppInstanceManager {
         return $count;
     }
 
+    /**
+     * 生成实例运行态缓存键。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @return string 运行态缓存键。
+     */
     protected function runtimeStateKey(string $host, int $port): string {
         return $host . ':' . $port;
     }
 
+    /**
+     * 从 generation 中按权重和亲和键选择一个可用实例。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @param string|null $affinityKey 可选亲和键。
+     * @param array<int, string> $excludeInstanceIds 需要排除的实例 ID 列表。
+     * @return array<string, mixed>|null 选中的实例，失败时返回 null。
+     */
     protected function pickGenerationInstance(array $generation, ?string $affinityKey = null, array $excludeInstanceIds = []): ?array {
         $excluded = array_fill_keys(array_values(array_filter(array_map('strval', $excludeInstanceIds))), true);
         $instances = array_values(array_filter($generation['instances'] ?? [], static function ($instance) use ($excluded) {
@@ -598,6 +841,13 @@ class AppInstanceManager {
         return $picked;
     }
 
+    /**
+     * 按权重索引定位实例。
+     *
+     * @param array<int, array<string, mixed>> $instances 候选实例列表。
+     * @param int $index 权重索引。
+     * @return array<string, mixed>|null 命中的实例，失败时返回 null。
+     */
     protected function pickInstanceByWeightedIndex(array $instances, int $index): ?array {
         $offset = 0;
         foreach ($instances as $instance) {
@@ -610,6 +860,14 @@ class AppInstanceManager {
         return $instances[array_key_last($instances)] ?? null;
     }
 
+    /**
+     * 将 generation 标记为 draining，并写入截止时间。
+     *
+     * @param array<string, mixed> $generation generation 状态，按引用修改。
+     * @param int $now 当前时间戳。
+     * @param int $graceSeconds draining 宽限时间，单位秒。
+     * @return void
+     */
     protected function markGenerationDraining(array &$generation, int $now, int $graceSeconds): void {
         $generation['status'] = 'draining';
         $generation['drain_started_at'] = $now;
@@ -620,12 +878,22 @@ class AppInstanceManager {
         unset($instance);
     }
 
+    /**
+     * 标记状态变更并持久化。
+     *
+     * @return void
+     */
     protected function touchState(): void {
         $this->state['updated_at'] = time();
         $this->refreshStateFlags();
         $this->registry->save($this->state);
     }
 
+    /**
+     * 刷新派生状态标记。
+     *
+     * @return void
+     */
     protected function refreshStateFlags(): void {
         $this->hasDrainingGeneration = false;
         foreach (($this->state['generations'] ?? []) as $generation) {

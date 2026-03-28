@@ -4,17 +4,34 @@ namespace Scf\Server\Proxy;
 
 use RuntimeException;
 
+/**
+ * 上游实例注册表的持久化入口。
+ *
+ * 负责把 gateway 侧的 generation / instance 状态读写到状态文件，
+ * 为 AppInstanceManager 提供唯一的持久化来源。
+ */
 class UpstreamRegistry {
 
+    /**
+     * @param string $stateFile 注册表状态文件路径。
+     */
     public function __construct(
         protected string $stateFile
     ) {
     }
 
+    /**
+     * 返回当前使用的状态文件路径。
+     */
     public function stateFile(): string {
         return $this->stateFile;
     }
 
+    /**
+     * 从磁盘读取并规范化 registry 状态。
+     *
+     * 文件缺失、为空或 JSON 非法时，返回默认空状态。
+     */
     public function load(): array {
         if (!is_file($this->stateFile)) {
             return $this->defaultState();
@@ -30,6 +47,9 @@ class UpstreamRegistry {
         return $this->normalizeState($decoded);
     }
 
+    /**
+     * 将规范化后的 registry 状态写回磁盘。
+     */
     public function save(array $state): void {
         $dir = dirname($this->stateFile);
         if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
@@ -45,6 +65,9 @@ class UpstreamRegistry {
         }
     }
 
+    /**
+     * 生成空 registry 的默认结构。
+     */
     protected function defaultState(): array {
         return [
             'active_version' => null,
@@ -53,6 +76,9 @@ class UpstreamRegistry {
         ];
     }
 
+    /**
+     * 归一化 registry 的 generation / instance 结构，保证读取侧字段齐全。
+     */
     protected function normalizeState(array $state): array {
         $state['active_version'] = $state['active_version'] ?? null;
         $state['generations'] = is_array($state['generations'] ?? null) ? $state['generations'] : [];

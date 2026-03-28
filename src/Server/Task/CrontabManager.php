@@ -16,7 +16,6 @@ use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Util\Date;
 use Scf\Util\File;
-use Swoole\Event;
 use Swoole\Process;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
@@ -157,9 +156,10 @@ class CrontabManager {
     public static function createTaskProcess($task, int $restartNum = 0): bool|int|array {
         $process = new Process(function (Process $process) use ($task) {
             App::mount();
+            // 保留 task 级 fatal 记录，避免这次 warning 修复把原有错误观测链一起删掉。
             register_shutdown_function(function () use ($task) {
                 $error = error_get_last();
-                if ($error && $error['type'] === E_ERROR) {//标记致命错误
+                if ($error && $error['type'] === E_ERROR) {
                     Counter::instance()->incr('CRONTAB_' . $task['id'] . '_ERROR');
                     Runtime::instance()->set('CRONTAB_' . $task['id'] . '_ERROR_INFO', $error['message']);
                 }
@@ -172,12 +172,8 @@ class CrontabManager {
                     Console::error($task['namespace'] . ':任务脚本必须实现 run 方法');
                 } else {
                     $taskInstance->start();
-                    //Event::wait();
                 }
             }
-            //Event::exit();
-            //$process->exit();
-            // 注意：exit 后面的代码不会被执行
         }, false, 0, true);
         $pid = $process->start();
         self::updateTaskTable($task['id'], [

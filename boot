@@ -50,8 +50,9 @@ function scf_define_runtime_constants(array $argv): void {
         'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',
     ];
 
+    $argvEnv = strtolower(trim((string)(scf_option_value($argv, 'env') ?? '')));
     defined('ENV_VARIABLES') || define('ENV_VARIABLES', $envVariables);
-    defined('IS_DEV') || define('IS_DEV', $envVariables['app_env'] === 'dev' || scf_has_arg($argv, '-dev'));
+    defined('IS_DEV') || define('IS_DEV', $envVariables['app_env'] === 'dev' || $argvEnv === 'dev' || scf_has_arg($argv, '-dev'));
     defined('IS_PACK') || define('IS_PACK', scf_has_arg($argv, '-pack'));
     defined('NO_PACK') || define('NO_PACK', (scf_bool_constant('IS_DEV') && !scf_bool_constant('IS_PACK')) || scf_has_arg($argv, '-nopack'));
     defined('IS_HTTP_SERVER') || define('IS_HTTP_SERVER', scf_has_arg($argv, 'server'));
@@ -347,6 +348,30 @@ function scf_detect_timezone(): string {
 
 function scf_has_arg(array $argv, string $needle): bool {
     return in_array($needle, $argv, true);
+}
+
+function scf_option_value(array $argv, string $name): ?string {
+    foreach ($argv as $index => $arg) {
+        if (!is_string($arg) || !str_starts_with($arg, '-')) {
+            continue;
+        }
+        $option = ltrim($arg, '-');
+        if (str_contains($option, '=')) {
+            [$optionName, $value] = explode('=', $option, 2);
+            if ($optionName === $name) {
+                return $value;
+            }
+            continue;
+        }
+        if ($option === $name) {
+            $next = $argv[$index + 1] ?? null;
+            if (is_string($next) && !str_starts_with($next, '-')) {
+                return $next;
+            }
+            return null;
+        }
+    }
+    return null;
 }
 
 function scf_bool_constant(string $name): bool {

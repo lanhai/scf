@@ -13,21 +13,45 @@ use Scf\Server\Proxy\LocalIpc;
 use Scf\Server\Proxy\CliBootstrap;
 use Swoole\Process;
 
+/**
+ * Gateway CLI 命令入口。
+ *
+ * 该命令类只负责把外部 `./server gateway ...` / `./server start ...`
+ * 风格的指令映射到 gateway 控制面动作，避免调用方直接感知本地 IPC 或内部 HTTP。
+ */
 class Gateway implements CommandInterface {
 
+    /**
+     * 返回该 CLI 命令的注册名。
+     *
+     * @return string 命令名
+     */
     public function commandName(): string {
         return 'gateway';
     }
 
+    /**
+     * 返回该 CLI 命令的简短说明。
+     *
+     * @return string 命令描述
+     */
     public function desc(): string {
         return '代理网关服务';
     }
 
+    /**
+     * 构建 gateway 命令帮助信息。
+     *
+     * @param Help $commandHelp 帮助信息容器，方法会向其中追加动作和参数说明
+     * @return Help 返回同一个帮助对象，便于调用方继续链式处理
+     */
     public function help(Help $commandHelp): Help {
         $commandHelp->addAction('start', '启动代理网关');
         $commandHelp->addAction('stop', '停止代理网关');
         $commandHelp->addAction('reload', '重启业务平面');
         $commandHelp->addAction('restart', '重启代理网关');
+        $commandHelp->addAction('restart_crontab', '重启 Gateway 排程子进程');
+        $commandHelp->addAction('restart_redisqueue', '重启 Gateway Redis 队列子进程');
         $commandHelp->addAction('status', '查看代理网关状态');
         $commandHelp->addActionOpt('-app', '应用目录名');
         $commandHelp->addActionOpt('-env', '运行环境, 例如 dev');
@@ -45,9 +69,14 @@ class Gateway implements CommandInterface {
         return $commandHelp;
     }
 
+    /**
+     * 执行 gateway CLI 命令。
+     *
+     * @return string|null 返回命令执行提示，`start` 分支会直接进入 bootstrap 流程并返回 null
+     */
     public function exec(): ?string {
         $action = (string)(Manager::instance()->getArg(0) ?: 'start');
-        if (in_array($action, ['start', 'stop', 'reload', 'restart', 'status'], true)) {
+        if (in_array($action, ['start', 'stop', 'reload', 'restart', 'restart_crontab', 'restart_redisqueue', 'status'], true)) {
             Env::initialize(MODE_CGI);
         }
         if ($action === 'stop') {
@@ -59,6 +88,12 @@ class Gateway implements CommandInterface {
         if ($action === 'restart') {
             return $this->control('restart');
         }
+        if ($action === 'restart_crontab') {
+            return $this->control('restart_crontab');
+        }
+        if ($action === 'restart_redisqueue') {
+            return $this->control('restart_redisqueue');
+        }
         if ($action === 'status') {
             return $this->status();
         }
@@ -69,6 +104,11 @@ class Gateway implements CommandInterface {
         return Manager::instance()->displayCommandHelp($this->commandName());
     }
 
+    /**
+     * 直接向 gateway master 发送停止信号。
+     *
+     * @return string 停止处理结果
+     */
     protected function stop(): string {
         $this->markLoopStop();
         $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: 'app');
@@ -86,6 +126,15 @@ class Gateway implements CommandInterface {
         return '已发送 Gateway 停止信号:' . $pid;
     }
 
+    /**
+     * 通过本地控制面转发 gateway 内部命令。
+     *
+     * 优先走 LocalIpc，只有本地 socket 不可用时才回退到控制面 HTTP，
+     * 保证控制指令尽量走本机轻量通道。
+     *
+     * @param string $command 需要下发的 gateway 内部命令
+     * @return string 命令发送结果描述
+     */
     protected function control(string $command): string {
         $port = $this->resolveGatewayPort();
         if ($port <= 0) {
@@ -103,9 +152,20 @@ class Gateway implements CommandInterface {
         if ($command === 'reload') {
             return '已发送 Gateway 业务平面重启指令';
         }
+        if ($command === 'restart_crontab') {
+            return '已发送 Gateway Crontab 子进程重启指令';
+        }
+        if ($command === 'restart_redisqueue') {
+            return '已发送 Gateway RedisQueue 子进程重启指令';
+        }
         return '已发送 Gateway 指令:' . $command;
     }
 
+    /**
+     * 查询 gateway 控制面健康状态。
+     *
+     * @return string 在线状态描述
+     */
     protected function status(): string {
         $port = $this->resolveGatewayPort();
         if ($port <= 0) {
@@ -118,6 +178,17 @@ class Gateway implements CommandInterface {
         return 'Gateway 在线';
     }
 
+    /**
+     * 向本地 gateway 控制面发送请求。
+     *
+     * 常用控制动作会优先使用 Unix Domain Socket，避免依赖 HTTP 监听是否已经对外开放。
+     *
+     * @param int $port gateway 监听端口
+     * @param string $path 请求路径
+     * @param string $method HTTP 方法
+     * @param array $payload 请求体数据
+     * @return array{status:int,body:string} 标准化后的响应结构
+     */
     protected function requestLocalGateway(int $port, string $path, string $method = 'GET', array $payload = []): array {
         $ipcAction = match ([$method, $path]) {
             ['POST', '/_gateway/internal/command'] => 'gateway.command',
@@ -149,7 +220,6 @@ class Gateway implements CommandInterface {
         $body = $payload ? json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
         $request = "{$method} {$path} HTTP/1.1\r\n"
             . "Host: 127.0.0.1:{$port}\r\n"
-            . "X-Gateway-Internal: 1\r\n"
             . "Connection: close\r\n";
         if ($method === 'POST') {
             $request .= "Content-Type: application/json\r\n";
@@ -174,6 +244,11 @@ class Gateway implements CommandInterface {
         ];
     }
 
+    /**
+     * 给 server loop 写入停止标记，避免外层守护循环马上再拉起当前 gateway。
+     *
+     * @return void
+     */
     protected function markLoopStop(): void {
         $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: 'app');
         $role = (string)(Manager::instance()->getOpt('role') ?: getenv('SERVER_ROLE') ?: 'master');
@@ -181,6 +256,11 @@ class Gateway implements CommandInterface {
         @file_put_contents($flagFile, (string)time());
     }
 
+    /**
+     * 解析 gateway 业务入口端口。
+     *
+     * @return int gateway 业务监听端口
+     */
     protected function resolveGatewayPort(): int {
         $port = (int)(Manager::instance()->getOpt('port') ?: SERVER_PORT);
         if ($port > 0) {

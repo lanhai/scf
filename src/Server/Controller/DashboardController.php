@@ -24,6 +24,7 @@ use Scf\Mode\Web\Document as DocumentComponent;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
 use Scf\Server\DashboardAuth;
+use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Manager;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
@@ -130,6 +131,9 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabRun(): Result {
+        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+            return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
+        }
         Request::post(['name', 'host'])->assign($name, $host);
         return Result::success(CrontabManager::runRightNow($name, $host));
     }
@@ -139,6 +143,9 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabStatus(): Result {
+        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+            return Result::success([]);
+        }
         Request::post(['name'])->assign($name);
         return Result::success(CrontabManager::status($name));
     }
@@ -148,6 +155,9 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabOverride(): Result {
+        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+            return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
+        }
         Request::post()->pack($data);
         try {
             $result = CrontabManager::saveOverrides($data);
@@ -209,7 +219,102 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabs(): Result {
+        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
+            return Result::success([]);
+        }
         return Result::success(CrontabManager::allStatus());
+    }
+
+    /**
+     * Linux crontab 独立排程列表。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabs(): Result {
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->overview());
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 当前节点本机已安装系统 crontab 的只读视图。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabInstalled(): Result {
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->installedSnapshot());
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 保存 Linux crontab 独立排程配置。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabSave(): Result {
+        Request::post()->pack($data);
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->save($data));
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 删除 Linux crontab 独立排程配置。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabDelete(): Result {
+        Request::post([
+            'id' => Request\Validator::required('排程 ID 不能为空'),
+        ])->assign($id);
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->delete((string)$id));
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 切换 Linux crontab 是否写入系统排程。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabSetEnabled(): Result {
+        Request::post([
+            'id' => Request\Validator::required('排程 ID 不能为空'),
+            'enabled' => Request\Validator::required('启用状态不能为空'),
+        ])->assign($id, $enabled);
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->setEnabled((string)$id, (int)$enabled === 1));
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 将 Linux crontab 配置与系统排程重新同步。
+     *
+     * @return Result
+     */
+    public function actionLinuxCrontabSync(): Result {
+        try {
+            $manager = new LinuxCrontabManager();
+            return Result::success($manager->sync());
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
     }
 
     /**
@@ -727,7 +832,31 @@ class DashboardController extends Controller {
                             'noColumn' => true,
                             'noClosable' => true
                         ],
-                    ]
+                    ],
+                ]
+            ],
+            [
+                'path' => '/linux-crontab-root',
+                'name' => 'LinuxCrontabRoot',
+                'component' => 'Layout',
+                'meta' => [
+                    'title' => '排程',
+                    'icon' => 'time-line',
+                    'levelHidden' => true,
+                    'breadcrumbHidden' => true
+                ],
+                'children' => [
+                    [
+                        'path' => '/linux-crontabs',
+                        'name' => 'LinuxCrontabs',
+                        'component' => '/@/views/linux-crontabs/index.vue',
+                        'meta' => [
+                            'title' => 'Linux 排程',
+                            'icon' => 'time-line',
+                            'noColumn' => true,
+                            'noClosable' => true
+                        ],
+                    ],
                 ]
             ],
             [

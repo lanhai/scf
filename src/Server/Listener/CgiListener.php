@@ -33,6 +33,7 @@ class CgiListener extends Listener {
     protected const UPSTREAM_CONTROL_SHUTDOWN_PATH = '/_gateway/internal/upstream/shutdown';
     protected const UPSTREAM_CONTROL_STATUS_PATH = '/_gateway/internal/upstream/status';
     protected const UPSTREAM_CONTROL_HEALTH_PATH = '/_gateway/internal/upstream/health';
+    protected const UPSTREAM_CONTROL_HTTP_PROBE_PATH = '/_gateway/internal/upstream/http_probe';
     protected const UPSTREAM_CONTROL_QUIESCE_PATH = '/_gateway/internal/upstream/quiesce';
 
     /**
@@ -201,6 +202,7 @@ class CgiListener extends Listener {
             self::UPSTREAM_CONTROL_SHUTDOWN_PATH,
             self::UPSTREAM_CONTROL_STATUS_PATH,
             self::UPSTREAM_CONTROL_HEALTH_PATH,
+            self::UPSTREAM_CONTROL_HTTP_PROBE_PATH,
             self::UPSTREAM_CONTROL_QUIESCE_PATH,
         ], true)) {
             return false;
@@ -237,6 +239,22 @@ class CgiListener extends Listener {
                 'errCode' => 0,
                 'message' => 'SUCCESS',
                 'data' => Server::instance()->proxyUpstreamHealthStatus(),
+            ]));
+            return true;
+        }
+
+        if ($path === self::UPSTREAM_CONTROL_HTTP_PROBE_PATH) {
+            // 这条探针必须走真实的 onRequest/worker 响应链，专门用来证明 HTTP worker 还能接收并返回请求。
+            $response->status(200);
+            $response->header('Content-Type', 'application/json;charset=utf-8');
+            $response->end(JsonHelper::toJson([
+                'errCode' => 0,
+                'message' => 'SUCCESS',
+                'data' => [
+                    'probe' => 'http',
+                    'worker_id' => (int)(Server::server()->worker_id ?? -1),
+                    'ts' => microtime(true),
+                ],
             ]));
             return true;
         }

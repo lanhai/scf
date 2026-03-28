@@ -3,16 +3,29 @@
 namespace Scf\Server\Proxy;
 
 use RuntimeException;
+use Scf\App\Updater;
+use Scf\Client\Http;
+use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Table\Runtime;
+use Scf\Helper\JsonHelper;
+use Scf\Util\Auth;
 use Swoole\Process;
 use Throwable;
+
+/**
+ * gateway 进程内的 upstream 监督器。
+ *
+ * 负责在单独的子进程里接收启动/停止/sync 指令，
+ * 并把 managed upstream 的生命周期与 gateway 的 registry 同步起来。
+ */
 class UpstreamSupervisor {
 
     protected Process $process;
     protected array $managedInstances = [];
     protected bool $running = true;
+    protected bool $shutdownManagedInstancesOnExit = true;
 
     public function __construct(
         protected AppServerLauncher $launcher,
@@ -22,10 +35,18 @@ class UpstreamSupervisor {
         $this->process = new Process([$this, 'run'], false, SOCK_DGRAM, false);
     }
 
+    /**
+     * 返回监督器子进程对象，供 gateway attach 到主 server。
+     */
     public function getProcess(): Process {
         return $this->process;
     }
 
+    /**
+     * 向监督器子进程发送控制命令。
+     *
+     * 命令通过 JSON 编码写入子进程消息队列，保持轻量且无共享内存依赖。
+     */
     public function sendCommand(array $command): bool {
         $payload = json_encode($command, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($payload === false) {
@@ -34,6 +55,12 @@ class UpstreamSupervisor {
         return $this->process->write($payload);
     }
 
+    /**
+     * 监督器主循环。
+     *
+     * 启动时先按初始 plans 拉起 upstream，再持续处理控制命令；
+     * 退出时统一回收所有托管实例。
+     */
     public function run(Process $process): void {
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_PID, getmypid());
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_STARTED_AT, time());
@@ -64,46 +91,80 @@ class UpstreamSupervisor {
             }
         }
 
-        $this->shutdownAll();
+        if ($this->shutdownManagedInstancesOnExit) {
+            $this->shutdownAll();
+        }
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT, time());
     }
 
+    /**
+     * 处理 gateway 下发的单条监督命令。
+     */
     protected function handleCommand(array $command): void {
         $action = (string)($command['action'] ?? '');
+        $requestId = (string)($command['request_id'] ?? '');
+        $result = null;
         if ($action === 'spawn') {
             $plan = (array)($command['plan'] ?? []);
             $this->launchPlan($plan);
-            return;
-        }
-        if ($action === 'stop_version') {
+            $result = ['ok' => true, 'message' => 'spawn accepted', 'data' => []];
+        } elseif ($action === 'stop_version') {
             $this->stopVersion((string)($command['version'] ?? ''));
-            return;
-        }
-        if ($action === 'stop_port') {
+            $result = ['ok' => true, 'message' => 'stop_version accepted', 'data' => []];
+        } elseif ($action === 'stop_port') {
             $this->stopPort((int)($command['port'] ?? 0));
-            return;
-        }
-        if ($action === 'stop_instance') {
+            $result = ['ok' => true, 'message' => 'stop_port accepted', 'data' => []];
+        } elseif ($action === 'stop_instance') {
             $this->stopManagedInstance((array)($command['instance'] ?? []));
-            return;
-        }
-        if ($action === 'sync_instances') {
+            $result = ['ok' => true, 'message' => 'stop_instance accepted', 'data' => []];
+        } elseif ($action === 'sync_instances') {
             $this->syncInstances((array)($command['instances'] ?? []));
-            return;
-        }
-        if ($action === 'shutdown') {
+            $result = ['ok' => true, 'message' => 'sync_instances accepted', 'data' => []];
+        } elseif ($action === 'install') {
+            $result = $this->executeInstall(
+                (string)($command['key'] ?? ''),
+                (string)($command['role'] ?? 'master'),
+                (array)($command['plans'] ?? [])
+            );
+        } elseif ($action === 'shutdown') {
             $this->running = false;
-            $this->shutdownAll();
-            return;
+            $result = ['ok' => true, 'message' => 'shutdown accepted', 'data' => []];
+        } elseif ($action === 'detach') {
+            $this->running = false;
+            $this->shutdownManagedInstancesOnExit = false;
+            $result = ['ok' => true, 'message' => 'detach accepted', 'data' => []];
+        }
+        if ($requestId !== '' && is_array($result)) {
+            Runtime::instance()->delete($this->commandResultKey($requestId));
+            Runtime::instance()->set($this->commandResultKey($requestId), $result);
         }
     }
 
+    /**
+     * 判断监督器子进程是否仍然存活。
+     *
+     * Gateway restart 需要等待监督器退出自身，否则它会继续持有旧控制面的监听 FD。
+     *
+     * @return bool
+     */
+    public function isAlive(): bool {
+        $pid = (int)($this->process->pid ?? 0);
+        return $pid > 0 && @Process::kill($pid, 0);
+    }
+
+    /**
+     * 按启动计划拉起一个托管 upstream，并等待它进入 ready 状态。
+     */
     protected function launchPlan(array $plan): void {
         $version = trim((string)($plan['version'] ?? ''));
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
         if ($version === '' || $port <= 0) {
             throw new RuntimeException('upstream 启动计划缺少 version 或 port');
+        }
+        if (!App::isReady()) {
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
+            throw new RuntimeException('应用尚未完成初始化安装');
         }
 
         $key = $this->instanceKey($version, $host, $port);
@@ -164,9 +225,130 @@ class UpstreamSupervisor {
         ];
 
         $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
-        Console::success("【Gateway】业务实例已启动 {$version} {$host}:{$port}{$rpcInfo} PID:{$this->managedInstances[$key]['metadata']['pid']}");
+        Console::success("【Gateway】业务实例已就绪(serverIsReady) {$version} {$host}:{$port}{$rpcInfo} PID:{$this->managedInstances[$key]['metadata']['pid']}");
     }
 
+    /**
+     * 在 UpstreamSupervisor 中执行安装流程。
+     *
+     * 该流程包含三步：
+     * 1. 解析并落盘安装秘钥；
+     * 2. 下载业务更新包并等待应用进入 ready；
+     * 3. 直接在监督器中拉起业务实例，后续由 gateway 编排侧完成注册和 nginx 切流。
+     *
+     * @param string $key 安装秘钥
+     * @param string $role 安装角色
+     * @param array<int, array<string, mixed>> $plans 安装完成后需要拉起的业务实例计划
+     * @return array<string, mixed>
+     */
+    protected function executeInstall(string $key, string $role = 'master', array $plans = []): array {
+        if (App::isReady()) {
+            return [
+                'ok' => false,
+                'message' => '应用已完成安装',
+                'data' => [],
+            ];
+        }
+        $key = trim($key);
+        $role = trim($role) ?: 'master';
+        if ($key === '') {
+            return [
+                'ok' => false,
+                'message' => '安装秘钥不能为空',
+                'data' => [],
+            ];
+        }
+
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_UPDATING, true);
+
+        try {
+            $installer = App::installer();
+            $installer->public_path = 'public';
+            $installer->app_path = APP_DIR_NAME;
+
+            $secret = substr($key, 0, 32);
+            $installKey = substr($key, 32);
+            $decode = Auth::decode($installKey, $secret);
+            if (!$decode) {
+                return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
+            }
+            $config = JsonHelper::recover($decode);
+            if (empty($config['key']) || empty($config['server']) || empty($config['dashboard_password']) || empty($config['expired'])) {
+                return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
+            }
+            if (time() > (int)$config['expired']) {
+                return ['ok' => false, 'message' => '安装秘钥已过期', 'data' => []];
+            }
+
+            $installer->app_auth_key = $config['key'];
+            $installer->dashboard_password = $config['dashboard_password'];
+            $installer->update_server = (string)$config['server'];
+            $installer->role = $role;
+
+            $client = Http::create($installer->update_server . '?time=' . time());
+            $versionResult = $client->get();
+            if ($versionResult->hasError()) {
+                return ['ok' => false, 'message' => '获取云端版本号失败:' . $versionResult->getMessage(), 'data' => []];
+            }
+            $remote = $versionResult->getData();
+            $appVersion = $remote['app'] ?? '';
+            if (!$appVersion) {
+                return ['ok' => false, 'message' => '获取云端版本号失败', 'data' => []];
+            }
+
+            $installer->version = $appVersion[0]['version'];
+            $installer->appid = $appVersion[0]['appid'];
+            $installer->updated = date('Y-m-d H:i:s');
+            if (!$installer->add()) {
+                return ['ok' => false, 'message' => '安装失败', 'data' => []];
+            }
+
+            $updater = Updater::instance();
+            $targetVersion = (string)($updater->getVersion()['remote']['app']['version'] ?? '');
+            if ($targetVersion !== '') {
+                Console::info('【Gateway】开始执行安装更新:' . $targetVersion);
+            }
+            if (!$updater->updateApp(true)) {
+                $message = $updater->getLastError() ?: ($targetVersion !== '' ? "更新失败:{$targetVersion}" : '更新失败');
+                return ['ok' => false, 'message' => $message, 'data' => []];
+            }
+
+            while (!App::isReady()) {
+                usleep(500000);
+            }
+
+            $launched = [];
+            foreach ($plans as $plan) {
+                if (!is_array($plan)) {
+                    continue;
+                }
+                $this->launchPlan($plan);
+                $launched[] = $this->describePlan($plan);
+            }
+
+            return [
+                'ok' => true,
+                'message' => '安装完成',
+                'data' => [
+                    'password' => (string)$installer->dashboard_password,
+                    'launched' => $launched,
+                ],
+            ];
+        } catch (Throwable $throwable) {
+            return [
+                'ok' => false,
+                'message' => $throwable->getMessage(),
+                'data' => [],
+            ];
+        } finally {
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_UPDATING, false);
+        }
+    }
+
+    /**
+     * 按版本批量停止当前监督中的 upstream。
+     */
     protected function stopVersion(string $version): void {
         if ($version === '') {
             return;
@@ -181,6 +363,9 @@ class UpstreamSupervisor {
         }
     }
 
+    /**
+     * 按端口停止当前监督中的 upstream。
+     */
     protected function stopPort(int $port): void {
         if ($port <= 0) {
             return;
@@ -195,6 +380,9 @@ class UpstreamSupervisor {
         }
     }
 
+    /**
+     * 停止单个 upstream 实例，支持携带更完整的实例元数据。
+     */
     protected function stopManagedInstance(array $instance): void {
         $host = (string)($instance['host'] ?? '127.0.0.1');
         $port = (int)($instance['port'] ?? 0);
@@ -225,6 +413,9 @@ class UpstreamSupervisor {
         $this->stopInstance($instance);
     }
 
+    /**
+     * 退出时回收所有仍在监督中的 upstream。
+     */
     protected function shutdownAll(): void {
         foreach ($this->managedInstances as $key => $instance) {
             $this->stopInstance($instance);
@@ -232,6 +423,12 @@ class UpstreamSupervisor {
         }
     }
 
+    /**
+     * 用外部同步结果重建当前监督状态。
+     *
+     * 这个入口用于 gateway 恢复/重载后，将 registry 中已存在的 managed 实例
+     * 与当前监督器的内存态重新对齐。
+     */
     protected function syncInstances(array $instances): void {
         $synced = [];
         foreach ($instances as $instance) {
@@ -278,14 +475,33 @@ class UpstreamSupervisor {
         $this->managedInstances = $synced;
     }
 
+    /**
+     * 调用 launcher 执行单个实例的优雅停机/强制回收。
+     */
     protected function stopInstance(array $instance, int $graceSeconds = AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS): void {
         $this->launcher->stop($instance, $graceSeconds);
     }
 
+    /**
+     * 生成托管实例的内存索引键。
+     */
     protected function instanceKey(string $version, string $host, int $port): string {
         return $version . '@' . $host . ':' . $port;
     }
 
+    /**
+     * 生成监督器命令结果在 Runtime 中的存储 key。
+     *
+     * @param string $requestId 命令请求 id
+     * @return string
+     */
+    protected function commandResultKey(string $requestId): string {
+        return 'upstream_supervisor:' . md5($requestId);
+    }
+
+    /**
+     * 用于日志中展示启动计划的摘要信息。
+     */
     protected function describePlan(array $plan): string {
         $version = trim((string)($plan['version'] ?? ''));
         $host = (string)($plan['host'] ?? '127.0.0.1');

@@ -6,7 +6,6 @@ use RuntimeException;
 use Scf\Core\Console;
 use Scf\Core\Server as CoreServer;
 use Swoole\Coroutine;
-use Swoole\Coroutine\Client as CoroutineClient;
 use Swoole\Coroutine\Http\Client as CoroutineHttpClient;
 use Swoole\Process;
 use Swoole\Server;
@@ -14,32 +13,45 @@ use Throwable;
 use const SIGKILL;
 use const SIGTERM;
 
+/**
+ * gateway 托管 upstream 进程的启动与回收协调器。
+ *
+ * 这一层负责把 gateway 的运行参数翻译为可执行子进程命令，完成端口与健康就绪探测，
+ * 并在回收阶段通过内部控制接口触发优雅停机、业务 quiesce 和兜底强杀。
+ */
 class AppServerLauncher {
 
     protected const GRACEFUL_SHUTDOWN_PATH = '/_gateway/internal/upstream/shutdown';
     protected const STATUS_PATH = '/_gateway/internal/upstream/status';
     protected const HEALTH_PATH = '/_gateway/internal/upstream/health';
+    protected const HTTP_PROBE_PATH = '/_gateway/internal/upstream/http_probe';
     protected const QUIESCE_BUSINESS_PATH = '/_gateway/internal/upstream/quiesce';
     public const NORMAL_RECYCLE_GRACE_SECONDS = 1800;
     protected const RECYCLE_WARN_AFTER_SECONDS = 60;
     protected const RECYCLE_WARN_INTERVAL_SECONDS = 60;
 
+    /**
+     * 探测指定主机端口是否已在监听。
+     *
+     * @param string $host 目标主机名或 IP。
+     * @param int $port 目标端口。
+     * @param float $timeoutSeconds 连接探测超时，单位秒。
+     * @return bool 端口可连接时返回 true，否则返回 false。
+     */
     public function isListening(string $host, int $port, float $timeoutSeconds = 0.3): bool {
         if ($port <= 0) {
             return false;
         }
-        if (Coroutine::getCid() > 0) {
-            try {
-                $client = new CoroutineClient(SWOOLE_SOCK_TCP);
-                $connected = $client->connect($host, $port, $timeoutSeconds);
-                if ($connected) {
-                    $client->close();
-                    return true;
-                }
-            } catch (Throwable) {
-            }
-            return false;
+        $host = $this->normalizeProbeHost($host);
+
+        // gateway 托管的 upstream 端口探测绝大多数发生在本机。这里优先复用框架
+        // 现有的“监听进程扫描”能力，而不是在协程定时器里走 TCP connect。
+        // 这样可以避免 reload / recycle watcher 只剩少量协程时，再因为 connect
+        // 挂起把 worker 带进 "all coroutines are asleep" 死锁态。
+        if ($this->isLocalProbeHost($host)) {
+            return CoreServer::isListeningPortInUse($port);
         }
+
         $errno = 0;
         $errstr = '';
         $socket = @stream_socket_client(
@@ -56,6 +68,55 @@ class AppServerLauncher {
         return false;
     }
 
+    /**
+     * 归一化端口探测目标主机。
+     *
+     * @param string $host
+     * @return string
+     */
+    protected function normalizeProbeHost(string $host): string {
+        $host = trim($host);
+        if ($host === '' || in_array($host, ['127.0.0.1', 'localhost', '0.0.0.0', '::', '::1'], true)) {
+            return '127.0.0.1';
+        }
+
+        if (defined('SERVER_HOST') && $host === SERVER_HOST) {
+            return $host === '0.0.0.0' ? '127.0.0.1' : $host;
+        }
+
+        return $host;
+    }
+
+    /**
+     * 判断探测目标是否仍可视为当前节点本机地址。
+     *
+     * gateway 托管的 upstream 都运行在本机，因此对这类地址直接走“端口是否被监听”
+     * 的进程扫描更稳，不需要再做一次 TCP connect。
+     *
+     * @param string $host
+     * @return bool
+     */
+    protected function isLocalProbeHost(string $host): bool {
+        if ($host === '127.0.0.1') {
+            return true;
+        }
+
+        if (!defined('SERVER_HOST')) {
+            return false;
+        }
+
+        return trim((string)SERVER_HOST) !== '' && $host === trim((string)SERVER_HOST);
+    }
+
+    /**
+     * 从起始端口开始扫描可用端口。
+     *
+     * @param string $host 目标主机名或 IP。
+     * @param int $startPort 扫描起始端口。
+     * @param int $maxScan 最大扫描次数。
+     * @return int 找到的可用端口。
+     * @throws RuntimeException 当连续扫描后仍未找到可用端口时抛出。
+     */
     public function findAvailablePort(string $host, int $startPort, int $maxScan = 200): int {
         $port = max(1025, $startPort);
         for ($i = 0; $i < $maxScan; $i++, $port++) {
@@ -72,6 +133,13 @@ class AppServerLauncher {
         throw new RuntimeException("未找到可用端口，起始端口:{$startPort}");
     }
 
+    /**
+     * 构造一个可由 gateway 托管的 upstream 进程对象。
+     *
+     * @param array<string, mixed> $options 启动参数集合。
+     * @return array<string, mixed> 包含 Process 对象及其派生运行信息的规格描述。
+     * @throws RuntimeException 当关键启动参数缺失时抛出。
+     */
     public function createManagedProcess(array $options): array {
         $app = (string)($options['app'] ?? '');
         $env = (string)($options['env'] ?? 'production');
@@ -106,6 +174,14 @@ class AppServerLauncher {
         ];
     }
 
+    /**
+     * 将托管进程挂到 gateway 主 server 的子进程列表。
+     *
+     * @param Server $server gateway 主 server 实例。
+     * @param array<string, mixed> $spec 由 createManagedProcess() 生成的进程规格。
+     * @return array<string, mixed> 原样返回进程规格，便于继续传递。
+     * @throws RuntimeException 当规格中没有有效 Process 对象时抛出。
+     */
     public function attachManagedProcess(Server $server, array $spec): array {
         /** @var Process|null $process */
         $process = $spec['process'] ?? null;
@@ -117,6 +193,13 @@ class AppServerLauncher {
         return $spec;
     }
 
+    /**
+     * 拉起一个 managed upstream，并返回其 pid / command 等运行态信息。
+     *
+     * @param array<string, mixed> $options 启动参数集合。
+     * @return array<string, mixed> 包含 pid、host、port、role 和 command 的运行态信息。
+     * @throws RuntimeException 当进程启动失败时抛出。
+     */
     public function launch(array $options): array {
         $spec = $this->createManagedProcess($options);
         /** @var Process $process */
@@ -131,6 +214,12 @@ class AppServerLauncher {
         return $spec;
     }
 
+    /**
+     * 从进程描述中读取启动后的 pid。
+     *
+     * @param array<string, mixed> $spec 进程规格。
+     * @return int 进程 pid；不存在时返回 0。
+     */
     public function processPid(array $spec): int {
         /** @var Process|null $process */
         $process = $spec['process'] ?? null;
@@ -140,7 +229,27 @@ class AppServerLauncher {
         return (int)($process->pid ?? 0);
     }
 
+    /**
+     * 组装 upstream 启动命令。
+     *
+     * 这里负责继承 gateway 的开发模式、打包模式、源码类型以及 gateway 端口，
+     * 保证子进程与父进程处在同一运行语义下。
+     *
+     * @param string $app 业务应用名。
+     * @param string $env 运行环境。
+     * @param string $role 角色标识。
+     * @param int $port HTTP 端口。
+     * @param int $rpcPort RPC 端口。
+     * @param string $src 源码载体类型。
+     * @param array<int, string> $extra 额外启动参数。
+     * @return array<int, string> 可直接用于 exec 的命令数组。
+     */
     protected function buildCommand(string $app, string $env, string $role, int $port, int $rpcPort, string $src, array $extra): array {
+        $extra = $this->sanitizeExtraFlags($extra);
+        $hasDevFlag = in_array('-dev', $extra, true);
+        $hasPackModeFlag = in_array('-pack', $extra, true) || in_array('-nopack', $extra, true);
+        $hasDirFlag = in_array('-dir', $extra, true);
+        $hasPharFlag = in_array('-phar', $extra, true);
         $command = [
             PHP_BINARY,
             SCF_ROOT . '/boot',
@@ -152,13 +261,20 @@ class AppServerLauncher {
             "-port={$port}",
         ];
 
-        if ($src === 'dir') {
+        if (strtolower($env) === 'dev' && !$hasDevFlag) {
+            $command[] = '-dev';
+        }
+        if (defined('FRAMEWORK_IS_PHAR') && FRAMEWORK_IS_PHAR === false && !$hasPackModeFlag) {
+            $command[] = '-nopack';
+        }
+
+        if ($src === 'dir' && !$hasDirFlag && !$hasPharFlag) {
             $command[] = '-dir';
-        } elseif ($src === 'phar') {
+        } elseif ($src === 'phar' && !$hasPharFlag && !$hasDirFlag) {
             $command[] = '-phar';
         }
 
-        foreach ($this->sanitizeExtraFlags($extra) as $arg) {
+        foreach ($extra as $arg) {
             if (!is_string($arg) || $arg === '') {
                 continue;
             }
@@ -172,6 +288,12 @@ class AppServerLauncher {
         return $command;
     }
 
+    /**
+     * 清理需要由 launcher 接管的启动参数，避免重复注入或冲突。
+     *
+     * @param array<int, mixed> $extra 额外启动参数。
+     * @return array<int, string> 过滤后的参数列表。
+     */
     protected function sanitizeExtraFlags(array $extra): array {
         return array_values(array_filter($extra, static function ($arg) {
             if (!is_string($arg) || $arg === '') {
@@ -181,6 +303,15 @@ class AppServerLauncher {
         }));
     }
 
+    /**
+     * 停止一个 managed upstream。
+     *
+     * 先尝试内部 quiesce/shutdown，再在超时后退化为 SIGTERM/SIGKILL。
+     *
+     * @param array<string, mixed> $instance upstream 实例运行态信息。
+     * @param int $graceSeconds 优雅回收等待时间，单位秒。
+     * @return void
+     */
     public function stop(array $instance, int $graceSeconds = self::NORMAL_RECYCLE_GRACE_SECONDS): void {
         $metadata = (array)($instance['metadata'] ?? []);
         if (($metadata['managed'] ?? false) !== true) {
@@ -231,17 +362,31 @@ class AppServerLauncher {
             @Process::kill($pid, SIGKILL);
         }
         if ($port > 0 && $this->isListening($host, $port, 0.2)) {
-            CoreServer::killProcessByPort($port);
+            \Scf\Core\Server::killProcessByPort($port);
         }
         if ($rpcPort > 0 && $this->isListening($host, $rpcPort, 0.2)) {
-            CoreServer::killProcessByPort($rpcPort);
+            \Scf\Core\Server::killProcessByPort($rpcPort);
         }
     }
 
+    /**
+     * 向 upstream 发起优雅停机请求。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return bool 请求成功并返回 200 时为 true。
+     */
     protected function requestGracefulShutdown(string $host, int $port, float $timeoutSeconds = 1.0): bool {
         return $this->requestInternalPost($host, $port, self::GRACEFUL_SHUTDOWN_PATH, $timeoutSeconds);
     }
 
+    /**
+     * 判断指定 pid 是否仍然存活且不是僵尸进程。
+     *
+     * @param int $pid 进程号。
+     * @return bool 进程仍存活且非僵尸时返回 true。
+     */
     protected function isProcessRunning(int $pid): bool {
         if ($pid <= 0 || !@Process::kill($pid, 0)) {
             return false;
@@ -253,75 +398,50 @@ class AppServerLauncher {
         return !str_contains(trim($stat), 'Z');
     }
 
+    /**
+     * 向 upstream 发起业务面 quiesce，请其停止接新任务但保留尾流。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return bool 请求成功并返回 200 时为 true。
+     */
     public function requestBusinessQuiesce(string $host, int $port, float $timeoutSeconds = 1.0): bool {
         return $this->requestInternalPost($host, $port, self::QUIESCE_BUSINESS_PATH, $timeoutSeconds);
     }
 
+    /**
+     * 发送内部 POST 控制请求。
+     *
+     * 优先走本机 UDS，再按 coroutine / blocking TCP 兜底。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param string $path 控制接口路径。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return bool 请求成功并返回 200 时为 true。
+     */
     protected function requestInternalPost(string $host, int $port, string $path, float $timeoutSeconds = 1.0): bool {
         if ($port <= 0) {
             return false;
         }
-        if ($this->shouldUseLocalUnixHttpSocket($host, $port)) {
-            $statusCode = $this->requestUnixHttpStatus(
-                LocalIpc::upstreamHttpSocketPath($port),
-                'POST',
-                $path,
-                $timeoutSeconds,
-                [
-                    'Host: ' . $host . ':' . $port,
-                    'Connection: close',
-                    'X-Gateway-Control: shutdown',
-                    'Content-Length: 0',
-                ]
-            );
-            if ($statusCode === 200) {
-                return true;
-            }
-        }
-        if (Coroutine::getCid() > 0) {
-            try {
-                $client = new CoroutineHttpClient($host, $port);
-                $client->set(['timeout' => $timeoutSeconds]);
-                $client->setHeaders([
-                    'Host' => "{$host}:{$port}",
-                    'Connection' => 'close',
-                    'X-Gateway-Control' => 'shutdown',
-                ]);
-                $ok = $client->post($path, '');
-                $statusCode = (int)($client->statusCode ?? 0);
-                $client->close();
-                return $ok && $statusCode === 200;
-            } catch (Throwable) {
-                return false;
-            }
-        }
-
-        $errno = 0;
-        $errstr = '';
-        $socket = @stream_socket_client(
-            "tcp://{$host}:{$port}",
-            $errno,
-            $errstr,
-            $timeoutSeconds,
-            STREAM_CLIENT_CONNECT
-        );
-        if (!is_resource($socket)) {
+        $ipcAction = $this->mapUpstreamControlPathToIpcAction($path);
+        if ($ipcAction === '') {
             return false;
         }
-
-        stream_set_timeout($socket, max(1, (int)ceil($timeoutSeconds)));
-        $request = "POST " . $path . " HTTP/1.1\r\n"
-            . "Host: {$host}:{$port}\r\n"
-            . "Connection: close\r\n"
-            . "Content-Length: 0\r\n"
-            . "X-Gateway-Control: shutdown\r\n\r\n";
-        fwrite($socket, $request);
-        $response = stream_get_contents($socket);
-        fclose($socket);
-
-        return is_string($response) && str_contains($response, ' 200 ');
+        $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $timeoutSeconds);
+        return is_array($ipcResponse) && (int)($ipcResponse['status'] ?? 0) === 200;
     }
 
+    /**
+     * 仅等待端口开始监听，不判断业务健康状态。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port 目标端口。
+     * @param int $timeoutSeconds 超时时间，单位秒。
+     * @param int $intervalMs 轮询间隔，单位毫秒。
+     * @return bool 端口在超时内监听成功时返回 true。
+     */
     public function waitUntilReady(string $host, int $port, int $timeoutSeconds = 20, int $intervalMs = 200): bool {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         while (microtime(true) < $deadline) {
@@ -333,6 +453,17 @@ class AppServerLauncher {
         return false;
     }
 
+    /**
+     * 等待 upstream 的 HTTP/RPC 端口、server 健康状态以及真实 HTTP worker 探针同时 ready。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port HTTP 端口。
+     * @param int $rpcPort RPC 端口，传 0 表示不检查。
+     * @param int $timeoutSeconds 超时时间，单位秒。
+     * @param int $intervalMs 轮询间隔，单位毫秒。
+     * @param bool $verbose 是否输出等待日志。
+     * @return bool 三项条件在超时内同时满足时返回 true。
+     */
     public function waitUntilServicesReady(string $host, int $port, int $rpcPort = 0, int $timeoutSeconds = 20, int $intervalMs = 200, bool $verbose = true): bool {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $logged = false;
@@ -340,14 +471,19 @@ class AppServerLauncher {
             $httpReady = $this->isListening($host, $port, 0.2);
             $rpcReady = $rpcPort <= 0 || $this->isListening($host, $rpcPort, 0.2);
             $statusReady = false;
+            $httpProbeReady = false;
             if ($httpReady) {
                 $status = $this->fetchHealthStatus($host, $port, min(1.0, max(0.2, $intervalMs / 1000)));
                 $statusReady = is_array($status)
                     && (bool)($status['server_is_ready'] ?? false) === true
                     && (bool)($status['server_is_alive'] ?? false) === true
                     && (bool)($status['server_is_draining'] ?? false) === false;
+                if ($statusReady) {
+                    // 端口在监听且 server 自报 ready 还不够，只有真实 HTTP 探针也成功才算业务 worker 可用。
+                    $httpProbeReady = $this->probeHttpConnectivity($host, $port, self::HTTP_PROBE_PATH, min(1.0, max(0.2, $intervalMs / 1000)));
+                }
             }
-            if ($httpReady && $rpcReady && $statusReady) {
+            if ($httpReady && $rpcReady && $statusReady && $httpProbeReady) {
                 if ($verbose && $logged) {
                     $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
                     echo Console::timestamp() . " 【Gateway】业务实例端口就绪: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
@@ -368,151 +504,145 @@ class AppServerLauncher {
         return false;
     }
 
+    /**
+     * 通过真实 HTTP GET 请求验证 upstream worker 是否还能正常收发请求。
+     *
+     * 这条探针专门命中 upstream 的 onRequest 分支，用来兜住“server ready 但 worker 假死”的场景。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param string $path 探针路径。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return bool 请求收到 200 且 payload 为合法 JSON 时返回 true。
+     */
+    public function probeHttpConnectivity(string $host, int $port, string $path = self::HTTP_PROBE_PATH, float $timeoutSeconds = 0.5): bool {
+        if ($host === '' || $port <= 0) {
+            return false;
+        }
+        $timeoutSeconds = max(0.1, $timeoutSeconds);
+        if (Coroutine::getCid() > 0) {
+            try {
+                $client = new CoroutineHttpClient($host, $port);
+                $client->set(['timeout' => $timeoutSeconds, 'keep_alive' => false]);
+                $client->setHeaders([
+                    'Host' => $host . ':' . $port,
+                    'Connection' => 'close',
+                ]);
+                $ok = $client->get($path);
+                $body = $client->body ?? '';
+                $statusCode = (int)($client->statusCode ?? 0);
+                $client->close();
+                return $ok && $statusCode === 200 && is_string($body) && $body !== '';
+            } catch (Throwable) {
+                return false;
+            }
+        }
+
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => $timeoutSeconds,
+                'ignore_errors' => true,
+                'header' => implode("\r\n", [
+                    'Host: ' . $host . ':' . $port,
+                    'Connection: close',
+                ]),
+            ],
+        ]);
+        $body = @file_get_contents('http://' . $host . ':' . $port . $path, false, $context);
+        if (!is_string($body) || $body === '') {
+            return false;
+        }
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded) || json_last_error() !== JSON_ERROR_NONE) {
+            return false;
+        }
+        $statusCode = 0;
+        foreach ((array)($http_response_header ?? []) as $headerLine) {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', (string)$headerLine, $matches)) {
+                $statusCode = (int)$matches[1];
+                break;
+            }
+        }
+        return $statusCode === 200;
+    }
+
+    /**
+     * 拉取 upstream 的运行态统计。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return array<string, mixed>|null 成功时返回运行态数据，否则返回 null。
+     */
     protected function fetchRuntimeStatus(string $host, int $port, float $timeoutSeconds = 0.5): ?array {
         return $this->fetchInternalJsonStatus($host, $port, self::STATUS_PATH, $timeoutSeconds);
     }
 
+    /**
+     * 拉取 upstream 的健康状态。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return array<string, mixed>|null 成功时返回健康状态数据，否则返回 null。
+     */
     protected function fetchHealthStatus(string $host, int $port, float $timeoutSeconds = 0.5): ?array {
         return $this->fetchInternalJsonStatus($host, $port, self::HEALTH_PATH, $timeoutSeconds);
     }
 
+    /**
+     * 从 upstream 的内部状态接口读取 JSON 数据。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param string $path 内部状态接口路径。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return array<string, mixed>|null 返回接口 data 字段，失败时返回 null。
+     */
     protected function fetchInternalJsonStatus(string $host, int $port, string $path, float $timeoutSeconds = 0.5): ?array {
         if ($port <= 0) {
             return null;
         }
+        $ipcAction = $this->mapUpstreamStatusPathToIpcAction($path);
+        if ($ipcAction === '') {
+            return null;
+        }
         $effectiveTimeout = $path === self::STATUS_PATH ? max($timeoutSeconds, 5.0) : $timeoutSeconds;
-        if ($this->shouldUseLocalUnixHttpSocket($host, $port)) {
-            $payload = $this->requestUnixHttpJson(
-                LocalIpc::upstreamHttpSocketPath($port),
-                'GET',
-                $path,
-                $effectiveTimeout,
-                [
-                    'Host: ' . $host . ':' . $port,
-                    'Connection: close',
-                ]
-            );
-            if (is_array($payload['data'] ?? null)) {
-                return $payload['data'];
-            }
-        }
-        if (Coroutine::getCid() > 0) {
-            try {
-                $client = new CoroutineHttpClient($host, $port);
-                $client->set(['timeout' => $effectiveTimeout]);
-                $client->setHeaders([
-                    'Host' => "{$host}:{$port}",
-                    'Connection' => 'close',
-                ]);
-                $ok = $client->get($path);
-                $statusCode = (int)($client->statusCode ?? 0);
-                $body = (string)($client->body ?? '');
-                $client->close();
-                if (!$ok || $statusCode !== 200) {
-                    return null;
-                }
-                $decoded = json_decode($body, true);
-                return is_array($decoded['data'] ?? null) ? $decoded['data'] : null;
-            } catch (Throwable) {
-                return null;
-            }
-        }
-
-        $errno = 0;
-        $errstr = '';
-        $socket = @stream_socket_client(
-            "tcp://{$host}:{$port}",
-            $errno,
-            $errstr,
-            $effectiveTimeout,
-            STREAM_CLIENT_CONNECT
-        );
-        if (!is_resource($socket)) {
+        $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $effectiveTimeout);
+        if (!is_array($ipcResponse) || (int)($ipcResponse['status'] ?? 0) !== 200) {
             return null;
         }
-
-        stream_set_timeout($socket, max(1, (int)ceil($timeoutSeconds)));
-        $request = "GET " . $path . " HTTP/1.1\r\n"
-            . "Host: {$host}:{$port}\r\n"
-            . "Connection: close\r\n\r\n";
-        fwrite($socket, $request);
-        $response = stream_get_contents($socket);
-        fclose($socket);
-        if (!is_string($response) || !str_contains($response, "\r\n\r\n")) {
-            return null;
-        }
-        [, $body] = explode("\r\n\r\n", $response, 2);
-        $decoded = json_decode($body, true);
-        return is_array($decoded['data'] ?? null) ? $decoded['data'] : null;
+        $data = $ipcResponse['data'] ?? null;
+        return is_array($data) ? $data : null;
     }
 
-    protected function shouldUseLocalIpc(string $host): bool {
-        return in_array($host, ['127.0.0.1', 'localhost', '0.0.0.0', SERVER_HOST], true);
-    }
-
-    protected function shouldUseLocalUnixHttpSocket(string $host, int $port): bool {
-        return $this->shouldUseLocalIpc($host) && $port > 0 && file_exists(LocalIpc::upstreamHttpSocketPath($port));
-    }
-
-    protected function localIpcActionForPath(string $path): ?string {
+    /**
+     * 把 upstream 状态接口路径映射为本地 IPC 动作名。
+     *
+     * @param string $path 内部状态接口路径。
+     * @return string 对应的 IPC action；未映射时返回空字符串。
+     */
+    protected function mapUpstreamStatusPathToIpcAction(string $path): string {
         return match ($path) {
-            self::GRACEFUL_SHUTDOWN_PATH => 'upstream.shutdown',
-            self::QUIESCE_BUSINESS_PATH => 'upstream.quiesce',
             self::STATUS_PATH => 'upstream.status',
             self::HEALTH_PATH => 'upstream.health',
-            default => null,
+            default => '',
         };
     }
 
-    protected function requestUnixHttpJson(string $socketPath, string $method, string $path, float $timeoutSeconds, array $headers = []): ?array {
-        $response = $this->requestUnixHttpRaw($socketPath, $method, $path, $timeoutSeconds, $headers);
-        if (!is_array($response) || (int)($response['status'] ?? 0) !== 200) {
-            return null;
-        }
-        $body = (string)($response['body'] ?? '');
-        if ($body === '') {
-            return null;
-        }
-        $decoded = json_decode($body, true);
-        return is_array($decoded) ? $decoded : null;
+    /**
+     * 把 upstream 控制接口路径映射为本地 IPC 动作名。
+     *
+     * @param string $path 内部控制接口路径。
+     * @return string 对应的 IPC action；未映射时返回空字符串。
+     */
+    protected function mapUpstreamControlPathToIpcAction(string $path): string {
+        return match ($path) {
+            self::GRACEFUL_SHUTDOWN_PATH => 'upstream.shutdown',
+            self::QUIESCE_BUSINESS_PATH => 'upstream.quiesce',
+            default => '',
+        };
     }
 
-    protected function requestUnixHttpStatus(string $socketPath, string $method, string $path, float $timeoutSeconds, array $headers = []): int {
-        $response = $this->requestUnixHttpRaw($socketPath, $method, $path, $timeoutSeconds, $headers);
-        return (int)($response['status'] ?? 0);
-    }
-
-    protected function requestUnixHttpRaw(string $socketPath, string $method, string $path, float $timeoutSeconds, array $headers = []): ?array {
-        if ($socketPath === '' || !file_exists($socketPath)) {
-            return null;
-        }
-        $errno = 0;
-        $errstr = '';
-        $socket = @stream_socket_client('unix://' . $socketPath, $errno, $errstr, $timeoutSeconds, STREAM_CLIENT_CONNECT);
-        if (!is_resource($socket)) {
-            return null;
-        }
-        $seconds = max(1, (int)floor($timeoutSeconds));
-        $microseconds = max(0, (int)(($timeoutSeconds - floor($timeoutSeconds)) * 1000000));
-        stream_set_timeout($socket, $seconds, $microseconds);
-        $headerLines = array_merge([
-            strtoupper($method) . ' ' . $path . " HTTP/1.1",
-        ], $headers, ['']);
-        $request = implode("\r\n", $headerLines) . "\r\n";
-        fwrite($socket, $request);
-        $raw = stream_get_contents($socket);
-        fclose($socket);
-        if (!is_string($raw) || !str_contains($raw, "\r\n\r\n")) {
-            return null;
-        }
-        [$head, $body] = explode("\r\n\r\n", $raw, 2);
-        $status = 0;
-        foreach (explode("\r\n", $head) as $line) {
-            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $matches)) {
-                $status = (int)$matches[1];
-                break;
-            }
-        }
-        return ['status' => $status, 'body' => $body];
-    }
 }

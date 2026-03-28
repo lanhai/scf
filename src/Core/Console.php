@@ -60,6 +60,10 @@ class Console {
         return "\033[90m{$str}\e[0m";
     }
 
+    protected static function isGatewayMessage(string $str): bool {
+        return str_starts_with(trim($str), '【Gateway】');
+    }
+
     /**
      * 开启日志推送
      * @param int $status
@@ -273,7 +277,8 @@ class Console {
             }
         }
         if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
-            $str = $timestamp . Color::notice("【Server】") . $str . "\n";
+            $body = self::isGatewayMessage($str) ? Color::gateway($str) : $str;
+            $str = $timestamp . Color::notice("【Server】") . $body . "\n";
         } else {
             if (self::shouldGrayOldInstanceOutput()) {
                 $prefix = '#' . self::oldProxyInstanceId() . ' ';
@@ -281,7 +286,9 @@ class Console {
             } else {
                 $body = $str;
             }
-            if (!self::shouldGrayOldInstanceOutput() && $color) {
+            if (!self::shouldGrayOldInstanceOutput() && self::isGatewayMessage($str)) {
+                $body = Color::gateway($body);
+            } elseif (!self::shouldGrayOldInstanceOutput() && $color) {
                 $body = Color::$color($body);
             }
             $str = $timestamp . " " . $body . "\n";

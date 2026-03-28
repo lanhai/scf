@@ -19,6 +19,7 @@ use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
+use Swoole\Coroutine\Channel;
 use Swoole\Process;
 use Swoole\Timer;
 use Throwable;
@@ -28,25 +29,67 @@ class RQueue {
 
     protected int $managerId = 0;
     protected bool $shouldExit = false;
+    protected ?Channel $exitChannel = null;
 
-    public static function startProcess(): void {
+    /**
+     * 为当前 RedisQueue 执行进程准备退出同步通道。
+     *
+     * 队列消费循环本身由 Timer 驱动，主协程不应该再靠 sleep 轮询 shouldExit。
+     * 这里为每次 watch 生命周期创建一个单元素 Channel，用来把“该退出了”的
+     * 信号从 timer/coroutine 分支传回主协程，避免 all coroutines asleep deadlock。
+     *
+     * @return void
+     */
+    protected function prepareExitChannel(): void {
+        $this->shouldExit = false;
+        $this->exitChannel = new Channel(1);
+    }
+
+    /**
+     * 阻塞等待 RedisQueue 执行进程的退出信号。
+     *
+     * @return void
+     */
+    protected function waitForExitSignal(): void {
+        if ($this->exitChannel instanceof Channel) {
+            $this->exitChannel->pop();
+        }
+    }
+
+    /**
+     * 显式结束 RedisQueue 执行进程的协程运行时。
+     *
+     * 队列消费子进程是 enable_coroutine=true 的 Swoole\Process，内部依赖 Timer 和
+     * Coroutine 驱动执行。若只把 shouldExit 置为 true 然后直接返回，Swoole 仍可能在
+     * PHP rshutdown 阶段兜底执行 Event::wait()，从而打印 deprecated warning。
+     *
+     * @return void
+     */
+    protected function shutdownRuntime(): void {
+        Timer::clearAll();
+        $this->shouldExit = true;
+        if ($this->exitChannel instanceof Channel) {
+            $this->exitChannel->push(true, 0.001);
+        }
+    }
+
+    /**
+     * 启动 RedisQueue 真正执行队列消费的子进程。
+     *
+     * RedisQueue manager 负责生命周期编排，这里只负责把执行进程拉起并返回句柄，
+     * 不在内部阻塞等待退出。这样 manager 进程在队列子进程存活期间仍然可以继续
+     * 处理 upgrade / shutdown 指令，避免二次重启时因为内部 wait() 卡住整条控制链。
+     *
+     * @return Process|null 成功时返回已启动的队列子进程，应用未就绪或启动失败时返回 null
+     */
+    public static function startProcess(): ?Process {
         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
         if (!App::isReady()) {
             sleep(1);
-            return;
+            return null;
         }
         $process = new Process(function () use ($managerId) {
             App::mount();
-            register_shutdown_function(function () use ($managerId) {
-                $error = error_get_last();
-                if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE])) {
-                    Console::error("【RedisQueue】#{$managerId} 致命错误: {$error['message']} ({$error['file']}:{$error['line']})");
-                    // 确保所有定时器停止
-                    Timer::clearAll();
-                    // 主动退出子进程，让外部管理进程重新拉起
-                    Process::kill(posix_getpid(), SIGTERM);
-                }
-            });
             $pool = Redis::pool();
             if ($pool instanceof NullPool) {
                 Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
@@ -55,17 +98,26 @@ class RQueue {
                 $memoryLimit = (int)($config['redis_queue_memory_limit'] ?? max((int)($config['worker_memory_limit'] ?? 256), 1024));
                 @ini_set('memory_limit', $memoryLimit . 'M');
                 MemoryMonitor::start('redis:queue');
-                self::instance()->watch($config['redis_queue_mc'] ?? 32);
-                while (!self::instance()->shouldExit()) {
-                    Coroutine::sleep(0.2);
-                }
+                // Swoole 5.1+ 不再推荐依赖“创建协程后由 rshutdown 隐式 Event::wait() 收尾”。
+                // RedisQueue 执行子进程在这里显式开启一次 coroutine runtime，让 Timer、Channel
+                // 与队列消费协程都在同一个可控生命周期里结束，避免进程退出时刷 deprecated warning。
+                Coroutine\run(function () use ($config): void {
+                    self::instance()->prepareExitChannel();
+                    self::instance()->watch($config['redis_queue_mc'] ?? 32);
+                    self::instance()->waitForExitSignal();
+                });
+                MemoryMonitor::stop();
+                return;
             }
-        }, false, 0, true);
+        }, false, 0, false);
         $pid = $process->start();
+        if ($pid <= 0) {
+            Console::error("【RedisQueue】#{$managerId} 队列管理进程启动失败");
+            return null;
+        }
         Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        Process::wait();
-        MemoryMonitor::stop();
+        return $process;
     }
 
     public static function startByWorker(): void {
@@ -115,8 +167,7 @@ class RQueue {
                     });
                     return;
                 }
-                Timer::clearAll();
-                $this->shouldExit = true;
+                $this->shutdownRuntime();
             } else {
                 if ($count = $this->count()) {
                     $successed = 0;
