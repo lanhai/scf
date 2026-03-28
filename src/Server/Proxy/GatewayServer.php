@@ -323,9 +323,10 @@ class GatewayServer {
             return;
         }
         $this->json($response, 404, [
-            'message' => $this->nginxProxyModeEnabled()
-                ? '业务流量已由nginx接管'
-                : 'Gateway 不再承接 HTTP 业务流量'
+            // 这里返回统一的 404，避免把“nginx 接管”当成成功提示误导排障。
+            // 如果请求没有命中 dashboard/control/install 路径，本质上就是当前
+            // gateway worker 不处理这条路由，而不是对外保证 nginx 一定已生效。
+            'message' => 'Not Found'
         ]);
     }
 
@@ -345,7 +346,7 @@ class GatewayServer {
             return false;
         }
         $response->status(404);
-        $response->end($this->nginxProxyModeEnabled() ? '业务WebSocket已由nginx接管' : 'Gateway 不再承接业务WebSocket流量');
+        $response->end('Not Found');
         return false;
     }
 
@@ -4884,10 +4885,55 @@ class GatewayServer {
             . ", queue=" . (int)($runtimeStatus['redis_queue_processing'] ?? 0)
             . ", crontab=" . (int)($runtimeStatus['crontab_busy'] ?? 0)
         );
+        // 切流后旧实例已经不再承接新流量，剩余的 gateway 客户端连接如果继续保留，
+        // WebSocket 等长连接会让旧代永远停在 draining。这里主动断开所有仍绑定在
+        // 当前旧实例上的客户端 fd，让它们尽快重新连到新 active generation。
+        $disconnected = $this->disconnectManagedPlanClients($plan);
+        if ($disconnected > 0) {
+            $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
+            Console::info(
+                "【Gateway】旧业务实例客户端连接已主动断开: " . $this->managedPlanDescriptor($plan)
+                . ", disconnected={$disconnected}, remaining_ws={$gatewayWs}"
+            );
+        }
         if ($gatewayWs === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
             Console::info("【Gateway】旧业务实例已无在途请求，立即进入 shutdown: " . $this->managedPlanDescriptor($plan));
             $this->stopManagedPlan($plan, true);
         }
+    }
+
+    /**
+     * 主动断开仍绑定在旧 managed plan 上的全部客户端连接。
+     *
+     * 切流完成后，这些连接继续留在旧实例上只会拖住 draining；尤其是 WebSocket
+     * 长连接如果不主动 close，旧实例将长期无法进入 shutdown。这里按实例绑定表
+     * 找到所有客户端 fd，并统一交给 tcp relay 关闭，连接计数也会随之同步释放。
+     *
+     * @param array<string, mixed> $plan 旧 generation 对应的 managed plan。
+     * @return int 实际断开的客户端数量。
+     */
+    protected function disconnectManagedPlanClients(array $plan): int {
+        $version = (string)($plan['version'] ?? '');
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        if ($version === '' || $port <= 0) {
+            return 0;
+        }
+
+        $fds = $this->instanceManager->gatewayConnectionFdsFor($version, $host, $port);
+        if (!$fds) {
+            return 0;
+        }
+
+        $disconnected = 0;
+        foreach ($fds as $fd) {
+            try {
+                $this->tcpRelayHandler()->disconnectClient($fd);
+                $disconnected++;
+            } catch (Throwable) {
+            }
+        }
+        return $disconnected;
     }
 
     /**

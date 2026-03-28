@@ -55,6 +55,21 @@ class Manager extends Component {
         return $host;
     }
 
+    /**
+     * 归一化 slave 连接 master 时使用的目标地址。
+     *
+     * 这里需要同时兼容两类部署：
+     * 1. 本机/内网直连控制面：应自动补上 gateway 控制面端口；
+     * 2. 通过 nginx 域名入口访问 master：不应擅自补 `10580`，否则会绕过
+     *    反向代理，直接去访问一个外部并未暴露的控制面端口。
+     *
+     * 因此只有“本机自连”或“明确写了 IP/localhost 但未带端口”时，才自动补
+     * 控制面端口；普通域名默认保留原样，让它继续走 nginx 暴露出来的入口。
+     *
+     * @param string $host 配置中的 master_host 原始值。
+     * @param bool $localMaster 当前是否为 master 本机自连场景。
+     * @return string 归一化后的连接目标。
+     */
     protected function normalizeMasterHost(string $host, bool $localMaster = false): string {
         $host = trim($host);
         if ($host === '') {
@@ -74,10 +89,12 @@ class Manager extends Component {
         $port = (int)($parsed['port'] ?? 0);
         if ($port <= 0 && $localMaster) {
             $port = $this->resolveLocalMasterPort();
-        } elseif ($port <= 0 && MASTER_PORT) {
-            $port = $this->resolveGatewayControlPort((int)MASTER_PORT);
-        } elseif ($port <= 0) {
-            $port = $this->resolveGatewayControlPort((int)(Config::server()['port'] ?? 0));
+        } elseif ($port <= 0 && $this->shouldAppendGatewayPortForMasterHost($hostPart)) {
+            if (MASTER_PORT) {
+                $port = $this->resolveGatewayControlPort((int)MASTER_PORT);
+            } else {
+                $port = $this->resolveGatewayControlPort((int)(Config::server()['port'] ?? 0));
+            }
         }
 
         $normalized = $hostPart . ($port > 0 ? ':' . $port : '');
@@ -92,6 +109,29 @@ class Manager extends Component {
             $normalized .= '#' . $parsed['fragment'];
         }
         return $normalized;
+    }
+
+    /**
+     * 判断一个 master_host 在未显式带端口时，是否应该自动补 gateway 控制面端口。
+     *
+     * 只有直连型地址才需要补端口：
+     * - IP 地址
+     * - localhost / master 这类容器内/内网主机名
+     *
+     * 对外部域名默认不补端口，让它继续走 nginx 暴露出来的 80/443 入口。
+     *
+     * @param string $hostPart 解析后的 host 部分。
+     * @return bool 需要自动补控制面端口时返回 true。
+     */
+    protected function shouldAppendGatewayPortForMasterHost(string $hostPart): bool {
+        $hostPart = strtolower(trim($hostPart));
+        if ($hostPart === '') {
+            return false;
+        }
+        if (filter_var($hostPart, FILTER_VALIDATE_IP) !== false) {
+            return true;
+        }
+        return in_array($hostPart, ['localhost', 'master'], true);
     }
 
     protected function resolveLocalMasterPort(): int {
@@ -179,6 +219,16 @@ class Manager extends Component {
         Console::warning($message, false);
     }
 
+    /**
+     * 构建内部 websocket 地址。
+     *
+     * 这里保持历史行为，默认仍使用 `ws://`，避免擅自改变现有 master 连接协议。
+     * 本轮只修复“域名不应自动补控制面端口”，不改动你现有的协议选择方式。
+     *
+     * @param string $socketHost 不带协议头的 host[:port][/path]。
+     * @param string $subject 内部鉴权 token 的 subject。
+     * @return string 完整 websocket URL。
+     */
     public function buildInternalSocketUrl(string $socketHost, string $subject): string {
         $query = http_build_query([
             'token' => DashboardAuth::createInternalSocketToken($subject)

@@ -1008,15 +1008,19 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 从 nginx 主配置的 include 链里推导配置输出目录。
+     * 从 nginx 主配置的 http include 链里推导配置输出目录。
      *
-     * 这里不允许在未命中 include 的情况下擅自回退到 `conf.d/servers`。
-     * Gateway 生成的配置必须落到 nginx 当前明确加载的目录里；一旦主配置未声明
-     * 或无法解析出目标目录，就应直接抛错，让调用侧把问题暴露出来。
+     * gateway 生成的是 `upstream/server/http-level` 配置，只能放在 `http {}` 上下文
+     * 下被 include 的目录里。像 Debian 系常见的 `modules-enabled/*.conf` 这类顶层
+     * include 虽然也出现在 nginx.conf 中，但并不处于 http 上下文，不能承载
+     * `server_tokens` / `upstream` / `server` 等指令。
+     *
+     * 因此这里必须先定位 `http {}` 配置块，再只从该块内部的 include 指令里挑选
+     * 目录通配路径；没有明确命中时直接报错，不允许擅自回退。
      *
      * @param string $confPath nginx 主配置文件路径。
      * @return string 可用的 nginx 配置目录。
-     * @throws RuntimeException 当无法从 nginx.conf 的 include 链中明确推导目录时抛出。
+     * @throws RuntimeException 当无法从 nginx.conf 的 http include 链中明确推导目录时抛出。
      */
     protected function detectNginxConfDir(string $confPath): string {
         if ($confPath === '') {
@@ -1028,8 +1032,12 @@ class GatewayNginxProxyHandler {
 
         $confDir = dirname($confPath);
         $content = (string)file_get_contents($confPath);
+        $httpBlock = $this->extractHttpBlock($content);
+        if ($httpBlock === '') {
+            throw new RuntimeException("nginx 主配置未找到 http 配置块: {$confPath}");
+        }
         $declaredIncludes = [];
-        if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $content, $matches)) {
+        if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $httpBlock, $matches)) {
             foreach ($matches[1] as $include) {
                 $include = trim((string)$include, "\"' ");
                 if ($include === '') {
@@ -1053,6 +1061,53 @@ class GatewayNginxProxyHandler {
         throw new RuntimeException(
             "nginx 主配置 include 未命中现有目录: " . implode(' | ', $declaredIncludes)
         );
+    }
+
+    /**
+     * 提取 nginx 主配置里的 `http { ... }` 原始块内容。
+     *
+     * 这里只做轻量级括号扫描，不尝试完整解析 nginx 语法。我们的目标只是把
+     * 顶层 `http` 上下文裁剪出来，避免把 `events`、`stream`、`modules-enabled`
+     * 这类非 http include 误判为 gateway 配置目录。
+     *
+     * @param string $content nginx 主配置原始文本。
+     * @return string `http {}` 内部内容；未找到时返回空字符串。
+     */
+    protected function extractHttpBlock(string $content): string {
+        if (!preg_match('/\\bhttp\\s*\\{/', $content, $matches, PREG_OFFSET_CAPTURE)) {
+            return '';
+        }
+
+        $matchText = (string)($matches[0][0] ?? '');
+        $matchOffset = (int)($matches[0][1] ?? -1);
+        if ($matchOffset < 0) {
+            return '';
+        }
+
+        $openBracePos = strpos($matchText, '{');
+        if ($openBracePos === false) {
+            return '';
+        }
+
+        $blockStart = $matchOffset + $openBracePos;
+        $length = strlen($content);
+        $depth = 0;
+        for ($i = $blockStart; $i < $length; $i++) {
+            $char = $content[$i];
+            if ($char === '{') {
+                $depth++;
+                continue;
+            }
+            if ($char !== '}') {
+                continue;
+            }
+            $depth--;
+            if ($depth === 0) {
+                return substr($content, $blockStart + 1, $i - $blockStart - 1);
+            }
+        }
+
+        return '';
     }
 
     /**

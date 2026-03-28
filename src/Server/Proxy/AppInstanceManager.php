@@ -620,6 +620,46 @@ class AppInstanceManager {
     }
 
     /**
+     * 返回当前仍绑定在指定实例上的 gateway 客户端 fd 列表。
+     *
+     * gateway 的长连接回收需要同时看“业务实例是否已进入 draining”和
+     * “哪些客户端仍绑定在这台旧实例上”。这里直接复用 fd -> instance 的
+     * 绑定表，供 gateway 在切流后主动断开旧 upstream 残留连接。
+     *
+     * @param string $version generation 版本。
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @return array<int, int> 仍绑定到该实例的客户端 fd 列表。
+     */
+    public function gatewayConnectionFdsFor(string $version, string $host, int $port): array {
+        if (!isset($this->state['generations'][$version])) {
+            return [];
+        }
+
+        $instanceId = '';
+        foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
+            if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
+                continue;
+            }
+            $instanceId = (string)($instance['id'] ?? '');
+            break;
+        }
+        if ($instanceId === '') {
+            return [];
+        }
+
+        $fds = [];
+        foreach ($this->connectionBindings as $fd => $binding) {
+            if ((string)($binding['instance_id'] ?? '') !== $instanceId) {
+                continue;
+            }
+            $fds[] = (int)$fd;
+        }
+        sort($fds);
+        return $fds;
+    }
+
+    /**
      * 释放连接绑定，并同步减少实例连接数。
      *
      * @param int $fd 连接文件描述符。
