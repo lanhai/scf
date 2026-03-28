@@ -606,7 +606,9 @@ class SubProcessManager {
      * @return string
      */
     protected function gatewayBusinessCommandResultKey(string $requestId): string {
-        return 'gateway_business_command_result:' . $requestId;
+        // 结果 key 必须和 Gateway worker 侧保持同一套定长编码，否则高精度 request id
+        // 在写入 Runtime(Table) 时会超过 key 长度限制，导致结果实际没有写回成功。
+        return 'gateway_business_result:' . md5($requestId);
     }
 
     /**

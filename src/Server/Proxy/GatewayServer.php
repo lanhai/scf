@@ -802,7 +802,10 @@ class GatewayServer {
      * @return string
      */
     protected function gatewayBusinessCommandResultKey(string $requestId): string {
-        return 'gateway_business_command_result:' . $requestId;
+        // Swoole\Table 的 key 长度上限较小，不能直接拼接带高精度 uniqid 的 request id。
+        // 这里统一压缩成稳定长度摘要，避免滚动升级/安装等同步等待链路在写回结果时
+        // 因 key 过长触发 warning，进而让 worker 端一直等到超时。
+        return 'gateway_business_result:' . md5($requestId);
     }
 
     /**
