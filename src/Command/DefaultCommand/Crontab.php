@@ -12,7 +12,9 @@ use Scf\Core\Env;
 use Scf\Core\Server;
 use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Task\Crontab as TaskCrontab;
+use Swoole\Coroutine;
 use Throwable;
+use function Swoole\Coroutine\run;
 
 /**
  * 一次性 crontab 启动命令。
@@ -168,12 +170,43 @@ class Crontab implements CommandInterface {
         $entryId !== '' && LinuxCrontabManager::markRunStarted($entryId);
 
         try {
-            $taskInstance->execute();
+            $this->executeTaskInCoroutine($taskInstance);
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, true, '任务执行完成');
             return Color::success('任务执行完成: ' . $task['namespace']);
         } catch (Throwable $throwable) {
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, false, $throwable->getMessage());
             return Color::danger('任务执行失败: ' . $throwable->getMessage());
+        }
+    }
+
+    /**
+     * 在协程运行时中执行一次性 crontab。
+     *
+     * Linux 系统 crontab 触发的是普通 CLI 进程，但大量任务实现会直接依赖
+     * Redis/MySQL/HTTP 客户端的协程 Hook 能力。这里统一把“一次性执行”包进
+     * `Coroutine\run()`，让脚本与常驻 CrontabManager 子进程保持同样的协程语义。
+     *
+     * @param TaskCrontab $taskInstance 已解析并完成校验的任务实例。
+     * @return void
+     * @throws Throwable 任务执行异常会原样抛回调用方，供 LinuxCrontabManager 回写状态。
+     */
+    protected function executeTaskInCoroutine(TaskCrontab $taskInstance): void {
+        if (Coroutine::getCid() > 0) {
+            $taskInstance->execute();
+            return;
+        }
+
+        $error = null;
+        run(function () use ($taskInstance, &$error): void {
+            try {
+                $taskInstance->execute();
+            } catch (Throwable $throwable) {
+                $error = $throwable;
+            }
+        });
+
+        if ($error instanceof Throwable) {
+            throw $error;
         }
     }
 
