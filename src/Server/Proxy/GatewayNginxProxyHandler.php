@@ -99,11 +99,18 @@ class GatewayNginxProxyHandler {
         $reloaded = false;
         $configChanged = $globalChanged || $upstreamChanged || $serverChanged || $exampleChanged;
         $shouldEnsureRunning = $this->shouldReloadNginx() && !$this->isNginxRunning();
+        $shouldForceReload = $this->shouldReloadNginx()
+            && $this->isNginxRunning()
+            && $this->shouldForceReloadForSyncReason($reason);
 
         // “配置文件已经写好了，但 nginx 进程没起来”时，不能因为内容没变化就跳过。
         // 首次部署、手工停止 nginx、机器重启后 gateway 先起来等场景下，都需要在
         // 当前配置未变化的前提下重新执行 `nginx -t` 和 `nginx start`。
-        if ($configChanged || $shouldEnsureRunning) {
+        //
+        // 另外在 gateway 启动接管阶段，即使生成出来的 include 文件内容与上一轮一致，
+        // 也要强制执行一次 reload。否则“文件已经在磁盘上，但 nginx 仍跑着旧配置”
+        // 的场景下，启动日志会显示“已同步”，实际入口层却没有吃到新的 upstream。
+        if ($configChanged || $shouldEnsureRunning || $shouldForceReload) {
             $this->testNginxConfig();
             $tested = true;
             if ($this->shouldReloadNginx()) {
@@ -130,6 +137,25 @@ class GatewayNginxProxyHandler {
             'runtime_meta' => $runtimeMeta,
             'runtime_meta_changed' => $this->markRuntimeMetaObserved($runtimeMeta),
         ];
+    }
+
+    /**
+     * 判断本次同步原因是否需要在 nginx 已运行时强制 reload 一次。
+     *
+     * 这里主要覆盖 gateway 启动接管场景。启动时 include 文件可能早已存在，
+     * `writeIfChanged()` 会判断为“无内容变化”，但 nginx 进程仍可能尚未载入
+     * 这些文件，或者载入的是上一版 upstream。对这类原因强制 reload 一次，
+     * 可以保证“已同步”确实意味着入口层已经吃到当前配置。
+     *
+     * @param string|null $reason 本次同步触发原因。
+     * @return bool 需要强制 reload 时返回 true。
+     */
+    protected function shouldForceReloadForSyncReason(?string $reason): bool {
+        return in_array((string)$reason, [
+            'register_managed_plan_activate',
+            'install_takeover',
+            'install_takeover_release',
+        ], true);
     }
 
     /**
@@ -737,10 +763,11 @@ class GatewayNginxProxyHandler {
      * @return array 运行时元数据。
      */
     protected function detectRuntimeMeta(): array {
-        $bin = $this->detectNginxBinary();
+        $running = $this->detectRunningNginxMeta();
+        $bin = $running['bin'] !== '' ? $running['bin'] : $this->detectNginxBinary();
         $meta = [
             'bin' => $bin,
-            'conf_path' => '',
+            'conf_path' => (string)($running['conf_path'] ?? ''),
             'pid_path' => '',
             'conf_dir' => '',
         ];
@@ -749,7 +776,9 @@ class GatewayNginxProxyHandler {
         exec($command, $output, $code);
         if ($code === 0 || $output) {
             $versionInfo = implode("\n", $output);
-            $meta['conf_path'] = $this->extractNginxBuildArg($versionInfo, 'conf-path');
+            if ($meta['conf_path'] === '') {
+                $meta['conf_path'] = $this->extractNginxBuildArg($versionInfo, 'conf-path');
+            }
             $meta['pid_path'] = $this->extractNginxBuildArg($versionInfo, 'pid-path');
         }
 
@@ -853,6 +882,75 @@ class GatewayNginxProxyHandler {
             }
         }
         return $fromPath !== '' ? $fromPath : 'nginx';
+    }
+
+    /**
+     * 优先从当前正在运行的 nginx master 进程提取 bin 与 conf 路径。
+     *
+     * 线上环境经常同时存在“系统 nginx”和“面板/自定义 nginx”两套安装。
+     * 如果仅依赖 `command -v nginx`，很容易拿到错误的二进制并进一步解析出
+     * 错误的 `conf-path/conf-dir`。这里优先跟随正在运行的 master 进程，确保
+     * gateway 写入的是那套实际对外提供服务的 nginx 配置目录。
+     *
+     * @return array{bin:string, conf_path:string} 运行中 nginx 的关键元数据。
+     */
+    protected function detectRunningNginxMeta(): array {
+        $commands = [
+            'ps -eo command= 2>/dev/null',
+            'ps ax -o command= 2>/dev/null',
+        ];
+        foreach ($commands as $command) {
+            $output = shell_exec($command);
+            if (!is_string($output) || trim($output) === '') {
+                continue;
+            }
+            foreach (preg_split('/\r?\n/', trim($output)) as $line) {
+                $line = trim((string)$line);
+                if ($line === '' || !str_contains($line, 'nginx: master process')) {
+                    continue;
+                }
+                $meta = $this->parseRunningNginxMasterCommand($line);
+                if ($meta['bin'] !== '' || $meta['conf_path'] !== '') {
+                    return $meta;
+                }
+            }
+        }
+        return ['bin' => '', 'conf_path' => ''];
+    }
+
+    /**
+     * 解析 nginx master 进程命令行，提取真实 bin 和 `-c` 指定的主配置路径。
+     *
+     * @param string $line `ps` 输出中的单行命令文本。
+     * @return array{bin:string, conf_path:string} 解析结果。
+     */
+    protected function parseRunningNginxMasterCommand(string $line): array {
+        if (!preg_match('/nginx:\s+master process\s+(.+)$/', $line, $matches)) {
+            return ['bin' => '', 'conf_path' => ''];
+        }
+        $commandLine = trim((string)$matches[1]);
+        if ($commandLine === '') {
+            return ['bin' => '', 'conf_path' => ''];
+        }
+
+        $parts = preg_split('/\s+/', $commandLine) ?: [];
+        $bin = trim((string)($parts[0] ?? ''));
+        if ($bin !== '' && !str_starts_with($bin, '/')) {
+            $resolved = trim((string)shell_exec('command -v ' . escapeshellarg($bin) . ' 2>/dev/null'));
+            if ($resolved !== '') {
+                $bin = $resolved;
+            }
+        }
+
+        $confPath = '';
+        if (preg_match('/(?:^|\s)-c\s+([^\s]+)/', $commandLine, $confMatches)) {
+            $confPath = trim((string)$confMatches[1], "\"'");
+        }
+
+        return [
+            'bin' => $bin,
+            'conf_path' => $confPath,
+        ];
     }
 
     /**
