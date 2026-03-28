@@ -1039,8 +1039,8 @@ class GatewayNginxProxyHandler {
                     $include = $confDir . '/' . $include;
                 }
                 $declaredIncludes[] = $include;
-                $candidate = str_contains($include, '*') ? dirname($include) : $include;
-                if (is_dir($candidate)) {
+                $candidate = $this->extractManagedIncludeDir($include);
+                if ($candidate !== '') {
                     return rtrim($candidate, '/');
                 }
             }
@@ -1053,6 +1053,29 @@ class GatewayNginxProxyHandler {
         throw new RuntimeException(
             "nginx 主配置 include 未命中现有目录: " . implode(' | ', $declaredIncludes)
         );
+    }
+
+    /**
+     * 从单条 include 指令里提取适合承载 gateway 配置的目录。
+     *
+     * 这里只识别“目录通配 include”，例如 `servers/*`、`conf.d/*.conf` 这类。
+     * 像 `mime.types` 这种单文件 include 不属于承载扩展配置的目录，必须跳过。
+     * 对通配 include 不要求目录预先存在，因为 gateway 后续写盘时会负责创建。
+     *
+     * @param string $include 已归一化成绝对路径的 include 文本。
+     * @return string 命中时返回目标目录，否则返回空字符串。
+     */
+    protected function extractManagedIncludeDir(string $include): string {
+        if (!str_contains($include, '*')) {
+            return '';
+        }
+
+        $directory = rtrim(dirname($include), '/');
+        if ($directory === '' || $directory === '.') {
+            return '';
+        }
+
+        return $directory;
     }
 
     /**
