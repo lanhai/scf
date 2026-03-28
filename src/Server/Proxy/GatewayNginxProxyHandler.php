@@ -119,6 +119,11 @@ class GatewayNginxProxyHandler {
             }
         }
 
+        // “写盘成功”或“reload 成功”都不代表 nginx 真正吃到了这几份 include。
+        // 在这里直接用 `nginx -T` 校验当前有效配置，确保最终对外流量入口已经
+        // 引用了 gateway 刚生成的文件；否则宁可让 sync 失败，也不要误报成功。
+        $this->validateManagedFilesLoaded([$globalFile, $upstreamFile, $serverFile]);
+
         return [
             'reason' => $reason ?: 'manual',
             'global_file' => $globalFile,
@@ -137,6 +142,55 @@ class GatewayNginxProxyHandler {
             'runtime_meta' => $runtimeMeta,
             'runtime_meta_changed' => $this->markRuntimeMetaObserved($runtimeMeta),
         ];
+    }
+
+    /**
+     * 校验当前 nginx 生效配置里已经包含 gateway 生成的 include 文件。
+     *
+     * 这里使用 `nginx -T` 读取当前完整配置展开结果。如果这些文件没有出现在
+     * 生效配置里，就说明：
+     * 1. 主配置没有 include 到目标目录；
+     * 2. reload/start 后入口层仍未加载这批配置；
+     * 3. 当前使用的 nginx 与生成文件目录不一致。
+     *
+     * 无论哪种情况，都必须直接报错而不是继续把“已同步”打印成成功。
+     *
+     * @param array<int, string> $paths 需要确认已被加载的文件路径。
+     * @return void
+     * @throws RuntimeException 当当前生效配置中未找到目标文件时抛出。
+     */
+    protected function validateManagedFilesLoaded(array $paths): void {
+        $bin = $this->nginxBin();
+        $command = escapeshellarg($bin) . ' -T';
+        $confPath = (string)($this->nginxRuntimeMeta()['conf_path'] ?? '');
+        if ($confPath !== '') {
+            $command .= ' -c ' . escapeshellarg($confPath);
+        }
+        $command .= ' 2>&1';
+        exec($command, $output, $code);
+        if ($code !== 0) {
+            throw new RuntimeException("nginx 生效配置导出失败:\n" . implode("\n", $output));
+        }
+
+        $effectiveConfig = implode("\n", $output);
+        $missing = [];
+        foreach (array_filter(array_unique($paths)) as $path) {
+            $normalizedPath = str_replace('\\', '/', (string)$path);
+            if ($normalizedPath === '') {
+                continue;
+            }
+            if (!str_contains($effectiveConfig, $normalizedPath) && !str_contains($effectiveConfig, basename($normalizedPath))) {
+                $missing[] = $normalizedPath;
+            }
+        }
+
+        if ($missing) {
+            throw new RuntimeException(
+                "nginx 尚未加载 gateway 生成的配置文件: " . implode(' | ', $missing)
+                . "\nconf-path=" . ($confPath !== '' ? $confPath : '(empty)')
+                . "\nconf-dir=" . (string)($this->nginxRuntimeMeta()['conf_dir'] ?? '')
+            );
+        }
     }
 
     /**
@@ -526,13 +580,13 @@ class GatewayNginxProxyHandler {
     /**
      * nginx 配置输出目录。
      *
+     * 这里必须以当前 nginx 主配置推导出的 include 目录为准，而不是应用配置。
+     * 否则同一套框架在不同机器上会被业务配置硬编码到错误目录，出现“文件已生成，
+     * 但 nginx 实际没有 include 这份配置”的问题。
+     *
      * @return string 实际使用的 nginx conf.d/servers 目录。
      */
     protected function confDir(): string {
-        $configured = trim((string)($this->gateway->serverConfig()['gateway_nginx_conf_dir'] ?? ''));
-        if ($configured !== '') {
-            return rtrim($configured, '/');
-        }
         return rtrim((string)($this->nginxRuntimeMeta()['conf_dir'] ?? '/etc/nginx/conf.d'), '/');
     }
 
@@ -725,7 +779,7 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 获取 nginx 运行时元数据，并优先复用缓存。
+     * 获取 nginx 运行时元数据。
      *
      * @return array nginx bin / conf / pid 等运行时信息。
      */
@@ -734,24 +788,10 @@ class GatewayNginxProxyHandler {
             return $this->nginxRuntimeMeta;
         }
 
-        $cached = $this->loadRuntimeMetaCache();
         $meta = $this->detectRuntimeMeta();
-        if ($this->isUsableRuntimeMeta($meta)) {
-            // nginx conf 目录必须以当前 nginx.conf 的 include 链为准。
-            // 这里即使存在旧缓存，也优先重新跑一遍 `nginx -V` + 主配置解析，
-            // 避免历史上探测到的 conf.d/servers 目录在后续部署中被永久复用。
-            $this->writeRuntimeMetaCache($meta);
-            $this->runtimeMetaLoadedFromCache = false;
-            return $this->nginxRuntimeMeta = $meta;
-        }
-
-        // 仅当 fresh 探测失败时才回退旧缓存，保证 nginx 命令暂时不可用时仍有
-        // 兜底，但正常情况下不会让过期的 conf_dir 长期污染后续配置输出。
-        if ($this->isUsableRuntimeMeta($cached)) {
-            $this->runtimeMetaLoadedFromCache = true;
-            return $this->nginxRuntimeMeta = $cached;
-        }
-
+        // runtime meta 缓存只作为调试与观测记录，不再参与目录决策。
+        // conf_dir 必须来自当前 nginx.conf 的 fresh 解析结果，避免历史缓存把
+        // 错误目录长期固化；如果本次解析失败，应直接报错而不是悄悄回退。
         $this->writeRuntimeMetaCache($meta);
         $this->runtimeMetaLoadedFromCache = false;
         return $this->nginxRuntimeMeta = $meta;
@@ -968,45 +1008,51 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 推导 nginx 配置目录，兼容不同安装布局。
+     * 从 nginx 主配置的 include 链里推导配置输出目录。
+     *
+     * 这里不允许在未命中 include 的情况下擅自回退到 `conf.d/servers`。
+     * Gateway 生成的配置必须落到 nginx 当前明确加载的目录里；一旦主配置未声明
+     * 或无法解析出目标目录，就应直接抛错，让调用侧把问题暴露出来。
      *
      * @param string $confPath nginx 主配置文件路径。
      * @return string 可用的 nginx 配置目录。
+     * @throws RuntimeException 当无法从 nginx.conf 的 include 链中明确推导目录时抛出。
      */
     protected function detectNginxConfDir(string $confPath): string {
-        $confDir = $confPath !== '' ? dirname($confPath) : '/etc/nginx';
-        $candidates = [];
-        if ($confPath !== '' && is_file($confPath)) {
-            $content = (string)file_get_contents($confPath);
-            if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $content, $matches)) {
-                foreach ($matches[1] as $include) {
-                    $include = trim((string)$include, "\"' ");
-                    if ($include === '') {
-                        continue;
-                    }
-                    if (!str_starts_with($include, '/')) {
-                        $include = $confDir . '/' . $include;
-                    }
-                    $candidates[] = str_contains($include, '*') ? dirname($include) : $include;
+        if ($confPath === '') {
+            throw new RuntimeException('无法从 nginx -V 中解析 conf-path，不能确定 nginx 配置输出目录');
+        }
+        if (!is_file($confPath)) {
+            throw new RuntimeException("nginx 主配置不存在，无法确定配置输出目录: {$confPath}");
+        }
+
+        $confDir = dirname($confPath);
+        $content = (string)file_get_contents($confPath);
+        $declaredIncludes = [];
+        if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $content, $matches)) {
+            foreach ($matches[1] as $include) {
+                $include = trim((string)$include, "\"' ");
+                if ($include === '') {
+                    continue;
+                }
+                if (!str_starts_with($include, '/')) {
+                    $include = $confDir . '/' . $include;
+                }
+                $declaredIncludes[] = $include;
+                $candidate = str_contains($include, '*') ? dirname($include) : $include;
+                if (is_dir($candidate)) {
+                    return rtrim($candidate, '/');
                 }
             }
         }
 
-        $candidates = array_merge($candidates, [
-            $confDir . '/conf.d',
-            $confDir . '/servers',
-            '/etc/nginx/conf.d',
-            '/usr/local/openresty/nginx/conf/conf.d',
-            '/opt/homebrew/etc/nginx/servers',
-        ]);
-
-        foreach (array_unique($candidates) as $candidate) {
-            if (is_dir($candidate)) {
-                return rtrim($candidate, '/');
-            }
+        if (!$declaredIncludes) {
+            throw new RuntimeException("nginx 主配置未声明可用的 include 目录: {$confPath}");
         }
 
-        return rtrim($confDir . '/conf.d', '/');
+        throw new RuntimeException(
+            "nginx 主配置 include 未命中现有目录: " . implode(' | ', $declaredIncludes)
+        );
     }
 
     /**
