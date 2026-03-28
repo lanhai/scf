@@ -97,7 +97,13 @@ class GatewayNginxProxyHandler {
 
         $tested = false;
         $reloaded = false;
-        if ($globalChanged || $upstreamChanged || $serverChanged || $exampleChanged) {
+        $configChanged = $globalChanged || $upstreamChanged || $serverChanged || $exampleChanged;
+        $shouldEnsureRunning = $this->shouldReloadNginx() && !$this->isNginxRunning();
+
+        // “配置文件已经写好了，但 nginx 进程没起来”时，不能因为内容没变化就跳过。
+        // 首次部署、手工停止 nginx、机器重启后 gateway 先起来等场景下，都需要在
+        // 当前配置未变化的前提下重新执行 `nginx -t` 和 `nginx start`。
+        if ($configChanged || $shouldEnsureRunning) {
             $this->testNginxConfig();
             $tested = true;
             if ($this->shouldReloadNginx()) {
@@ -703,12 +709,23 @@ class GatewayNginxProxyHandler {
         }
 
         $cached = $this->loadRuntimeMetaCache();
+        $meta = $this->detectRuntimeMeta();
+        if ($this->isUsableRuntimeMeta($meta)) {
+            // nginx conf 目录必须以当前 nginx.conf 的 include 链为准。
+            // 这里即使存在旧缓存，也优先重新跑一遍 `nginx -V` + 主配置解析，
+            // 避免历史上探测到的 conf.d/servers 目录在后续部署中被永久复用。
+            $this->writeRuntimeMetaCache($meta);
+            $this->runtimeMetaLoadedFromCache = false;
+            return $this->nginxRuntimeMeta = $meta;
+        }
+
+        // 仅当 fresh 探测失败时才回退旧缓存，保证 nginx 命令暂时不可用时仍有
+        // 兜底，但正常情况下不会让过期的 conf_dir 长期污染后续配置输出。
         if ($this->isUsableRuntimeMeta($cached)) {
             $this->runtimeMetaLoadedFromCache = true;
             return $this->nginxRuntimeMeta = $cached;
         }
 
-        $meta = $this->detectRuntimeMeta();
         $this->writeRuntimeMetaCache($meta);
         $this->runtimeMetaLoadedFromCache = false;
         return $this->nginxRuntimeMeta = $meta;

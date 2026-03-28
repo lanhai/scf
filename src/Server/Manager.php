@@ -126,19 +126,25 @@ class Manager extends Component {
         if (!$path || $path === '/') {
             $socketHost .= '/dashboard.socket';
         }
+        $startedAt = time();
+        $attempt = 0;
         $retryDelay = 1;
         while (true) {
+            $attempt++;
             try {
                 $socket = SaberGM::websocket($this->buildInternalSocketUrl($socketHost, 'node-' . APP_NODE_ID));
                 if ($this->wsConnected($socket)) {
+                    if ($attempt > 1) {
+                        Console::success("【Server】已连接到master节点[{$socketHost}]，重试次数:{$attempt}", false);
+                    }
                     return $socket;
                 }
                 $cli = $this->getWsClient($socket);
                 $status = $cli->statusCode ?? 'null';
                 $err = $cli->errCode ?? 'null';
-                Console::warning("【Server】与master节点[{$socketHost}]握手失败: status={$status} err={$err}", false);
+                $this->logMasterConnectionRetry($socketHost, "握手未就绪: status={$status} err={$err}", $startedAt, $attempt, $retryDelay);
             } catch (RequestException $throwable) {
-                Console::warning("【Server】连接master节点[{$socketHost}]失败:" . $throwable->getMessage(), false);
+                $this->logMasterConnectionRetry($socketHost, '连接失败:' . $throwable->getMessage(), $startedAt, $attempt, $retryDelay);
             }
             if (Coroutine::getCid() > 0) {
                 Coroutine::sleep($retryDelay);
@@ -147,6 +153,30 @@ class Manager extends Component {
             }
             $retryDelay = min($retryDelay * 2, 30);
         }
+    }
+
+    /**
+     * 输出 slave 连接 master 的重试日志。
+     *
+     * 首次部署或 master 先于 slave 尚未完全就绪时，短时间内连不上控制面是正常现象。
+     * 这里在启动宽限期内只输出“等待 master 就绪”的提示，避免生产首次部署时
+     * 被误解为真实故障；只有持续超时后才升级为 warning。
+     *
+     * @param string $socketHost 目标 master socket 地址
+     * @param string $reason 最近一次失败原因
+     * @param int $startedAt 本轮连接开始时间
+     * @param int $attempt 当前重试次数
+     * @param int $retryDelay 下一轮重试等待秒数
+     * @return void
+     */
+    protected function logMasterConnectionRetry(string $socketHost, string $reason, int $startedAt, int $attempt, int $retryDelay): void {
+        $elapsed = max(0, time() - $startedAt);
+        $message = "【Server】等待master节点[{$socketHost}]就绪: {$reason}, attempt={$attempt}, retry_in={$retryDelay}s, elapsed={$elapsed}s";
+        if ($elapsed < 60) {
+            Console::info($message, false);
+            return;
+        }
+        Console::warning($message, false);
     }
 
     public function buildInternalSocketUrl(string $socketHost, string $subject): string {
