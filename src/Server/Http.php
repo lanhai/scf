@@ -17,9 +17,13 @@ use Scf\Core\Table\SocketConnectionTable;
 use Scf\Root;
 use Scf\Server\Listener\Listener;
 use Scf\Server\Proxy\ConsoleRelay;
+use Scf\Server\Proxy\LocalIpc;
+use Scf\Server\Proxy\LocalIpcServer;
 use Scf\Server\Task\CrontabManager;
+use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
+use RuntimeException;
 use Swoole\Coroutine;
 use Swoole\Timer;
 use Swoole\WebSocket\Server;
@@ -70,6 +74,8 @@ class Http extends \Scf\Core\Server {
     protected SubProcessManager $subProcessManager;
     protected ?int $reloadDiagnosticTimerId = null;
     protected int $reloadDiagnosticStartedAt = 0;
+    protected ?LocalIpcServer $localIpcServer = null;
+    protected ?string $businessHttpSocketPath = null;
 
     protected function isProxyUpstreamMode(): bool {
         return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
@@ -216,6 +222,7 @@ class Http extends \Scf\Core\Server {
                 // 'heartbeat_idle_time' => 180
             ]);
             Runtime::instance()->httpPort($this->bindPort);
+            $this->startProxyUpstreamHttpSocketListener($serverConfig);
         } catch (Throwable $exception) {
             $this->log(Color::yellow('HTTP服务端口[' . $this->bindPort . ']监听启动失败:' . $exception->getMessage()));
             // 稍等片刻再退出/或由外层管理器重试
@@ -285,7 +292,7 @@ class Http extends \Scf\Core\Server {
 //        });
         //服务器销毁前
         $this->server->on("BeforeShutdown", function (Server $server) {
-            $this->log(Color::red('服务器即将关闭'));
+            $this->log(Color::yellow('服务器即将关闭'));
             $this->stopReloadDiagnostics();
             $disconnected = $this->disconnectAllClients($server);
             $disconnected > 0 and $this->log(Color::yellow("已断开 {$disconnected} 个客户端连接"));
@@ -401,6 +408,159 @@ INFO;
         return $this->subProcessManager->pushConsoleLog($time, $message);
     }
 
+    public function proxyUpstreamRuntimeStatus(): array {
+        $stats = $this->server ? $this->server->stats() : (Runtime::instance()->get('SERVER_STATS') ?: []);
+        $profile = \Scf\Core\App::profile();
+
+        return [
+            'id' => APP_NODE_ID,
+            'appid' => APP_ID,
+            'name' => APP_DIR_NAME,
+            'ip' => SERVER_HOST,
+            'port' => Runtime::instance()->httpPort(),
+            'socketPort' => Runtime::instance()->httpPort(),
+            'started' => file_exists(SERVER_MASTER_PID_FILE) ? filemtime(SERVER_MASTER_PID_FILE) : time(),
+            'restart_times' => Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0,
+            'heart_beat' => time(),
+            'framework_build_version' => FRAMEWORK_BUILD_VERSION,
+            'framework_update_ready' => file_exists(SCF_ROOT . '/build/update.pack'),
+            'role' => SERVER_ROLE,
+            'master_pid' => (int)($this->server->master_pid ?? 0),
+            'manager_pid' => (int)($this->server->manager_pid ?? 0),
+            'fingerprint' => APP_FINGERPRINT,
+            'app_version' => \Scf\Core\App::version() ?: $profile->version,
+            'public_version' => \Scf\Core\App::publicVersion() ?: ($profile->public_version ?: '--'),
+            'scf_version' => SCF_COMPOSER_VERSION,
+            'swoole_version' => swoole_version(),
+            'cpu_num' => function_exists('swoole_cpu_num') ? swoole_cpu_num() : 0,
+            'stack_useage' => memory_get_usage(true),
+            'tables' => ATable::list(),
+            'tasks' => \Scf\Server\Task\CrontabManager::allStatus(),
+            'threads' => class_exists(\Swoole\Coroutine::class) ? count(\Swoole\Coroutine::list()) : 0,
+            'thread_status' => class_exists(\Swoole\Coroutine::class) ? \Swoole\Coroutine::stats() : [],
+            'server_run_mode' => APP_SRC_TYPE,
+            'server_is_ready' => Runtime::instance()->serverIsReady(),
+            'server_is_draining' => Runtime::instance()->serverIsDraining(),
+            'server_is_alive' => Runtime::instance()->serverIsAlive(),
+            'http_request_count_current' => Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0,
+            'http_request_count_today' => Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0,
+            'http_request_reject' => Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0,
+            'http_request_count' => Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0,
+            'http_request_processing' => Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0,
+            'rpc_request_processing' => Counter::instance()->get(Key::COUNTER_RPC_REQUEST_PROCESSING) ?: 0,
+            'redis_queue_processing' => Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0,
+            'crontab_busy' => \Scf\Server\Task\CrontabManager::busyCount(),
+            'mysql_execute_count' => Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0,
+            'server_stats' => array_merge((array)$stats, [
+                'long_connection_num' => SocketConnectionTable::instance()->count(),
+            ]),
+            'memory_usage' => MemoryMonitor::sum(),
+        ];
+    }
+
+    public function proxyUpstreamHealthStatus(): array {
+        return [
+            'id' => APP_NODE_ID,
+            'ip' => SERVER_HOST,
+            'port' => Runtime::instance()->httpPort(),
+            'rpc_port' => Runtime::instance()->rpcPort(),
+            'started' => file_exists(SERVER_MASTER_PID_FILE) ? filemtime(SERVER_MASTER_PID_FILE) : time(),
+            'master_pid' => (int)($this->server->master_pid ?? 0),
+            'manager_pid' => (int)($this->server->manager_pid ?? 0),
+            'server_is_ready' => Runtime::instance()->serverIsReady(),
+            'server_is_draining' => Runtime::instance()->serverIsDraining(),
+            'server_is_alive' => Runtime::instance()->serverIsAlive(),
+        ];
+    }
+
+    public function startLocalIpcServer(): void {
+        // Upstream 控制面统一改走已有的 unix http socket，避免独立 accept 协程在空闲时触发 coroutine deadlock。
+    }
+
+    public function stopLocalIpcServer(): void {
+        $this->localIpcServer = null;
+    }
+
+    protected function startProxyUpstreamHttpSocketListener(array $serverConfig): void {
+        if (!$this->isProxyUpstreamMode() || !$this->proxyUpstreamHttpSocketEnabled()) {
+            return;
+        }
+        $socketPath = LocalIpc::upstreamHttpSocketPath($this->bindPort);
+        $this->businessHttpSocketPath = $socketPath;
+        @unlink($socketPath);
+        try {
+            $socketServer = $this->server->listen($socketPath, 0, SWOOLE_UNIX_STREAM);
+            if (!$socketServer) {
+                throw new RuntimeException('listen failed');
+            }
+            $socketServer->set([
+                'package_max_length' => $serverConfig['package_max_length'] ?? 10 * 1024 * 1024,
+                'open_http_protocol' => true,
+                'open_http2_protocol' => false,
+                'open_websocket_protocol' => false,
+            ]);
+            @chmod($socketPath, 0666);
+        } catch (Throwable $throwable) {
+            @unlink($socketPath);
+            $this->businessHttpSocketPath = null;
+            Console::warning("【Server】业务实例HTTP本机socket启动失败，回退TCP: {$throwable->getMessage()}", false);
+        }
+    }
+
+    protected function stopProxyUpstreamHttpSocketListener(): void {
+        if (!$this->businessHttpSocketPath) {
+            return;
+        }
+        @unlink($this->businessHttpSocketPath);
+        $this->businessHttpSocketPath = null;
+    }
+
+    protected function proxyUpstreamHttpSocketEnabled(): bool {
+        return (bool)(Config::server()['gateway_proxy_http_use_unix_socket'] ?? true);
+    }
+
+    protected function handleLocalIpcRequest(array $request): array {
+        $action = (string)($request['action'] ?? '');
+        return match ($action) {
+            'upstream.status' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => $this->proxyUpstreamRuntimeStatus(),
+            ],
+            'upstream.health' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => $this->proxyUpstreamHealthStatus(),
+            ],
+            'upstream.quiesce' => $this->queueLocalIpcAction(function (): void {
+                $this->quiesceBusinessPlane();
+            }, 'quiesce', 5),
+            'upstream.shutdown' => $this->queueLocalIpcAction(function (): void {
+                $this->shutdown();
+            }, 'shutdown', 50),
+            default => ['ok' => false, 'status' => 404, 'message' => 'unknown action'],
+        };
+    }
+
+    protected function queueLocalIpcAction(callable $handler, string $label, int $delayMs = 1): array {
+        return [
+            'ok' => true,
+            'status' => 200,
+            'data' => $label,
+            '__after_write' => static function () use ($handler, $delayMs): void {
+                Timer::after(max(1, $delayMs), static function () use ($handler): void {
+                    $handler();
+                });
+            },
+        ];
+    }
+
+    public function quiesceBusinessPlane(): void {
+        Runtime::instance()->serverIsDraining(true);
+        Console::warning("【Server】业务实例进入平滑回收,停止接收新任务", false);
+        isset($this->subProcessManager) && $this->subProcessManager->quiesceBusinessProcesses();
+    }
+
 
     /**
      * 停止服务器
@@ -411,11 +571,47 @@ INFO;
         Runtime::instance()->serverIsDraining(true);
         Runtime::instance()->serverIsAlive(false);
         $this->stopReloadDiagnostics();
+        $this->stopLocalIpcServer();
+        $this->stopProxyUpstreamHttpSocketListener();
         isset($this->subProcessManager) && $this->subProcessManager->shutdown();
         $this->disconnectAllClients($this->server);
-        Timer::after(1000, function () {
-            $this->server->shutdown();
+        if (!$this->isProxyUpstreamMode()) {
+            Timer::after(1000, function () {
+                $this->server->shutdown();
+            });
+            return;
+        }
+        $deadline = microtime(true) + max(\Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS, (int)(Config::server()['proxy_upstream_shutdown_timeout'] ?? \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS));
+        Timer::tick(200, function (int $timerId) use ($deadline) {
+            $drained = $this->proxyUpstreamBusinessPlaneDrained();
+            $expired = microtime(true) >= $deadline;
+            if ($drained || $expired) {
+                Timer::clear($timerId);
+                if (!$drained && $expired) {
+                    $httpProcessing = (int)(Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0);
+                    $rpcProcessing = (int)(Counter::instance()->get(Key::COUNTER_RPC_REQUEST_PROCESSING) ?: 0);
+                    $queueProcessing = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0);
+                    $crontabBusy = CrontabManager::busyCount();
+                    Console::warning(
+                        "【Server】业务实例平滑关闭超时，强制结束剩余任务: "
+                        . "http={$httpProcessing}, rpc={$rpcProcessing}, queue={$queueProcessing}, crontab={$crontabBusy}",
+                        false
+                    );
+                }
+                $this->server->shutdown();
+            }
         });
+    }
+
+    protected function proxyUpstreamBusinessPlaneDrained(): bool {
+        $httpProcessing = (int)(Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0);
+        $rpcProcessing = (int)(Counter::instance()->get(Key::COUNTER_RPC_REQUEST_PROCESSING) ?: 0);
+        $queueProcessing = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0);
+        $crontabBusy = CrontabManager::busyCount();
+        return $httpProcessing <= 0
+            && $rpcProcessing <= 0
+            && $queueProcessing <= 0
+            && $crontabBusy <= 0;
     }
 
     /**

@@ -6,6 +6,7 @@ use Scf\App\Updater;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Result;
@@ -42,10 +43,16 @@ use Throwable;
 class GatewayServer {
     protected const ROLLING_DRAIN_GRACE_SECONDS = 30;
     protected const INTERNAL_UPSTREAM_STATUS_PATH = '/_gateway/internal/upstream/status';
+    protected const INTERNAL_UPSTREAM_HEALTH_PATH = '/_gateway/internal/upstream/health';
+    protected const ACTIVE_UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS = 5;
+    protected const ACTIVE_UPSTREAM_HEALTH_FAILURE_THRESHOLD = 3;
+    protected const ACTIVE_UPSTREAM_HEALTH_COOLDOWN_SECONDS = 60;
+    protected const ACTIVE_UPSTREAM_HEALTH_STARTUP_GRACE_SECONDS = 20;
+    protected const UPSTREAM_SUPERVISOR_SYNC_INTERVAL_SECONDS = 15;
+    protected const DASHBOARD_VERSION_CACHE_TTL_SECONDS = 30;
+    protected const FRAMEWORK_VERSION_CACHE_TTL_SECONDS = 30;
 
     protected Server $server;
-    protected array $wsClients = [];
-    protected array $wsPumpCoroutines = [];
     protected array $dashboardClients = [];
     protected array $nodeClients = [];
     protected array $bootstrappedManagedInstances = [];
@@ -63,6 +70,24 @@ class GatewayServer {
     protected ?int $housekeepingTimerId = null;
     protected ?int $clusterStatusTimerId = null;
     protected ?SubProcessManager $subProcessManager = null;
+    protected ?LocalIpcServer $localIpcServer = null;
+    protected array $drainingGenerationWarnState = [];
+    protected array $pendingManagedRecycles = [];
+    protected array $pendingManagedRecycleWatchers = [];
+    protected array $pendingManagedRecycleWarnState = [];
+    protected array $managedUpstreamHealthState = [];
+    protected bool $managedUpstreamSelfHealing = false;
+    protected int $lastManagedUpstreamHealthCheckAt = 0;
+    protected int $lastManagedUpstreamSelfHealAt = 0;
+    protected int $lastUpstreamSupervisorSyncAt = 0;
+    protected int $lastObservedUpstreamSupervisorPid = 0;
+    protected int $lastObservedUpstreamSupervisorStartedAt = 0;
+    protected ?string $pendingUpstreamSupervisorSyncReason = null;
+    protected ?GatewayHttpProxyHandler $httpProxyHandler = null;
+    protected ?GatewayTcpRelayHandler $tcpRelayHandler = null;
+    protected ?GatewayNginxProxyHandler $nginxProxyHandler = null;
+    protected array $dashboardVersionStatusCache = ['expires_at' => 0, 'value' => null];
+    protected array $frameworkRemoteVersionCache = ['expires_at' => 0, 'value' => null];
 
     public function __construct(
         protected AppInstanceManager $instanceManager,
@@ -71,10 +96,15 @@ class GatewayServer {
         protected int $workerNum = 1,
         protected ?AppServerLauncher $launcher = null,
         protected array $managedUpstreamPlans = [],
-        protected int $rpcBindPort = 0
+        protected int $rpcBindPort = 0,
+        protected int $controlBindPort = 0,
+        protected string $configuredTrafficMode = 'tcp'
     ) {
         $this->rpcPort = $rpcBindPort;
         $this->startedAt = time();
+        $this->httpProxyHandler = new GatewayHttpProxyHandler($this, $this->instanceManager);
+        $this->tcpRelayHandler = new GatewayTcpRelayHandler($this, $this->instanceManager);
+        $this->nginxProxyHandler = new GatewayNginxProxyHandler($this, $this->instanceManager);
     }
 
     public function start(): void {
@@ -95,11 +125,15 @@ class GatewayServer {
             'open_http_protocol' => true,
             'open_http2_protocol' => true,
             'open_websocket_protocol' => true,
-            'enable_static_handler' => false,
             'package_max_length' => 20 * 1024 * 1024,
             'log_file' => APP_LOG_PATH . '/gateway.log',
             'pid_file' => $this->pidFile(),
         ]);
+        $this->applyStaticHandlerSettings();
+        $this->createBusinessTrafficListener();
+        if ($this->nginxProxyModeEnabled()) {
+            $this->syncNginxProxyTargets('gateway_prestart');
+        }
 
         if ($this->rpcPort > 0) {
             $rpcListener = $this->server->listen($this->host, $this->rpcPort, SWOOLE_SOCK_TCP);
@@ -123,8 +157,12 @@ class GatewayServer {
         $this->server->on('Start', function (Server $server) {
             $this->serverMasterPid = (int)($server->master_pid ?? 0);
             $this->serverManagerPid = (int)($server->manager_pid ?? 0);
-            if ($this->dashboardEnabled()) {
-                File::write(SERVER_DASHBOARD_PORT_FILE, (string)$this->port);
+            if ($this->nginxProxyModeEnabled()) {
+                $this->syncNginxProxyTargets('gateway_startup');
+            }
+            $dashboardPort = $this->resolvedDashboardPort();
+            if ($dashboardPort > 0) {
+                File::write(SERVER_DASHBOARD_PORT_FILE, (string)$dashboardPort);
             }
             $this->renderStartupInfo();
         });
@@ -162,12 +200,19 @@ class GatewayServer {
                     $this->clearHousekeepingTimer();
                     return;
                 }
+                $this->ensureLocalIpcServerStarted();
                 $this->ensureGatewaySubProcessManagerStarted();
                 $this->ensureInstallWatcher();
                 if (App::isReady()) {
                     $this->bootstrapManagedUpstreams();
                 }
+                $this->observeUpstreamSupervisorProcess();
+                $this->syncUpstreamSupervisorState();
+                $this->refreshManagedUpstreamRuntimeStates();
                 $this->instanceManager->tick();
+                $this->pollPendingManagedRecycles();
+                $this->maintainManagedUpstreamHealth();
+                $this->warnStuckDrainingManagedUpstreams();
                 $this->cleanupOfflineManagedUpstreams();
             };
             $tick();
@@ -182,6 +227,9 @@ class GatewayServer {
         });
         $this->server->on('Message', function (Server $server, Frame $frame): void {
             $this->onMessage($server, $frame);
+        });
+        $this->server->on('Connect', function (Server $server, int $fd, int $reactorId): void {
+            $this->onConnect($server, $fd, $reactorId);
         });
         $this->server->on('Receive', function (Server $server, int $fd, int $reactorId, string $data): void {
             $this->onReceive($server, $fd, $reactorId, $data);
@@ -207,10 +255,24 @@ class GatewayServer {
             $this->handleManagementRequest($request, $response);
             return;
         }
+        if ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) {
+            $this->json($response, 404, [
+                'message' => $this->nginxProxyModeEnabled() ? '业务流量已由nginx接管' : '业务流量仅在业务端口开放'
+            ]);
+            return;
+        }
         if (!App::isReady()) {
             $response->status(503);
             $response->header('Content-Type', 'text/html; charset=utf-8');
             $response->end('应用安装中...');
+            return;
+        }
+        if ($this->shouldRejectNewProxyRequest()) {
+            $this->json($response, 503, [
+                'message' => '服务繁忙',
+                'inflight' => $this->instanceManager->totalProxyHttpRequestCount(),
+                'limit' => $this->proxyMaxInflightRequests(),
+            ]);
             return;
         }
 
@@ -220,37 +282,98 @@ class GatewayServer {
             return;
         }
 
-        try {
-            $client = $this->createHttpClient($upstream);
-            $client->setHeaders($this->buildUpstreamHttpHeaders($request, $upstream));
-            $client->set(['timeout' => 30]);
-            $method = strtoupper($request->server['request_method'] ?? 'GET');
-            $client->setMethod($method);
-            $body = $request->rawContent();
-            if ($body !== '' && $body !== false) {
-                $client->setData($body);
-            }
-            $ok = $client->execute($this->buildTargetPath($request));
-            if (!$ok) {
-                throw new RuntimeException($client->errMsg ?: 'execute failed');
-            }
-            $response->status((int)$client->statusCode);
-            foreach ($client->headers ?? [] as $key => $value) {
-                if ($this->shouldSkipResponseHeader($key)) {
-                    continue;
+        $attempted = [];
+        $affinityKey = $this->resolveAffinityKey($request);
+        $lastError = null;
+        while ($upstream) {
+            $attempted[] = (string)($upstream['id'] ?? '');
+            try {
+                $this->httpProxyHandler()->proxyHttpRequest($request, $response, $upstream);
+                return;
+            } catch (Throwable $e) {
+                $lastError = $e;
+                if (!$this->httpProxyHandler()->isTransientUpstreamUnavailable($e)) {
+                    break;
                 }
-                $response->header($key, (string)$value);
+                $retryUpstream = $this->instanceManager->pickHttpUpstreamExcluding($attempted, $affinityKey);
+                if (!$retryUpstream || (string)($retryUpstream['id'] ?? '') === (string)($upstream['id'] ?? '')) {
+                    break;
+                }
+                Console::warning(
+                    "【Gateway】业务实例切换窗口发生连接拒绝，改投新实例: old="
+                    . $this->managedPlanDescriptor([
+                        'version' => (string)($upstream['version'] ?? ''),
+                        'host' => (string)($upstream['host'] ?? '127.0.0.1'),
+                        'port' => (int)($upstream['port'] ?? 0),
+                        'rpc_port' => (int)($upstream['metadata']['rpc_port'] ?? 0),
+                    ])
+                    . ', new='
+                    . $this->managedPlanDescriptor([
+                        'version' => (string)($retryUpstream['version'] ?? ''),
+                        'host' => (string)($retryUpstream['host'] ?? '127.0.0.1'),
+                        'port' => (int)($retryUpstream['port'] ?? 0),
+                        'rpc_port' => (int)($retryUpstream['metadata']['rpc_port'] ?? 0),
+                    ])
+                );
+                $upstream = $retryUpstream;
+                continue;
             }
-            $this->forwardResponseCookies($response, $client);
-            $response->end((string)$client->body);
-            $client->close();
-        } catch (Throwable $e) {
-            $this->json($response, 502, [
-                'message' => '代理转发失败',
-                'error' => $e->getMessage(),
-                'upstream' => $upstream,
-            ]);
         }
+
+        $message = $this->httpProxyHandler()->isTransientUpstreamUnavailable($lastError) ? '服务不可用' : '代理转发失败';
+        $status = $this->httpProxyHandler()->isTransientUpstreamUnavailable($lastError) ? 503 : 502;
+        $this->json($response, $status, [
+            'message' => $message,
+            'error' => $lastError?->getMessage(),
+            'upstream' => $upstream,
+        ]);
+    }
+
+    protected function proxyHttpRequestToUpstream(Request $request, Response $response, array $upstream): void {
+        $this->httpProxyHandler()->proxyHttpRequest($request, $response, $upstream);
+    }
+
+    protected function forwardHttpRequestToUpstream(Request $request, Response $response, array $upstream, Client $client): void {
+        $method = strtoupper($request->server['request_method'] ?? 'GET');
+        if ($this->shouldProxyByDownloadFile($request, $method)) {
+            $this->proxyHttpRequestToUpstreamByDownloadFile($request, $response, $upstream, $client, $method);
+            return;
+        }
+
+        $client->setHeaders($this->buildUpstreamHttpHeaders($request, $upstream));
+        $client->set(['timeout' => $this->proxyHttpTimeout()]);
+        $client->setMethod($method);
+        $body = $this->requestRawBodyForProxy($request, $method);
+        if ($body !== null && $body !== '' && $body !== false) {
+            $client->setData($body);
+        } else {
+            $client->setData('');
+        }
+        $ok = $client->execute($this->buildTargetPath($request));
+        if (!$ok) {
+            throw new RuntimeException($client->errMsg ?: 'execute failed');
+        }
+        $response->status((int)$client->statusCode);
+        foreach ($client->headers ?? [] as $key => $value) {
+            if ($this->shouldSkipResponseHeader($key)) {
+                continue;
+            }
+            $response->header($key, (string)$value);
+        }
+        $this->forwardResponseCookies($response, $client);
+        $response->end((string)$client->body);
+    }
+
+    protected function isTransientUpstreamUnavailable(?Throwable $throwable): bool {
+        if (!$throwable) {
+            return false;
+        }
+        $message = strtolower($throwable->getMessage());
+        return str_contains($message, 'connection refused')
+            || str_contains($message, 'connect failed')
+            || str_contains($message, 'connection reset')
+            || str_contains($message, 'no route to host')
+            || str_contains($message, 'timed out');
     }
 
     protected function onHandshake(Request $request, Response $response): bool {
@@ -268,6 +391,11 @@ class GatewayServer {
             $response->end('forbidden');
             return false;
         }
+        if ($this->tcpRelayModeEnabled()) {
+            $response->status(404);
+            $response->end('业务流量仅在业务端口开放');
+            return false;
+        }
         if (!App::isReady()) {
             $response->status(503);
             $response->end('应用安装中...');
@@ -282,28 +410,7 @@ class GatewayServer {
             return false;
         }
 
-        try {
-            $client = $this->createHttpClient($upstream);
-            $client->setHeaders($this->buildUpstreamWsHeaders($request, $upstream));
-            $client->set(['timeout' => 10]);
-            if (!$client->upgrade($this->buildTargetPath($request))) {
-                throw new RuntimeException($client->errMsg ?: 'websocket upgrade failed');
-            }
-
-            $this->performServerHandshake($request, $response);
-            $this->wsClients[$request->fd] = $client;
-            $this->startUpstreamPump($request->fd, $client);
-            return true;
-        } catch (Throwable $e) {
-            $this->instanceManager->releaseWebsocketBinding($request->fd);
-            $response->status(502);
-            $response->header('Content-Type', 'application/json;charset=utf-8');
-            $response->end(json_encode([
-                'message' => 'WebSocket 上游握手失败',
-                'error' => $e->getMessage(),
-            ], JSON_UNESCAPED_UNICODE));
-            return false;
-        }
+        return $this->httpProxyHandler()->handleWebSocketHandshake($request, $response, $upstream);
     }
 
     protected function onMessage(Server $server, Frame $frame): void {
@@ -315,44 +422,15 @@ class GatewayServer {
             $this->handleDashboardSocketMessage($server, $frame);
             return;
         }
-        $client = $this->wsClients[$frame->fd] ?? null;
-        if (!$client) {
-            $this->disconnectClient($server, $frame->fd);
-            return;
-        }
-        $forward = function () use ($client, $frame, $server): void {
-            try {
-                $ok = $client->push($frame->data, $frame->opcode, $frame->finish ? SWOOLE_WEBSOCKET_FLAG_FIN : 0);
-                if ($ok === false) {
-                    throw new RuntimeException($client->errMsg ?: 'push failed');
-                }
-            } catch (Throwable $throwable) {
-                Console::warning("【Gateway】WebSocket上游发送失败 fd={$frame->fd}: " . $throwable->getMessage());
-                $this->disconnectClient($server, $frame->fd);
-            }
-        };
-
-        if (Coroutine::getCid() > 0) {
-            $forward();
-            return;
-        }
-
-        Coroutine::create($forward);
+        $this->httpProxyHandler()->handleWebSocketMessage($frame);
     }
 
     protected function onClose(Server $server, int $fd): void {
         unset($this->dashboardClients[$fd]);
         unset($this->nodeClients[$fd]);
-        if (isset($this->wsClients[$fd])) {
-            try {
-                $this->wsClients[$fd]->close();
-            } catch (Throwable) {
-            }
-            unset($this->wsClients[$fd]);
-        }
-        unset($this->wsPumpCoroutines[$fd]);
+        $this->tcpRelayHandler()->handleClose($fd);
+        $this->httpProxyHandler()->handleClientClose($fd);
         $this->removeNodeClient($fd);
-        $this->instanceManager->releaseWebsocketBinding($fd);
         if ($this->dashboardEnabled()) {
             $this->syncConsoleSubscriptionState();
         }
@@ -381,10 +459,63 @@ class GatewayServer {
         Runtime::instance()->serverIsAlive(true);
         Runtime::instance()->httpPort($this->port);
         Runtime::instance()->rpcPort($this->rpcPort);
-        Runtime::instance()->dashboardPort($this->dashboardEnabled() ? $this->port : 0);
+        Runtime::instance()->dashboardPort($this->resolvedDashboardPort());
         ConsoleRelay::setGatewayPort($this->port);
         ConsoleRelay::setLocalSubscribed(false);
         ConsoleRelay::setRemoteSubscribed(false);
+    }
+
+    protected function ensureLocalIpcServerStarted(): void {
+        if ($this->localIpcServer instanceof LocalIpcServer) {
+            return;
+        }
+        $socketPath = LocalIpc::gatewaySocketPath($this->port);
+        $this->localIpcServer = new LocalIpcServer($socketPath, function (array $request): array {
+            return $this->handleLocalIpcRequest($request);
+        }, 'gateway_ipc');
+        $this->localIpcServer->start();
+    }
+
+    protected function stopLocalIpcServer(): void {
+        if (!$this->localIpcServer instanceof LocalIpcServer) {
+            return;
+        }
+        $this->localIpcServer->stop();
+        $this->localIpcServer = null;
+    }
+
+    protected function handleLocalIpcRequest(array $request): array {
+        $action = (string)($request['action'] ?? '');
+        $payload = is_array($request['payload'] ?? null) ? $request['payload'] : [];
+        return match ($action) {
+            'gateway.health' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => [
+                    'message' => 'ok',
+                    'active_version' => $this->instanceManager->snapshot()['active_version'] ?? null,
+                ],
+            ],
+            'gateway.console.subscription' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => ['enabled' => $this->dashboardEnabled() ? $this->hasConsoleSubscribers() : ConsoleRelay::remoteSubscribed()],
+            ],
+            'gateway.console.log' => [
+                'ok' => true,
+                'status' => 200,
+                'data' => [
+                    'accepted' => $this->acceptConsolePayload([
+                        'time' => (string)($payload['time'] ?? ''),
+                        'message' => (string)($payload['message'] ?? ''),
+                        'source_type' => (string)($payload['source_type'] ?? 'gateway'),
+                        'node' => (string)($payload['node'] ?? SERVER_HOST),
+                    ]),
+                ],
+            ],
+            'gateway.command' => $this->dispatchInternalGatewayCommand((string)($payload['command'] ?? '')),
+            default => ['ok' => false, 'status' => 404, 'message' => 'unknown action'],
+        };
     }
 
     protected function disconnectAllClients(Server $server): int {
@@ -399,14 +530,9 @@ class GatewayServer {
                 $fd = (int)$fd;
                 $startFd = max($startFd, $fd);
                 $this->instanceManager->releaseWebsocketBinding($fd);
-                unset($this->dashboardClients[$fd], $this->nodeClients[$fd], $this->wsPumpCoroutines[$fd]);
-                if (isset($this->wsClients[$fd])) {
-                    try {
-                        $this->wsClients[$fd]->close();
-                    } catch (Throwable) {
-                    }
-                    unset($this->wsClients[$fd]);
-                }
+                unset($this->dashboardClients[$fd], $this->nodeClients[$fd]);
+                $this->tcpRelayHandler()->handleClose($fd);
+                $this->httpProxyHandler()->handleClientClose($fd);
                 if (!$server->exist($fd)) {
                     continue;
                 }
@@ -424,9 +550,38 @@ class GatewayServer {
         return $disconnected;
     }
 
+    protected function onConnect(Server $server, int $fd, int $reactorId): void {
+        if (!$this->tcpRelayModeEnabled()) {
+            return;
+        }
+        $clientInfo = $server->getClientInfo($fd);
+        if (!$clientInfo || (int)($clientInfo['server_port'] ?? 0) !== $this->port) {
+            return;
+        }
+        if ($this->shouldRejectNewRelayConnection()) {
+            try {
+                $server->close($fd);
+            } catch (Throwable) {
+            }
+            return;
+        }
+        $this->tcpRelayHandler()->handleConnect($fd);
+    }
+
     protected function onReceive(Server $server, int $fd, int $reactorId, string $data): void {
         $clientInfo = $server->getClientInfo($fd);
-        if (!$clientInfo || (int)($clientInfo['server_port'] ?? 0) !== $this->rpcPort) {
+        if (!$clientInfo) {
+            $server->close($fd);
+            return;
+        }
+
+        $serverPort = (int)($clientInfo['server_port'] ?? 0);
+        if ($this->tcpRelayModeEnabled() && $serverPort === $this->port) {
+            $this->tcpRelayHandler()->handleReceive($fd, $data);
+            return;
+        }
+
+        if ($serverPort !== $this->rpcPort) {
             $server->close($fd);
             return;
         }
@@ -499,13 +654,13 @@ class GatewayServer {
         return $nodes;
     }
 
-    public function dashboardServerStatus(string $token, string $host = '', string $referer = ''): array {
-        $status = $this->buildDashboardRealtimeStatus();
-        $status['socket_host'] = $this->buildDashboardSocketHost($host, $referer) . '?token=' . rawurlencode($token);
+    public function dashboardServerStatus(string $token, string $host = '', string $referer = '', string $forwardedProto = ''): array {
+        $upstreams = $this->dashboardUpstreams();
+        $status = $this->buildDashboardRealtimeStatus($upstreams);
+        $status['socket_host'] = $this->buildDashboardSocketHost($host, $referer, $forwardedProto) . '?token=' . rawurlencode($token);
         $status['latest_version'] = App::latestVersion();
         $status['dashboard'] = $this->buildDashboardVersionStatus();
-        $status['framework'] = $this->buildFrameworkVersionStatus();
-        $status['upstreams'] = $this->dashboardUpstreams();
+        $status['framework'] = $this->buildFrameworkVersionStatus($upstreams);
         return $status;
     }
 
@@ -604,6 +759,7 @@ class GatewayServer {
         $taskId = uniqid('gateway_update_', true);
         $slaveHosts = $this->connectedSlaveHosts();
         $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
+        $this->logUpdateStage($taskId, $type, $version, 'dispatch_cluster', ['slaves' => count($slaveHosts)]);
         if ($slaveHosts) {
             $this->sendCommandToAllNodeClients('appoint_update', [
                 'type' => $type,
@@ -612,6 +768,7 @@ class GatewayServer {
             ]);
         }
 
+        $this->logUpdateStage($taskId, $type, $version, 'apply_local_package');
         if (!App::appointUpdateTo($type, $version, false)) {
             $error = App::getLastUpdateError() ?: '更新失败';
             Console::error("【Gateway】升级失败: type={$type}, version={$version}, error={$error}");
@@ -624,6 +781,7 @@ class GatewayServer {
         ];
 
         if ($type !== 'public') {
+            $this->logUpdateStage($taskId, $type, $version, 'rolling_upstreams');
             $restartSummary = $this->rollingUpdateManagedUpstreams($type, $version);
         }
 
@@ -632,9 +790,11 @@ class GatewayServer {
         }
 
         if (in_array($type, ['app', 'framework'], true) && !$restartSummary['failed_nodes']) {
+            $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
             $this->iterateGatewayBusinessProcesses();
         }
 
+        $this->logUpdateStage($taskId, $type, $version, 'wait_cluster_result');
         $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, 300);
         $pendingHosts = [];
         $masterState = 'success';
@@ -671,10 +831,28 @@ class GatewayServer {
         } else {
             Console::success("【Gateway】升级完成: type={$type}, version={$version}, success={$payload['success_count']}");
         }
+        $this->logUpdateStage($taskId, $type, $version, 'completed', [
+            'success' => (int)$payload['success_count'],
+            'failed' => (int)$payload['failed_count'],
+            'pending' => (int)$payload['pending_count'],
+        ]);
         if ($payload['failed_nodes']) {
             return Result::error('部分节点升级失败', 'SERVICE_ERROR', $payload);
         }
         return Result::success($payload);
+    }
+
+    protected function logUpdateStage(string $taskId, string $type, string $version, string $stage, array $extra = []): void {
+        $parts = [
+            "task={$taskId}",
+            "type={$type}",
+            "version={$version}",
+            "stage={$stage}",
+        ];
+        foreach ($extra as $key => $value) {
+            $parts[] = $key . '=' . (is_scalar($value) ? (string)$value : JsonHelper::toJson($value));
+        }
+        Console::info('【Gateway】升级状态机: ' . implode(', ', $parts));
     }
 
     protected function iterateGatewayBusinessProcesses(): void {
@@ -957,9 +1135,17 @@ class GatewayServer {
         });
     }
 
+    protected function closeProxyHttpClientPools(): void {
+        $this->httpProxyHandler()->closeAllPooledClients();
+    }
+
     protected function waitForGatewayPortsReleased(int $timeoutSeconds = 15, int $intervalMs = 200): void {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
-        $ports = array_values(array_filter([$this->port, $this->rpcPort], static fn(int $port) => $port > 0));
+        $ports = array_values(array_unique(array_filter([
+            $this->nginxProxyModeEnabled() ? 0 : $this->port,
+            $this->rpcPort,
+            ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) ? $this->controlPort() : 0,
+        ], static fn(int $port) => $port > 0)));
         if (!$ports) {
             return;
         }
@@ -968,7 +1154,7 @@ class GatewayServer {
         while (microtime(true) < $deadline) {
             $occupied = false;
             foreach ($ports as $port) {
-                if (CoreServer::isPortInUse($port)) {
+                if (CoreServer::isListeningPortInUse($port)) {
                     $occupied = true;
                     break;
                 }
@@ -991,29 +1177,30 @@ class GatewayServer {
     }
 
     protected function createGatewaySocketServer(int $timeoutSeconds = 10, int $intervalMs = 200): Server {
+        $listenPort = ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) ? $this->controlPort() : $this->port;
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $lastException = null;
         $logged = false;
         do {
             try {
                 if ($logged) {
-                    Console::success("【Gateway】监听端口抢占成功: {$this->host}:{$this->port}");
+                    Console::success("【Gateway】监听端口抢占成功: {$this->host}:{$listenPort}");
                 }
-                return new Server($this->host, $this->port, SWOOLE_PROCESS, SWOOLE_SOCK_TCP);
+                return new Server($this->host, $listenPort, SWOOLE_PROCESS, SWOOLE_SOCK_TCP);
             } catch (SwooleException $exception) {
                 $lastException = $exception;
                 if (!str_contains($exception->getMessage(), 'Address already in use')) {
                     throw $exception;
                 }
                 if (!$logged) {
-                    Console::warning("【Gateway】监听端口占用，等待重试: {$this->host}:{$this->port}");
+                    Console::warning("【Gateway】监听端口占用，等待重试: {$this->host}:{$listenPort}");
                     $logged = true;
                 }
                 usleep(max(50, $intervalMs) * 1000);
             }
         } while (microtime(true) < $deadline);
 
-        throw $lastException ?: new RuntimeException("Gateway 监听失败: {$this->host}:{$this->port}");
+        throw $lastException ?: new RuntimeException("Gateway 监听失败: {$this->host}:{$listenPort}");
     }
 
     protected function managedUpstreamPortsReleased(): bool {
@@ -1051,14 +1238,126 @@ class GatewayServer {
         }
     }
 
+    protected function clearPendingManagedRecycleWatchers(): void {
+        foreach ($this->pendingManagedRecycleWatchers as $key => $timerId) {
+            Timer::clear($timerId);
+            unset($this->pendingManagedRecycleWatchers[$key]);
+        }
+    }
+
     protected function prepareGatewayShutdown(): void {
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(true);
         Runtime::instance()->serverIsAlive(false);
+        $this->closeProxyHttpClientPools();
+        $this->stopLocalIpcServer();
         $this->clearHousekeepingTimer();
         $this->clearClusterStatusTimer();
+        $this->clearPendingManagedRecycleWatchers();
         isset($this->subProcessManager) && $this->subProcessManager->shutdown();
         $this->shutdownManagedUpstreams();
+    }
+
+    public function server(): Server {
+        return $this->server;
+    }
+
+    public function serverConfig(): array {
+        return Config::server();
+    }
+
+    public function businessPort(): int {
+        return $this->port;
+    }
+
+    public function trafficMode(): string {
+        $mode = strtolower(trim($this->configuredTrafficMode));
+        return in_array($mode, ['http', 'tcp', 'nginx'], true) ? $mode : 'nginx';
+    }
+
+    public function tcpRelayModeEnabled(): bool {
+        return $this->trafficMode() === 'tcp';
+    }
+
+    public function nginxProxyModeEnabled(): bool {
+        return $this->trafficMode() === 'nginx';
+    }
+
+    public function controlPort(): int {
+        return ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled())
+            ? max(1, $this->controlBindPort ?: ($this->port + 1000))
+            : $this->port;
+    }
+
+    protected function resolvedDashboardPort(): int {
+        return $this->dashboardEnabled() ? $this->port : 0;
+    }
+
+    public function internalControlHost(): string {
+        return in_array($this->host, ['0.0.0.0', '::', ''], true) ? '127.0.0.1' : $this->host;
+    }
+
+    public function shouldRoutePathToControlPlane(string $path): bool {
+        return $path === '/dashboard.socket'
+            || str_starts_with($path, '/_gateway')
+            || str_starts_with($path, '/~');
+    }
+
+    protected function httpProxyHandler(): GatewayHttpProxyHandler {
+        if (!$this->httpProxyHandler instanceof GatewayHttpProxyHandler) {
+            $this->httpProxyHandler = new GatewayHttpProxyHandler($this, $this->instanceManager);
+        }
+        return $this->httpProxyHandler;
+    }
+
+    protected function tcpRelayHandler(): GatewayTcpRelayHandler {
+        if (!$this->tcpRelayHandler instanceof GatewayTcpRelayHandler) {
+            $this->tcpRelayHandler = new GatewayTcpRelayHandler($this, $this->instanceManager);
+        }
+        return $this->tcpRelayHandler;
+    }
+
+    protected function nginxProxyHandler(): GatewayNginxProxyHandler {
+        if (!$this->nginxProxyHandler instanceof GatewayNginxProxyHandler) {
+            $this->nginxProxyHandler = new GatewayNginxProxyHandler($this, $this->instanceManager);
+        }
+        return $this->nginxProxyHandler;
+    }
+
+    protected function syncNginxProxyTargets(?string $reason = null): void {
+        $handler = $this->nginxProxyHandler();
+        if (!$handler->enabled()) {
+            return;
+        }
+        try {
+            $result = $handler->sync($reason);
+            $runtimeMeta = (array)($result['runtime_meta'] ?? []);
+            if (($result['runtime_meta_changed'] ?? false) && $runtimeMeta) {
+                Console::info('【Gateway】探测到 nginx: ' . ((string)($runtimeMeta['bin'] ?? 'nginx')));
+                Console::info('【Gateway】探测到 nginx conf-path: ' . ((string)($runtimeMeta['conf_path'] ?? '')));
+                Console::info('【Gateway】探测到 nginx conf-dir: ' . ((string)($runtimeMeta['conf_dir'] ?? '')));
+            }
+            $message = "【Gateway】nginx转发配置已同步";
+            if (!empty($result['reason'])) {
+                $message .= ': reason=' . $result['reason'];
+            }
+            if (!empty($result['reloaded'])) {
+                $message .= ', reloaded=yes';
+            } elseif (!empty($result['tested'])) {
+                $message .= ', tested=yes';
+            }
+            $paths = array_filter([
+                (string)($result['global_file'] ?? ''),
+                (string)($result['upstream_file'] ?? ''),
+                (string)($result['server_file'] ?? ''),
+            ]);
+            if ($paths) {
+                $message .= ', files=' . implode(' | ', $paths);
+            }
+            Console::info($message);
+        } catch (Throwable $throwable) {
+            Console::warning('【Gateway】nginx转发配置同步失败: ' . $throwable->getMessage());
+        }
     }
 
     protected function reloadGateway(bool $restartManagedUpstreams = true): void {
@@ -1468,8 +1767,9 @@ class GatewayServer {
                     'SUCCESS',
                     $this->dashboardServerStatus(
                         $auth['token'],
-                        (string)($request->header['host'] ?? ''),
-                        (string)($request->header['referer'] ?? '')
+                        (string)($request->header['x-forwarded-host'] ?? $request->header['host'] ?? ''),
+                        (string)($request->header['referer'] ?? ''),
+                        (string)($request->header['x-forwarded-proto'] ?? '')
                     )
                 );
                 return;
@@ -1578,7 +1878,7 @@ class GatewayServer {
                     $this->pushDashboardEvent([
                         'event' => 'console',
                         'message' => ['data' => '已向所有节点发送业务重启指令，当前 Gateway 开始重启本地业务平面'],
-                        'time' => date('m-d H:i:s'),
+                        'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);
                     $this->pushDashboardStatus();
@@ -1592,7 +1892,7 @@ class GatewayServer {
                     $this->pushDashboardEvent([
                         'event' => 'console',
                         'message' => ['data' => '已向所有子节点发送重启指令，当前 Gateway 开始重启'],
-                        'time' => date('m-d H:i:s'),
+                        'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);
                     $this->shutdownGateway();
@@ -1610,8 +1910,8 @@ class GatewayServer {
         }
     }
 
-    protected function buildDashboardRealtimeStatus(): array {
-        $upstreams = $this->dashboardUpstreams();
+    protected function buildDashboardRealtimeStatus(?array $upstreams = null): array {
+        $upstreams ??= $this->dashboardUpstreams();
         $nodes = $this->dashboardNodes($upstreams);
         $master = 0;
         $slave = 0;
@@ -1656,10 +1956,289 @@ class GatewayServer {
         $instances = [];
         foreach ($snapshot['generations'] ?? [] as $generation) {
             foreach (($generation['instances'] ?? []) as $instance) {
-                $instances[] = $this->buildUpstreamNode($generation, $instance, $this->fetchUpstreamRuntimeStatus($instance));
+                $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
+                $this->instanceManager->updateInstanceRuntimeStatus(
+                    (string)($instance['host'] ?? '127.0.0.1'),
+                    (int)($instance['port'] ?? 0),
+                    $runtimeStatus
+                );
+                $instances[] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus);
             }
         }
         return $instances;
+    }
+
+    protected function refreshManagedUpstreamRuntimeStates(): void {
+        $snapshot = $this->instanceManager->snapshot();
+        foreach (($snapshot['generations'] ?? []) as $generation) {
+            if (!in_array((string)($generation['status'] ?? ''), ['active', 'draining', 'prepared'], true)) {
+                continue;
+            }
+            foreach (($generation['instances'] ?? []) as $instance) {
+                if ((($instance['metadata']['managed'] ?? false) !== true)) {
+                    continue;
+                }
+                $host = (string)($instance['host'] ?? '127.0.0.1');
+                $port = (int)($instance['port'] ?? 0);
+                if ($port <= 0) {
+                    continue;
+                }
+                $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
+                $this->instanceManager->updateInstanceRuntimeStatus($host, $port, $runtimeStatus);
+                $managerPid = (int)($runtimeStatus['manager_pid'] ?? 0);
+                if ($managerPid > 0) {
+                    $this->instanceManager->mergeInstanceMetadata($host, $port, ['pid' => $managerPid]);
+                    $this->mergeManagedPlanMetadata($host, $port, ['pid' => $managerPid]);
+                }
+            }
+        }
+    }
+
+    protected function syncUpstreamSupervisorState(): void {
+        if (!$this->upstreamSupervisor || !$this->launcher || $this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+            return;
+        }
+        $now = time();
+        $syncReason = $this->pendingUpstreamSupervisorSyncReason;
+        if ($syncReason === null && $this->lastUpstreamSupervisorSyncAt > 0 && ($now - $this->lastUpstreamSupervisorSyncAt) < self::UPSTREAM_SUPERVISOR_SYNC_INTERVAL_SECONDS) {
+            return;
+        }
+        $instances = $this->buildUpstreamSupervisorSyncInstances();
+        if (!$this->upstreamSupervisor->sendCommand([
+            'action' => 'sync_instances',
+            'instances' => $instances,
+        ])) {
+            if ($syncReason === 'restart') {
+                Console::warning('【Gateway】UpstreamSupervisor 重建后状态同步失败');
+            } elseif ($syncReason === 'initial') {
+                Console::warning('【Gateway】UpstreamSupervisor 初始状态同步失败');
+            } else {
+                Console::warning('【Gateway】业务实例管理器状态同步失败');
+            }
+            return;
+        }
+        $this->lastUpstreamSupervisorSyncAt = $now;
+        if ($syncReason === 'restart') {
+            Console::success('【Gateway】UpstreamSupervisor 已异常重建，状态已重新同步: pid=' . $this->lastObservedUpstreamSupervisorPid . ', instances=' . count($instances));
+        } elseif ($syncReason === 'initial') {
+            Console::info('【Gateway】UpstreamSupervisor 状态已同步: pid=' . $this->lastObservedUpstreamSupervisorPid . ', instances=' . count($instances));
+        }
+        $this->pendingUpstreamSupervisorSyncReason = null;
+    }
+
+    protected function observeUpstreamSupervisorProcess(): void {
+        if (!$this->upstreamSupervisor) {
+            return;
+        }
+        $pid = (int)(Runtime::instance()->get(Key::RUNTIME_UPSTREAM_SUPERVISOR_PID) ?? 0);
+        $startedAt = (int)(Runtime::instance()->get(Key::RUNTIME_UPSTREAM_SUPERVISOR_STARTED_AT) ?? 0);
+        if ($pid <= 0 || $startedAt <= 0) {
+            return;
+        }
+        if ($this->lastObservedUpstreamSupervisorPid <= 0 || $this->lastObservedUpstreamSupervisorStartedAt <= 0) {
+            $this->lastObservedUpstreamSupervisorPid = $pid;
+            $this->lastObservedUpstreamSupervisorStartedAt = $startedAt;
+            $this->pendingUpstreamSupervisorSyncReason ??= 'initial';
+            return;
+        }
+        if ($pid === $this->lastObservedUpstreamSupervisorPid && $startedAt === $this->lastObservedUpstreamSupervisorStartedAt) {
+            return;
+        }
+        Console::warning(
+            '【Gateway】UpstreamSupervisor 进程PID发生变化，疑似异常重建: old='
+            . $this->lastObservedUpstreamSupervisorPid . ', new=' . $pid
+        );
+        $this->lastObservedUpstreamSupervisorPid = $pid;
+        $this->lastObservedUpstreamSupervisorStartedAt = $startedAt;
+        $this->pendingUpstreamSupervisorSyncReason = 'restart';
+    }
+
+    protected function buildUpstreamSupervisorSyncInstances(): array {
+        $snapshot = $this->instanceManager->snapshot();
+        $instances = [];
+        foreach (($snapshot['generations'] ?? []) as $generation) {
+            foreach (($generation['instances'] ?? []) as $instance) {
+                if ((($instance['metadata']['managed'] ?? false) !== true)) {
+                    continue;
+                }
+                $version = (string)($instance['version'] ?? $generation['version'] ?? '');
+                $host = (string)($instance['host'] ?? '127.0.0.1');
+                $port = (int)($instance['port'] ?? 0);
+                if ($version === '' || $port <= 0) {
+                    continue;
+                }
+                $rpcPort = (int)($instance['metadata']['rpc_port'] ?? 0);
+                $pendingRecycle = $this->isManagedPlanRecyclePending([
+                    'version' => $version,
+                    'host' => $host,
+                    'port' => $port,
+                ]);
+                $httpAlive = $this->launcher->isListening($host, $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1);
+                $rpcAlive = $rpcPort <= 0 || $this->launcher->isListening($host, $rpcPort, 0.1) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.1);
+                if (!$pendingRecycle && (!$httpAlive || !$rpcAlive)) {
+                    continue;
+                }
+                $instances[] = [
+                    'version' => $version,
+                    'host' => $host,
+                    'port' => $port,
+                    'weight' => (int)($instance['weight'] ?? 100),
+                    'metadata' => (array)($instance['metadata'] ?? []),
+                ];
+            }
+        }
+        return $instances;
+    }
+
+    protected function maintainManagedUpstreamHealth(): void {
+        if ($this->managedUpstreamSelfHealing || !$this->launcher || !$this->upstreamSupervisor) {
+            return;
+        }
+        if (!App::isReady() || $this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+            return;
+        }
+        $now = time();
+        if ($this->lastManagedUpstreamHealthCheckAt > 0 && ($now - $this->lastManagedUpstreamHealthCheckAt) < self::ACTIVE_UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS) {
+            return;
+        }
+        $this->lastManagedUpstreamHealthCheckAt = $now;
+        if ($this->pendingManagedRecycles) {
+            return;
+        }
+
+        $activePlans = $this->activeManagedPlans();
+        if (!$activePlans) {
+            $this->managedUpstreamHealthState = [];
+            return;
+        }
+
+        $unhealthyPlans = [];
+        $activeKeys = [];
+        foreach ($activePlans as $plan) {
+            $key = $this->managedPlanKey($plan);
+            $activeKeys[$key] = true;
+
+            if ($this->shouldSkipManagedUpstreamHealthCheck($plan, $now)) {
+                unset($this->managedUpstreamHealthState[$key]);
+                continue;
+            }
+
+            $probe = $this->probeManagedUpstreamHealth($plan);
+            if ($probe['healthy']) {
+                $previous = $this->managedUpstreamHealthState[$key] ?? null;
+                if (is_array($previous) && (int)($previous['failures'] ?? 0) > 0) {
+                    Console::success("【Gateway】active业务实例健康恢复: " . $this->managedPlanDescriptor($plan));
+                }
+                unset($this->managedUpstreamHealthState[$key]);
+                continue;
+            }
+
+            $state = $this->managedUpstreamHealthState[$key] ?? [
+                'failures' => 0,
+                'reason' => '',
+                'last_failed_at' => 0,
+            ];
+            $state['failures'] = (int)$state['failures'] + 1;
+            $state['reason'] = (string)($probe['reason'] ?? 'unknown');
+            $state['last_failed_at'] = $now;
+            $this->managedUpstreamHealthState[$key] = $state;
+            if ((int)($state['failures'] ?? 0) === 1) {
+                Console::warning(
+                    "【Gateway】active业务实例健康异常(1/" . self::ACTIVE_UPSTREAM_HEALTH_FAILURE_THRESHOLD . '): '
+                    . $this->managedPlanDescriptor($plan)
+                    . ', reason=' . $state['reason']
+                );
+            }
+
+            if ($state['failures'] >= self::ACTIVE_UPSTREAM_HEALTH_FAILURE_THRESHOLD) {
+                $unhealthyPlans[] = $plan;
+            }
+        }
+
+        foreach (array_keys($this->managedUpstreamHealthState) as $key) {
+            if (!isset($activeKeys[$key])) {
+                unset($this->managedUpstreamHealthState[$key]);
+            }
+        }
+
+        if (!$unhealthyPlans) {
+            return;
+        }
+        if ($this->lastManagedUpstreamSelfHealAt > 0 && ($now - $this->lastManagedUpstreamSelfHealAt) < self::ACTIVE_UPSTREAM_HEALTH_COOLDOWN_SECONDS) {
+            return;
+        }
+
+        $this->managedUpstreamSelfHealing = true;
+        $descriptors = array_map(fn(array $plan) => $this->managedPlanDescriptor($plan), $unhealthyPlans);
+        $recoveryPlans = $activePlans;
+        Console::warning("【Gateway】检测到active业务实例连续异常，开始自动自愈: " . implode(' | ', $descriptors));
+        Coroutine::create(function () use ($unhealthyPlans, $recoveryPlans) {
+            try {
+                $summary = $this->restartManagedUpstreams($recoveryPlans);
+                if ($summary['failed_nodes']) {
+                    Console::warning("【Gateway】自动自愈存在失败: success={$summary['success_count']}, failed=" . count($summary['failed_nodes']));
+                } else {
+                    Console::success("【Gateway】自动自愈完成: success={$summary['success_count']}");
+                }
+                foreach ($unhealthyPlans as $plan) {
+                    unset($this->managedUpstreamHealthState[$this->managedPlanKey($plan)]);
+                }
+            } finally {
+                $this->lastManagedUpstreamSelfHealAt = time();
+                $this->managedUpstreamSelfHealing = false;
+            }
+        });
+    }
+
+    protected function shouldSkipManagedUpstreamHealthCheck(array $plan, int $now): bool {
+        $startedAt = (int)($plan['metadata']['started_at'] ?? 0);
+        if ($startedAt > 0 && ($now - $startedAt) < self::ACTIVE_UPSTREAM_HEALTH_STARTUP_GRACE_SECONDS) {
+            return true;
+        }
+        return $this->isManagedPlanRecyclePending($plan);
+    }
+
+    protected function probeManagedUpstreamHealth(array $plan): array {
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        if ($port <= 0) {
+            return ['healthy' => false, 'reason' => 'invalid_port'];
+        }
+
+        $httpListening = $this->launcher->isListening($host, $port, 0.2) || $this->launcher->isListening('0.0.0.0', $port, 0.2);
+        if (!$httpListening) {
+            return ['healthy' => false, 'reason' => 'http_port_down'];
+        }
+
+        if ($rpcPort > 0) {
+            $rpcListening = $this->launcher->isListening($host, $rpcPort, 0.2) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2);
+            if (!$rpcListening) {
+                return ['healthy' => false, 'reason' => 'rpc_port_down'];
+            }
+        }
+
+        $status = $this->fetchUpstreamHealthStatus($plan);
+        if (!$status) {
+            return ['healthy' => false, 'reason' => 'health_status_unreachable'];
+        }
+        if (!(bool)($status['server_is_alive'] ?? false)) {
+            return ['healthy' => false, 'reason' => 'server_not_alive'];
+        }
+        if (!(bool)($status['server_is_ready'] ?? false)) {
+            return ['healthy' => false, 'reason' => 'server_not_ready'];
+        }
+        if ((bool)($status['server_is_draining'] ?? false)) {
+            return ['healthy' => false, 'reason' => 'server_draining'];
+        }
+
+        return ['healthy' => true, 'reason' => 'ok'];
+    }
+
+    protected function managedPlanKey(array $plan): string {
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        return (string)($plan['version'] ?? '') . '@' . $host . ':' . $port;
     }
 
     protected function buildGatewayNode(?array $upstreams = null): array {
@@ -1673,6 +2252,7 @@ class GatewayServer {
             'script' => 'gateway',
             'ip' => SERVER_HOST,
             'port' => $this->port,
+            'socketPort' => $this->resolvedDashboardPort(),
             'online' => true,
             'role' => SERVER_ROLE,
             'started' => $this->startedAt,
@@ -1718,6 +2298,7 @@ class GatewayServer {
             'script' => 'gateway',
             'ip' => SERVER_HOST,
             'port' => $this->port,
+            'socketPort' => $this->resolvedDashboardPort(),
             'role' => SERVER_ROLE,
             'online' => true,
             'server_run_mode' => APP_SRC_TYPE,
@@ -1815,18 +2396,42 @@ class GatewayServer {
     }
 
     protected function fetchUpstreamRuntimeStatus(array $instance): array {
+        return $this->fetchUpstreamInternalStatus($instance, self::INTERNAL_UPSTREAM_STATUS_PATH);
+    }
+
+    protected function fetchUpstreamHealthStatus(array $instance): array {
+        return $this->fetchUpstreamInternalStatus($instance, self::INTERNAL_UPSTREAM_HEALTH_PATH);
+    }
+
+    protected function fetchUpstreamInternalStatus(array $instance, string $path): array {
         $host = (string)($instance['host'] ?? '127.0.0.1');
         $port = (int)($instance['port'] ?? 0);
+        $timeoutSeconds = $path === self::INTERNAL_UPSTREAM_STATUS_PATH ? 5.0 : 1.0;
         if ($host === '' || $port <= 0) {
             return [];
         }
         if ($this->launcher && !$this->launcher->isListening($host, $port, 0.2)) {
             return [];
         }
+        if ($this->shouldUseLocalUpstreamUnixHttp($host, $port)) {
+            $payload = $this->requestUpstreamUnixHttpJson(
+                LocalIpc::upstreamHttpSocketPath($port),
+                $path,
+                $timeoutSeconds,
+                [
+                    'Host: ' . $host . ':' . $port,
+                    'x-gateway-internal: 1',
+                    'Connection: close',
+                ]
+            );
+            if (is_array($payload['data'] ?? null)) {
+                return $payload['data'];
+            }
+        }
 
         try {
             if (Coroutine::getCid() <= 0) {
-                return $this->fetchUpstreamRuntimeStatusSync($host, $port);
+                return $this->fetchUpstreamInternalStatusSync($host, $port, $path);
             }
             $client = new Client($host, $port, false);
             $client->set(['timeout' => 1.5]);
@@ -1834,7 +2439,7 @@ class GatewayServer {
                 'host' => $host . ':' . $port,
                 'x-gateway-internal' => '1',
             ]);
-            if (!$client->get(self::INTERNAL_UPSTREAM_STATUS_PATH)) {
+            if (!$client->get($path)) {
                 $client->close();
                 return [];
             }
@@ -1853,6 +2458,14 @@ class GatewayServer {
     }
 
     protected function fetchUpstreamRuntimeStatusSync(string $host, int $port): array {
+        return $this->fetchUpstreamInternalStatusSync($host, $port, self::INTERNAL_UPSTREAM_STATUS_PATH);
+    }
+
+    protected function fetchUpstreamHealthStatusSync(string $host, int $port): array {
+        return $this->fetchUpstreamInternalStatusSync($host, $port, self::INTERNAL_UPSTREAM_HEALTH_PATH);
+    }
+
+    protected function fetchUpstreamInternalStatusSync(string $host, int $port, string $path): array {
         $context = stream_context_create([
             'http' => [
                 'method' => 'GET',
@@ -1865,7 +2478,7 @@ class GatewayServer {
                 ]),
             ],
         ]);
-        $body = @file_get_contents('http://' . $host . ':' . $port . self::INTERNAL_UPSTREAM_STATUS_PATH, false, $context);
+        $body = @file_get_contents('http://' . $host . ':' . $port . $path, false, $context);
         if (!is_string($body) || $body === '' || !JsonHelper::is($body)) {
             return [];
         }
@@ -1882,6 +2495,60 @@ class GatewayServer {
         $payload = JsonHelper::recover($body);
         $data = $payload['data'] ?? [];
         return is_array($data) ? $data : [];
+    }
+
+    protected function shouldUseLocalUpstreamIpc(string $host): bool {
+        return in_array($host, ['127.0.0.1', 'localhost', '0.0.0.0', SERVER_HOST], true);
+    }
+
+    protected function shouldUseLocalUpstreamUnixHttp(string $host, int $port): bool {
+        return $this->shouldUseLocalUpstreamIpc($host) && $port > 0 && file_exists(LocalIpc::upstreamHttpSocketPath($port));
+    }
+
+    protected function localUpstreamIpcActionForPath(string $path): ?string {
+        return match ($path) {
+            self::INTERNAL_UPSTREAM_STATUS_PATH => 'upstream.status',
+            self::INTERNAL_UPSTREAM_HEALTH_PATH => 'upstream.health',
+            default => null,
+        };
+    }
+
+    protected function requestUpstreamUnixHttpJson(string $socketPath, string $path, float $timeoutSeconds, array $headers = []): ?array {
+        if ($socketPath === '' || !file_exists($socketPath)) {
+            return null;
+        }
+        $errno = 0;
+        $errstr = '';
+        $socket = @stream_socket_client('unix://' . $socketPath, $errno, $errstr, $timeoutSeconds, STREAM_CLIENT_CONNECT);
+        if (!is_resource($socket)) {
+            return null;
+        }
+        $seconds = max(1, (int)floor($timeoutSeconds));
+        $microseconds = max(0, (int)(($timeoutSeconds - floor($timeoutSeconds)) * 1000000));
+        stream_set_timeout($socket, $seconds, $microseconds);
+        $headerLines = array_merge([
+            'GET ' . $path . ' HTTP/1.1',
+        ], $headers, ['']);
+        $request = implode("\r\n", $headerLines) . "\r\n";
+        fwrite($socket, $request);
+        $raw = stream_get_contents($socket);
+        fclose($socket);
+        if (!is_string($raw) || !str_contains($raw, "\r\n\r\n")) {
+            return null;
+        }
+        [$head, $body] = explode("\r\n\r\n", $raw, 2);
+        $status = 0;
+        foreach (explode("\r\n", $head) as $line) {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $matches)) {
+                $status = (int)$matches[1];
+                break;
+            }
+        }
+        if ($status !== 200 || $body === '') {
+            return null;
+        }
+        $decoded = json_decode($body, true);
+        return is_array($decoded) ? $decoded : null;
     }
 
     protected function buildGatewayBusinessOverlay(array $upstreams): array {
@@ -1923,7 +2590,6 @@ class GatewayServer {
 
         return [
             'app_version' => $base['app_version'] ?? '--',
-            'public_version' => $base['public_version'] ?? '--',
             'framework_build_version' => $base['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION,
             'framework_update_ready' => (bool)($base['framework_update_ready'] ?? false),
             'swoole_version' => $base['swoole_version'] ?? swoole_version(),
@@ -2089,13 +2755,68 @@ class GatewayServer {
         ];
     }
 
-    protected function buildDashboardSocketHost(string $host, string $referer): string {
-        $protocol = (!empty($referer) && str_starts_with($referer, 'https')) ? 'wss://' : 'ws://';
-        $displayHost = trim($host) !== '' ? $host : ('127.0.0.1:' . $this->port);
-        return $protocol . $displayHost . '/dashboard.socket';
+    protected function buildDashboardSocketHost(string $host, string $referer, string $forwardedProto = ''): string {
+        $normalizedHost = trim($host);
+        $normalizedReferer = trim($referer);
+        $normalizedProto = strtolower(trim($forwardedProto));
+
+        if ($this->isLoopbackDashboardHost($normalizedHost)) {
+            $refererAuthority = $this->dashboardRefererAuthority($normalizedReferer);
+            if ($refererAuthority !== '') {
+                $normalizedHost = $refererAuthority;
+            }
+        }
+
+        if ($normalizedHost === '') {
+            $normalizedHost = $this->dashboardRefererAuthority($normalizedReferer);
+        }
+
+        if ($normalizedHost === '') {
+            $normalizedHost = '127.0.0.1:' . $this->resolvedDashboardPort();
+        }
+
+        $protocol = in_array($normalizedProto, ['https', 'wss'], true)
+            || (!empty($normalizedReferer) && str_starts_with($normalizedReferer, 'https'))
+            ? 'wss://'
+            : 'ws://';
+
+        return $protocol . $normalizedHost . '/dashboard.socket';
+    }
+
+    protected function isLoopbackDashboardHost(string $host): bool {
+        if ($host === '') {
+            return true;
+        }
+        $lowerHost = strtolower($host);
+        return $lowerHost === 'localhost'
+            || str_starts_with($lowerHost, 'localhost:')
+            || $lowerHost === '127.0.0.1'
+            || str_starts_with($lowerHost, '127.0.0.1:')
+            || $lowerHost === '::1'
+            || str_starts_with($lowerHost, '[::1]:');
+    }
+
+    protected function dashboardRefererAuthority(string $referer): string {
+        if ($referer === '') {
+            return '';
+        }
+        $parts = parse_url($referer);
+        if (!is_array($parts)) {
+            return '';
+        }
+        $host = trim((string)($parts['host'] ?? ''));
+        if ($host === '') {
+            return '';
+        }
+        $port = (int)($parts['port'] ?? 0);
+        return $port > 0 ? ($host . ':' . $port) : $host;
     }
 
     protected function buildDashboardVersionStatus(): array {
+        $cached = $this->dashboardVersionStatusCache['value'] ?? null;
+        if (is_array($cached) && (int)($this->dashboardVersionStatusCache['expires_at'] ?? 0) > time()) {
+            return $cached;
+        }
         $dashboardDir = SCF_ROOT . '/build/public/dashboard';
         $versionJson = $dashboardDir . '/version.json';
         $currentDashboardVersion = ['version' => '0.0.0'];
@@ -2110,25 +2831,20 @@ class GatewayServer {
             $dashboardVersion = $response->getData();
         }
 
-        return [
+        $result = [
             'version' => $currentDashboardVersion['version'] ?? '0.0.0',
             'latest_version' => $dashboardVersion['version'] ?? '--',
         ];
+        $this->dashboardVersionStatusCache = [
+            'expires_at' => time() + self::DASHBOARD_VERSION_CACHE_TTL_SECONDS,
+            'value' => $result,
+        ];
+        return $result;
     }
 
-    protected function buildFrameworkVersionStatus(): array {
-        $remoteVersion = [
-            'version' => FRAMEWORK_BUILD_VERSION,
-            'build' => FRAMEWORK_BUILD_TIME,
-        ];
-
-        $client = \Scf\Client\Http::create(ENV_VARIABLES['scf_update_server']);
-        $response = $client->get();
-        if (!$response->hasError()) {
-            $remoteVersion = $response->getData();
-        }
-
-        $upstreams = $this->dashboardUpstreams();
+    protected function buildFrameworkVersionStatus(?array $upstreams = null): array {
+        $remoteVersion = $this->cachedFrameworkRemoteVersion();
+        $upstreams ??= $this->dashboardUpstreams();
         $selected = $this->selectGatewayBusinessUpstreams($upstreams);
         $activeFrameworkVersion = (string)($selected[0]['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION);
         $activeFrameworkReady = (bool)($selected[0]['framework_update_ready'] ?? file_exists(SCF_ROOT . '/build/update.pack'));
@@ -2144,6 +2860,31 @@ class GatewayServer {
             'gateway_pending_restart' => FRAMEWORK_BUILD_VERSION !== $activeFrameworkVersion,
             'update_ready' => $activeFrameworkReady,
         ];
+    }
+
+    protected function cachedFrameworkRemoteVersion(): array {
+        $cached = $this->frameworkRemoteVersionCache['value'] ?? null;
+        if (is_array($cached) && (int)($this->frameworkRemoteVersionCache['expires_at'] ?? 0) > time()) {
+            return $cached;
+        }
+
+        $remoteVersion = [
+            'version' => FRAMEWORK_BUILD_VERSION,
+            'build' => FRAMEWORK_BUILD_TIME,
+        ];
+
+        $client = \Scf\Client\Http::create(ENV_VARIABLES['scf_update_server']);
+        $response = $client->get();
+        if (!$response->hasError()) {
+            $remoteVersion = $response->getData();
+        }
+
+        $this->frameworkRemoteVersionCache = [
+            'expires_at' => time() + self::FRAMEWORK_VERSION_CACHE_TTL_SECONDS,
+            'value' => $remoteVersion,
+        ];
+
+        return $remoteVersion;
     }
 
     protected function pushDashboardStatus(?int $fd = null): void {
@@ -2188,9 +2929,10 @@ class GatewayServer {
             return false;
         }
 
-        $time = (string)($payload['time'] ?? date('m-d H:i:s'));
+        $time = (string)($payload['time'] ?? Console::timestamp());
         $node = (string)($payload['node'] ?? SERVER_HOST);
         $sourceType = (string)($payload['source_type'] ?? 'gateway');
+        $oldInstance = (bool)($payload['old_instance'] ?? false);
 
         if ($this->dashboardEnabled()) {
             if (!$this->hasConsoleSubscribers()) {
@@ -2198,7 +2940,7 @@ class GatewayServer {
             }
             $this->pushDashboardEvent([
                 'event' => 'console',
-                'message' => ['data' => $message, 'source_type' => $sourceType],
+                'message' => ['data' => $message, 'source_type' => $sourceType, 'old_instance' => $oldInstance],
                 'time' => $time,
                 'node' => $node,
             ]);
@@ -2222,6 +2964,7 @@ class GatewayServer {
                     'message' => $message,
                     'source_type' => $sourceType,
                     'node' => $node,
+                    'old_instance' => $oldInstance,
                 ],
             ]));
         } catch (Throwable) {
@@ -2321,6 +3064,15 @@ class GatewayServer {
 
     protected function rollingRestartManagedUpstreams(?array $plans = null): array {
         $basePlans = $plans ?? $this->activeManagedPlans();
+        if (!$basePlans) {
+            $basePlans = $this->managedPlansFromSnapshot();
+            if ($basePlans) {
+                foreach ($basePlans as $plan) {
+                    $this->appendManagedPlan($plan);
+                }
+                Console::warning("【Gateway】业务实例计划内存为空，已从运行态快照恢复: count=" . count($basePlans));
+            }
+        }
         $basePlans = array_values(array_filter($basePlans, static function ($plan) {
             return (int)($plan['port'] ?? 0) > 0;
         }));
@@ -2328,6 +3080,13 @@ class GatewayServer {
         $failedNodes = [];
         $successCount = 0;
         if (!$basePlans || !$this->upstreamSupervisor || !$this->launcher) {
+            if (!$basePlans) {
+                Console::warning('【Gateway】未找到可重启的业务实例计划');
+            } elseif (!$this->upstreamSupervisor) {
+                Console::warning('【Gateway】业务实例管理器未就绪，无法执行滚动重启');
+            } elseif (!$this->launcher) {
+                Console::warning('【Gateway】业务实例启动器未就绪，无法执行滚动重启');
+            }
             return [
                 'success_count' => 0,
                 'failed_nodes' => [],
@@ -2395,6 +3154,10 @@ class GatewayServer {
         }
 
         $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
+        $this->syncNginxProxyTargets('rolling_restart_activate');
+        foreach ($basePlans as $plan) {
+            $this->quiesceManagedPlanBusinessPlane($plan);
+        }
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
         }
@@ -2477,6 +3240,10 @@ class GatewayServer {
         }
 
         $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
+        $this->syncNginxProxyTargets('rolling_update_activate');
+        foreach ($basePlans as $plan) {
+            $this->quiesceManagedPlanBusinessPlane($plan);
+        }
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
         }
@@ -2491,10 +3258,41 @@ class GatewayServer {
     protected function stopManagedPlan(array $plan, bool $removeState = true, bool $removePlan = true): void {
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
+        $plan = $this->hydrateManagedPlanRuntimeMetadata($plan);
         $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
+        $descriptor = $this->managedPlanDescriptor($plan);
 
         if ($this->upstreamSupervisor) {
-            $this->upstreamSupervisor->sendCommand(['action' => 'stop_port', 'port' => $port]);
+            if (isset($this->pendingManagedRecycles[$key])) {
+                return;
+            }
+            if (!$this->upstreamSupervisor->sendCommand([
+                'action' => 'stop_instance',
+                'instance' => [
+                    'version' => (string)($plan['version'] ?? ''),
+                    'host' => $host,
+                    'port' => $port,
+                    'rpc_port' => (int)($plan['rpc_port'] ?? 0),
+                    'metadata' => [
+                        'managed' => true,
+                        'rpc_port' => (int)($plan['rpc_port'] ?? 0),
+                        'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
+                    ],
+                ],
+            ])) {
+                Console::warning("【Gateway】旧业务实例回收命令发送失败 {$descriptor}");
+                return;
+            }
+            $this->pendingManagedRecycles[$key] = [
+                'plan' => $plan,
+                'remove_state' => $removeState,
+                'remove_plan' => $removePlan,
+                'requested_at' => time(),
+            ];
+            unset($this->pendingManagedRecycleWarnState[$key]);
+            $this->ensurePendingManagedRecycleWatcher($key);
+            Console::info("【Gateway】开始回收旧业务实例 {$descriptor}");
+            return;
         } elseif ($this->launcher) {
             $rpcPort = (int)($plan['rpc_port'] ?? 0);
             $this->launcher->stop([
@@ -2506,7 +3304,7 @@ class GatewayServer {
                     'rpc_port' => $rpcPort,
                     'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
                 ],
-            ], 3);
+            ], AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS);
         }
 
         if ($removeState) {
@@ -2515,6 +3313,9 @@ class GatewayServer {
         unset($this->bootstrappedManagedInstances[$key]);
         if ($removePlan) {
             $this->removeManagedPlan($plan);
+        }
+        if ($port > 0) {
+            Console::success("【Gateway】旧业务实例回收完成 {$descriptor}");
         }
     }
 
@@ -2546,6 +3347,53 @@ class GatewayServer {
         return array_values(array_filter($this->managedUpstreamPlans, static function ($plan) {
             return (int)($plan['port'] ?? 0) > 0;
         }));
+    }
+
+    protected function managedPlansFromSnapshot(): array {
+        $snapshot = $this->instanceManager->snapshot();
+        $activeVersion = (string)($snapshot['active_version'] ?? '');
+        $plans = [];
+        foreach (($snapshot['generations'] ?? []) as $generation) {
+            $version = (string)($generation['version'] ?? '');
+            $status = (string)($generation['status'] ?? '');
+            if ($activeVersion !== '') {
+                if ($version !== $activeVersion) {
+                    continue;
+                }
+            } elseif ($status !== 'active') {
+                continue;
+            }
+            foreach (($generation['instances'] ?? []) as $instance) {
+                $metadata = (array)($instance['metadata'] ?? []);
+                if (($metadata['managed'] ?? false) !== true) {
+                    continue;
+                }
+                $host = (string)($instance['host'] ?? '127.0.0.1');
+                $port = (int)($instance['port'] ?? 0);
+                if ($port <= 0) {
+                    continue;
+                }
+                $plans[] = [
+                    'app' => APP_DIR_NAME,
+                    'env' => SERVER_RUN_ENV,
+                    'host' => $host,
+                    'version' => (string)($instance['version'] ?? $version),
+                    'weight' => (int)($instance['weight'] ?? 100),
+                    'role' => (string)($metadata['role'] ?? SERVER_ROLE),
+                    'port' => $port,
+                    'rpc_port' => (int)($metadata['rpc_port'] ?? 0),
+                    'src' => APP_SRC_TYPE,
+                    'metadata' => array_merge($metadata, [
+                        'managed' => true,
+                        'managed_mode' => (string)($metadata['managed_mode'] ?? 'gateway_supervisor'),
+                        'display_version' => (string)($metadata['display_version'] ?? ($instance['version'] ?? $version)),
+                    ]),
+                    'start_timeout' => 25,
+                    'extra' => [],
+                ];
+            }
+        }
+        return $plans;
     }
 
     protected function buildRollingGenerationVersion(string $type, string $version): string {
@@ -2617,6 +3465,7 @@ class GatewayServer {
         $this->instanceManager->registerUpstream($version, $host, $port, $weight, $metadata);
         if ($activate) {
             $this->instanceManager->activateVersion($version, 0);
+            $this->syncNginxProxyTargets('register_managed_plan_activate');
         }
         $this->bootstrappedManagedInstances[$version . '@' . $host . ':' . $port] = true;
     }
@@ -2632,6 +3481,39 @@ class GatewayServer {
         $this->managedUpstreamPlans[] = $plan;
     }
 
+    protected function mergeManagedPlanMetadata(string $host, int $port, array $metadataPatch): void {
+        if ($host === '' || $port <= 0 || !$metadataPatch) {
+            return;
+        }
+        foreach ($this->managedUpstreamPlans as &$plan) {
+            if ((string)($plan['host'] ?? '') !== $host || (int)($plan['port'] ?? 0) !== $port) {
+                continue;
+            }
+            $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), $metadataPatch);
+        }
+        unset($plan);
+    }
+
+    protected function hydrateManagedPlanRuntimeMetadata(array $plan): array {
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        if ($host === '' || $port <= 0) {
+            return $plan;
+        }
+        $snapshot = $this->instanceManager->snapshot();
+        foreach (($snapshot['generations'] ?? []) as $generation) {
+            foreach (($generation['instances'] ?? []) as $instance) {
+                if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
+                    continue;
+                }
+                $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), (array)($instance['metadata'] ?? []));
+                $plan['rpc_port'] = (int)($plan['rpc_port'] ?? (($instance['metadata']['rpc_port'] ?? 0)));
+                return $plan;
+            }
+        }
+        return $plan;
+    }
+
     protected function removeManagedPlan(array $plan): void {
         $version = (string)($plan['version'] ?? '');
         $host = (string)($plan['host'] ?? '127.0.0.1');
@@ -2643,6 +3525,51 @@ class GatewayServer {
                 && (int)($item['port'] ?? 0) === $port
             );
         }));
+    }
+
+    protected function managedPlanDescriptor(array $plan): string {
+        $version = (string)($plan['version'] ?? '');
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        $parts = [];
+        $version !== '' and $parts[] = "generation={$version}";
+        $parts[] = "http={$host}:{$port}";
+        $rpcPort > 0 and $parts[] = "rpc={$rpcPort}";
+        return implode(', ', $parts);
+    }
+
+    protected function quiesceManagedPlanBusinessPlane(array $plan): void {
+        if (!$this->launcher) {
+            return;
+        }
+        $version = (string)($plan['version'] ?? '');
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        if ($port <= 0) {
+            return;
+        }
+        if (!$this->launcher->requestBusinessQuiesce($host, $port, 1.0)) {
+            Console::warning("【Gateway】旧业务实例业务平面静默失败: " . $this->managedPlanDescriptor($plan));
+            return;
+        }
+        $runtimeStatus = $this->fetchUpstreamRuntimeStatus($plan);
+        $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
+        $proxyHttpProcessing = $this->instanceManager->proxyHttpRequestCountFor($version, $host, $port);
+        $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0) + $proxyHttpProcessing;
+        $rpcProcessing = (int)($runtimeStatus['rpc_request_processing'] ?? 0);
+        Console::info(
+            "【Gateway】旧业务实例开始平滑回收: " . $this->managedPlanDescriptor($plan)
+            . ", ws=" . $gatewayWs
+            . ", http=" . $httpProcessing
+            . ", rpc=" . $rpcProcessing
+            . ", queue=" . (int)($runtimeStatus['redis_queue_processing'] ?? 0)
+            . ", crontab=" . (int)($runtimeStatus['crontab_busy'] ?? 0)
+        );
+        if ($gatewayWs === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
+            Console::info("【Gateway】旧业务实例已无在途请求，立即进入 shutdown: " . $this->managedPlanDescriptor($plan));
+            $this->stopManagedPlan($plan, true);
+        }
     }
 
     protected function cleanupOfflineManagedUpstreams(): void {
@@ -2661,9 +3588,164 @@ class GatewayServer {
                     'port' => (int)($instance['port'] ?? 0),
                     'rpc_port' => (int)(($instance['metadata']['rpc_port'] ?? 0)),
                 ];
+                if ($this->isManagedPlanRecyclePending($plan)) {
+                    continue;
+                }
                 $this->stopManagedPlan($plan);
             }
-            $this->instanceManager->removeVersion((string)($generation['version'] ?? ''));
+            $version = (string)($generation['version'] ?? '');
+            if ($this->hasPendingRecycleForVersion($version)) {
+                continue;
+            }
+            $this->instanceManager->removeVersion($version);
+            if ($version !== '') {
+                Console::success("【Gateway】旧业务实例代际已移除 generation={$version}");
+            }
+        }
+    }
+
+    protected function pollPendingManagedRecycles(): void {
+        if (!$this->launcher || !$this->pendingManagedRecycles) {
+            return;
+        }
+
+        foreach (array_keys($this->pendingManagedRecycles) as $key) {
+            $this->checkPendingManagedRecycle($key);
+        }
+    }
+
+    protected function ensurePendingManagedRecycleWatcher(string $key): void {
+        if (isset($this->pendingManagedRecycleWatchers[$key]) || !isset($this->pendingManagedRecycles[$key])) {
+            return;
+        }
+
+        $timerId = Timer::tick(1000, function () use ($key) {
+            if (!isset($this->pendingManagedRecycleWatchers[$key])) {
+                return;
+            }
+            if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+                $this->clearPendingManagedRecycleWatcher($key);
+                return;
+            }
+            if ($this->checkPendingManagedRecycle($key)) {
+                $this->clearPendingManagedRecycleWatcher($key);
+            }
+        });
+        $this->pendingManagedRecycleWatchers[$key] = $timerId;
+    }
+
+    protected function clearPendingManagedRecycleWatcher(string $key): void {
+        if (!isset($this->pendingManagedRecycleWatchers[$key])) {
+            return;
+        }
+        Timer::clear($this->pendingManagedRecycleWatchers[$key]);
+        unset($this->pendingManagedRecycleWatchers[$key]);
+    }
+
+    protected function checkPendingManagedRecycle(string $key): bool {
+        if (!$this->launcher || !isset($this->pendingManagedRecycles[$key])) {
+            return true;
+        }
+
+        $item = $this->pendingManagedRecycles[$key];
+        $plan = (array)($item['plan'] ?? []);
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        $httpAlive = $port > 0 && ($this->launcher->isListening($host, $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1));
+        $rpcAlive = $rpcPort > 0 && ($this->launcher->isListening($host, $rpcPort, 0.1) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.1));
+        if ($httpAlive || $rpcAlive) {
+            $requestedAt = (int)($item['requested_at'] ?? time());
+            $elapsed = max(0, time() - $requestedAt);
+            if ($elapsed >= 60) {
+                $lastWarnAt = (int)($this->pendingManagedRecycleWarnState[$key] ?? 0);
+                if ($lastWarnAt <= 0 || (time() - $lastWarnAt) >= 60) {
+                    $this->pendingManagedRecycleWarnState[$key] = time();
+                    Console::warning(
+                        "【Gateway】旧业务实例回收等待中: " . $this->managedPlanDescriptor($plan)
+                        . ", waiting={$elapsed}s, http=" . ($httpAlive ? 'listening' : 'closed')
+                        . ", rpc=" . ($rpcAlive ? 'listening' : 'closed')
+                    );
+                }
+            }
+            return false;
+        }
+
+        $removeState = (bool)($item['remove_state'] ?? true);
+        $removePlan = (bool)($item['remove_plan'] ?? true);
+        if ($removeState) {
+            $this->instanceManager->removeInstance($host, $port);
+        }
+        unset($this->bootstrappedManagedInstances[$key]);
+        if ($removePlan) {
+            $this->removeManagedPlan($plan);
+        }
+        Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
+        unset($this->pendingManagedRecycleWarnState[$key]);
+        unset($this->pendingManagedRecycles[$key]);
+        return true;
+    }
+
+    protected function isManagedPlanRecyclePending(array $plan): bool {
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
+        return isset($this->pendingManagedRecycles[$key]);
+    }
+
+    protected function hasPendingRecycleForVersion(string $version): bool {
+        if ($version === '') {
+            return false;
+        }
+        foreach ($this->pendingManagedRecycles as $item) {
+            $plan = (array)($item['plan'] ?? []);
+            if ((string)($plan['version'] ?? '') === $version) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected function warnStuckDrainingManagedUpstreams(): void {
+        $diagnostics = $this->instanceManager->drainingDiagnostics();
+        $activeVersions = [];
+        $now = time();
+        foreach ($diagnostics as $item) {
+            $version = (string)($item['version'] ?? '');
+            if ($version === '') {
+                continue;
+            }
+            $activeVersions[$version] = true;
+            $startedAt = (int)($item['drain_started_at'] ?? 0);
+            if ($startedAt <= 0) {
+                continue;
+            }
+            $elapsed = $now - $startedAt;
+            $warnAfter = max(
+                self::ROLLING_DRAIN_GRACE_SECONDS,
+                max(1, (int)(($item['drain_deadline_at'] ?? 0) - $startedAt))
+            );
+            if ($elapsed < $warnAfter) {
+                continue;
+            }
+            $lastWarnAt = (int)($this->drainingGenerationWarnState[$version] ?? 0);
+            if ($lastWarnAt > 0 && ($now - $lastWarnAt) < 60) {
+                continue;
+            }
+            $this->drainingGenerationWarnState[$version] = $now;
+            Console::warning(
+                "【Gateway】旧业务实例仍在 draining，尚未进入 shutdown: generation={$version}, "
+                . "draining={$elapsed}s, ws=" . (int)($item['connections'] ?? 0)
+                . ", http=" . (int)($item['http_processing'] ?? 0)
+                . ", rpc=" . (int)($item['rpc_processing'] ?? 0)
+                . ", queue=" . (int)($item['redis_queue_processing'] ?? 0)
+                . ", crontab=" . (int)($item['crontab_busy'] ?? 0)
+            );
+        }
+        foreach (array_keys($this->drainingGenerationWarnState) as $version) {
+            if (!isset($activeVersions[$version])) {
+                unset($this->drainingGenerationWarnState[$version]);
+            }
         }
     }
 
@@ -2856,9 +3938,7 @@ class GatewayServer {
                     $this->json($response, 403, ['message' => 'forbidden']);
                     return;
                 }
-                $this->json($response, 200, [
-                    'enabled' => $this->dashboardEnabled() ? $this->hasConsoleSubscribers() : ConsoleRelay::remoteSubscribed(),
-                ]);
+                $this->json($response, 200, $this->localConsoleSubscriptionPayload());
                 return;
             }
 
@@ -2867,13 +3947,14 @@ class GatewayServer {
                     $this->json($response, 403, ['message' => 'forbidden']);
                     return;
                 }
-                $accepted = $this->acceptConsolePayload([
-                    'time' => (string)($payload['time'] ?? ''),
-                    'message' => (string)($payload['message'] ?? ''),
-                    'source_type' => (string)($payload['source_type'] ?? 'gateway'),
-                    'node' => (string)($payload['node'] ?? SERVER_HOST),
+                $this->json($response, 200, [
+                    'accepted' => $this->acceptConsolePayload([
+                        'time' => (string)($payload['time'] ?? ''),
+                        'message' => (string)($payload['message'] ?? ''),
+                        'source_type' => (string)($payload['source_type'] ?? 'gateway'),
+                        'node' => (string)($payload['node'] ?? SERVER_HOST),
+                    ]),
                 ]);
-                $this->json($response, 200, ['accepted' => $accepted]);
                 return;
             }
 
@@ -2882,29 +3963,9 @@ class GatewayServer {
                     $this->json($response, 403, ['message' => 'forbidden']);
                     return;
                 }
-                $command = trim((string)($payload['command'] ?? ''));
-                if ($command === '') {
-                    $this->json($response, 400, ['message' => 'command required']);
-                    return;
-                }
-                switch ($command) {
-                    case 'reload':
-                        Timer::after(1, function () {
-                            $this->restartGatewayBusinessPlane();
-                        });
-                        $this->json($response, 200, ['accepted' => true, 'message' => 'gateway business reload started']);
-                        return;
-                    case 'restart':
-                    case 'shutdown':
-                        Timer::after(1, function () {
-                            $this->shutdownGateway();
-                        });
-                        $this->json($response, 200, ['accepted' => true, 'message' => 'gateway shutdown started']);
-                        return;
-                    default:
-                        $this->json($response, 400, ['message' => 'unsupported command']);
-                        return;
-                }
+                $result = $this->dispatchInternalGatewayCommand((string)($payload['command'] ?? ''));
+                $this->json($response, (int)($result['status'] ?? 500), $result['data'] ?? ['message' => (string)($result['message'] ?? 'request failed')]);
+                return;
             }
 
             if ($method === 'GET' && $path === '/_gateway/healthz') {
@@ -2941,6 +4002,7 @@ class GatewayServer {
                     (string)($payload['version'] ?? ''),
                     (int)($payload['grace_seconds'] ?? 30)
                 );
+                $this->syncNginxProxyTargets('api_activate');
                 $this->json($response, 200, [
                     'message' => 'activated',
                     'state' => $state,
@@ -2953,6 +4015,7 @@ class GatewayServer {
                     (string)($payload['version'] ?? ''),
                     (int)($payload['grace_seconds'] ?? 30)
                 );
+                $this->syncNginxProxyTargets('api_drain');
                 $this->json($response, 200, [
                     'message' => 'draining',
                     'state' => $state,
@@ -2962,6 +4025,7 @@ class GatewayServer {
 
             if ($method === 'POST' && $path === '/_gateway/versions/remove') {
                 $state = $this->instanceManager->removeVersion((string)($payload['version'] ?? ''));
+                $this->syncNginxProxyTargets('api_remove');
                 $this->json($response, 200, [
                     'message' => 'removed',
                     'state' => $state,
@@ -2978,155 +4042,93 @@ class GatewayServer {
         }
     }
 
-    protected function startUpstreamPump(int $fd, Client $client): void {
-        $this->wsPumpCoroutines[$fd] = Coroutine::create(function () use ($fd, $client) {
-            while (true) {
-                $frame = $client->recv();
-                if ($frame === false || $frame === '' || $frame === null) {
-                    break;
-                }
-                if (!isset($this->server) || !$this->server->exist($fd) || !$this->server->isEstablished($fd)) {
-                    break;
-                }
-                if ($frame instanceof Frame) {
-                    if ($frame->opcode === WEBSOCKET_OPCODE_CLOSE) {
-                        $this->disconnectClient($this->server, $fd);
-                        break;
-                    }
-                    $ok = $this->server->push($fd, $frame->data, $frame->opcode);
-                    if ($ok === false) {
-                        Console::warning("【Gateway】WebSocket下游推送失败 fd={$fd}");
-                    }
-                    continue;
-                }
-                $ok = $this->server->push($fd, (string)$frame);
-                if ($ok === false) {
-                    Console::warning("【Gateway】WebSocket下游推送失败 fd={$fd}");
-                }
-            }
-
-            if (isset($this->server)) {
-                $this->disconnectClient($this->server, $fd);
-            }
-        });
+    protected function localConsoleSubscriptionPayload(): array {
+        return [
+            'enabled' => $this->dashboardEnabled() ? $this->hasConsoleSubscribers() : ConsoleRelay::remoteSubscribed(),
+        ];
     }
 
-    protected function disconnectClient(Server $server, int $fd): void {
-        if (!$server->exist($fd)) {
+    protected function dispatchInternalGatewayCommand(string $command): array {
+        $command = trim($command);
+        if ($command === '') {
+            return ['ok' => false, 'status' => 400, 'message' => 'command required'];
+        }
+
+        switch ($command) {
+            case 'reload':
+                Timer::after(1, function () {
+                    $this->restartGatewayBusinessPlane();
+                });
+                return [
+                    'ok' => true,
+                    'status' => 200,
+                    'data' => ['accepted' => true, 'message' => 'gateway business reload started'],
+                ];
+            case 'restart':
+            case 'shutdown':
+                Timer::after(1, function () {
+                    $this->shutdownGateway();
+                });
+                return [
+                    'ok' => true,
+                    'status' => 200,
+                    'data' => ['accepted' => true, 'message' => 'gateway shutdown started'],
+                ];
+            default:
+                return ['ok' => false, 'status' => 400, 'message' => 'unsupported command'];
+        }
+    }
+
+    protected function applyStaticHandlerSettings(): void {
+        if ($this->trafficMode() !== 'http') {
             return;
         }
-        try {
-            if ($server->isEstablished($fd)) {
-                $server->disconnect($fd);
-                return;
-            }
-            $server->close($fd);
-        } catch (Throwable) {
+        $locations = Config::server()['static_handler_locations'] ?? [];
+        if (!is_array($locations) || !$locations) {
+            return;
         }
+        $settings = [
+            'document_root' => APP_PATH . '/public',
+            'enable_static_handler' => true,
+            'http_index_files' => ['index.html'],
+            'static_handler_locations' => array_values($locations),
+        ];
+        if (Env::isDev()) {
+            $settings['http_autoindex'] = true;
+        }
+        $this->server->set($settings);
     }
 
-    protected function createHttpClient(array $upstream): Client {
-        return new Client($upstream['host'], (int)$upstream['port'], false);
+    protected function proxyMaxInflightRequests(): int {
+        $configured = Config::server()['gateway_proxy_max_inflight'] ?? 1024;
+        $limit = (int)$configured;
+        return $limit > 0 ? $limit : 1024;
     }
 
-    protected function buildTargetPath(Request $request): string {
-        $path = $request->server['request_uri'] ?? '/';
-        if (!empty($request->server['query_string'])) {
-            $path .= '?' . $request->server['query_string'];
-        }
-        return $path;
+    protected function shouldRejectNewProxyRequest(): bool {
+        return $this->instanceManager->totalProxyHttpRequestCount() >= $this->proxyMaxInflightRequests();
     }
 
-    protected function buildUpstreamHttpHeaders(Request $request, array $upstream): array {
-        $headers = [];
-        foreach (($request->header ?? []) as $key => $value) {
-            if ($this->shouldSkipRequestHeader($key)) {
-                continue;
-            }
-            $headers[$key] = $value;
+    protected function shouldRejectNewRelayConnection(): bool {
+        if (!$this->tcpRelayModeEnabled()) {
+            return false;
         }
-        $cookieHeader = $this->buildCookieHeader($request);
-        if ($cookieHeader !== null) {
-            $headers['cookie'] = $cookieHeader;
-        }
-        $headers['host'] = $upstream['host'] . ':' . $upstream['port'];
-        $headers['x-forwarded-for'] = $request->server['remote_addr'] ?? '127.0.0.1';
-        $headers['x-forwarded-proto'] = 'http';
-        $headers['x-forwarded-host'] = ($request->header['host'] ?? ($this->host . ':' . $this->port));
-        return $headers;
+        return $this->tcpRelayHandler()->activeRelayConnectionCount() >= $this->proxyMaxInflightRequests();
     }
 
-    protected function buildUpstreamWsHeaders(Request $request, array $upstream): array {
-        $headers = [];
-        foreach (($request->header ?? []) as $key => $value) {
-            if (in_array(strtolower($key), ['host', 'connection'], true)) {
-                continue;
-            }
-            $headers[$key] = $value;
+    protected function decodeJsonBody(Request $request): array {
+        $raw = $request->rawContent();
+        if ($raw === '' || $raw === false) {
+            return [];
         }
-        $cookieHeader = $this->buildCookieHeader($request);
-        if ($cookieHeader !== null) {
-            $headers['cookie'] = $cookieHeader;
-        }
-        $headers['host'] = $upstream['host'] . ':' . $upstream['port'];
-        $headers['connection'] = 'Upgrade';
-        $headers['upgrade'] = 'websocket';
-        $headers['x-forwarded-for'] = $request->server['remote_addr'] ?? '127.0.0.1';
-        $headers['x-forwarded-proto'] = 'ws';
-        return $headers;
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : [];
     }
 
-    protected function shouldSkipRequestHeader(string $key): bool {
-        return in_array(strtolower($key), [
-            'host',
-            'connection',
-            'keep-alive',
-            'proxy-authenticate',
-            'proxy-authorization',
-            'te',
-            'trailers',
-            'transfer-encoding',
-            'upgrade',
-        ], true);
-    }
-
-    protected function shouldSkipResponseHeader(string $key): bool {
-        return in_array(strtolower($key), [
-            'connection',
-            'keep-alive',
-            'proxy-authenticate',
-            'proxy-authorization',
-            'set-cookie',
-            'content-encoding',
-            'te',
-            'trailers',
-            'transfer-encoding',
-            'upgrade',
-            'content-length',
-        ], true);
-    }
-
-    protected function buildCookieHeader(Request $request): ?string {
-        $cookieHeader = trim((string)($request->header['cookie'] ?? ''));
-        if ($cookieHeader !== '') {
-            return $cookieHeader;
-        }
-
-        $cookies = (array)($request->cookie ?? []);
-        if (!$cookies) {
-            return null;
-        }
-
-        $pairs = [];
-        foreach ($cookies as $name => $value) {
-            $name = trim((string)$name);
-            if ($name === '') {
-                continue;
-            }
-            $pairs[] = $name . '=' . rawurlencode((string)$value);
-        }
-
-        return $pairs ? implode('; ', $pairs) : null;
+    protected function json(Response $response, int $status, array $payload): void {
+        $response->status($status);
+        $response->header('Content-Type', 'application/json;charset=utf-8');
+        $response->end(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     }
 
     protected function performServerHandshake(Request $request, Response $response): void {
@@ -3145,21 +4147,6 @@ class GatewayServer {
         }
         $response->status(101);
         $response->end();
-    }
-
-    protected function decodeJsonBody(Request $request): array {
-        $raw = $request->rawContent();
-        if ($raw === '' || $raw === false) {
-            return [];
-        }
-        $decoded = json_decode($raw, true);
-        return is_array($decoded) ? $decoded : [];
-    }
-
-    protected function json(Response $response, int $status, array $payload): void {
-        $response->status($status);
-        $response->header('Content-Type', 'application/json;charset=utf-8');
-        $response->end(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     }
 
     protected function resolveAffinityKey(Request $request): ?string {
@@ -3182,87 +4169,6 @@ class GatewayServer {
         }
 
         return null;
-    }
-
-    protected function forwardResponseCookies(Response $response, Client $client): void {
-        $headers = $client->set_cookie_headers ?? [];
-        if (!$headers) {
-            $singleHeader = $client->headers['set-cookie'] ?? null;
-            if (is_string($singleHeader) && $singleHeader !== '') {
-                $headers = [$singleHeader];
-            }
-        }
-
-        foreach ((array)$headers as $headerValue) {
-            $parsed = $this->parseSetCookieHeader((string)$headerValue);
-            if ($parsed === null) {
-                $response->header('Set-Cookie', (string)$headerValue, false);
-                continue;
-            }
-            $response->cookie(
-                $parsed['name'],
-                $parsed['value'],
-                $parsed['expires'],
-                $parsed['path'],
-                $parsed['domain'],
-                $parsed['secure'],
-                $parsed['httponly']
-            );
-        }
-    }
-
-    protected function parseSetCookieHeader(string $headerValue): ?array {
-        $headerValue = trim($headerValue);
-        if ($headerValue === '') {
-            return null;
-        }
-
-        $segments = array_map('trim', explode(';', $headerValue));
-        $nameValue = array_shift($segments);
-        if (!$nameValue || !str_contains($nameValue, '=')) {
-            return null;
-        }
-
-        [$name, $value] = explode('=', $nameValue, 2);
-        $cookie = [
-            'name' => trim($name),
-            'value' => $value,
-            'expires' => 0,
-            'path' => '/',
-            'domain' => '',
-            'secure' => false,
-            'httponly' => false,
-        ];
-
-        foreach ($segments as $segment) {
-            if ($segment === '') {
-                continue;
-            }
-            if (!str_contains($segment, '=')) {
-                $flag = strtolower($segment);
-                if ($flag === 'secure') {
-                    $cookie['secure'] = true;
-                } elseif ($flag === 'httponly') {
-                    $cookie['httponly'] = true;
-                }
-                continue;
-            }
-            [$attr, $attrValue] = explode('=', $segment, 2);
-            $attr = strtolower(trim($attr));
-            $attrValue = trim($attrValue);
-            if ($attr === 'expires') {
-                $timestamp = strtotime($attrValue);
-                $cookie['expires'] = $timestamp === false ? 0 : $timestamp;
-            } elseif ($attr === 'max-age') {
-                $cookie['expires'] = time() + max(0, (int)$attrValue);
-            } elseif ($attr === 'path') {
-                $cookie['path'] = $attrValue ?: '/';
-            } elseif ($attr === 'domain') {
-                $cookie['domain'] = $attrValue;
-            }
-        }
-
-        return $cookie['name'] === '' ? null : $cookie;
     }
 
     protected function shutdownManagedUpstreams(): void {
@@ -3341,9 +4247,12 @@ class GatewayServer {
 
         $this->upstreamSupervisor = new UpstreamSupervisor(
             $this->launcher,
-            App::isReady() ? $this->managedUpstreamPlans : []
+            []
         );
         $this->server->addProcess($this->upstreamSupervisor->getProcess());
+        $this->lastObservedUpstreamSupervisorPid = 0;
+        $this->lastObservedUpstreamSupervisorStartedAt = 0;
+        $this->pendingUpstreamSupervisorSyncReason = 'initial';
     }
 
     protected function bootstrapManagedUpstreams(): void {
@@ -3392,6 +4301,7 @@ class GatewayServer {
 
             $this->registerManagedPlan($plan, true);
             $this->instanceManager->removeOtherInstances($version, $host, $port);
+            $this->syncNginxProxyTargets('bootstrap_ready');
             $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
             Console::success("【Gateway】业务实例就绪 {$version} {$host}:{$port}{$rpcInfo}");
         }
@@ -3402,13 +4312,41 @@ class GatewayServer {
         $appVersion = $this->resolveAppVersion($appInfo);
         $stateFile = $this->instanceManager->stateFile();
         Console::success("【Gateway】服务启动完成");
-        Console::info("【Gateway】监听地址: {$this->host}:{$this->port}");
+        if ($this->nginxProxyModeEnabled()) {
+            Console::info("【Gateway】业务入口监听(nginx): {$this->host}:{$this->port}");
+            Console::info("【Gateway】控制面内部监听: {$this->internalControlHost()}:{$this->controlPort()}");
+        } elseif ($this->tcpRelayModeEnabled()) {
+            Console::info("【Gateway】业务/控制入口监听: {$this->host}:{$this->port}");
+            Console::info("【Gateway】控制面内部监听: {$this->internalControlHost()}:{$this->controlPort()}");
+        } else {
+            Console::info("【Gateway】监听地址: {$this->host}:{$this->port}");
+        }
         if ($this->rpcPort > 0) {
             Console::info("【Gateway】RPC监听: {$this->host}:{$this->rpcPort}");
         }
+        Console::info("【Gateway】流量模式: " . $this->trafficMode());
         Console::info("【Gateway】运行信息: env=" . SERVER_RUN_ENV . ", role=" . SERVER_ROLE . ", app=" . APP_DIR_NAME . ", version=" . $appVersion);
         Console::info("【Gateway】进程信息: master={$this->serverMasterPid}, manager={$this->serverManagerPid}");
         Console::info("【Gateway】状态文件: {$stateFile}");
+    }
+
+    protected function createBusinessTrafficListener(): void {
+        if (!$this->tcpRelayModeEnabled()) {
+            return;
+        }
+        if ($this->controlPort() === $this->port) {
+            throw new RuntimeException('tcp流量模式下控制面端口不能与业务端口相同');
+        }
+        $listener = $this->server->listen($this->host, $this->port, SWOOLE_SOCK_TCP);
+        if ($listener === false) {
+            throw new RuntimeException("Gateway业务转发监听失败: {$this->host}:{$this->port}");
+        }
+        $listener->set([
+            'package_max_length' => 20 * 1024 * 1024,
+            'open_http_protocol' => false,
+            'open_http2_protocol' => false,
+            'open_websocket_protocol' => false,
+        ]);
     }
 
     protected function resolveAppVersion(array $appInfo = []): string {

@@ -27,6 +27,7 @@ class RQueue {
     use Singleton;
 
     protected int $managerId = 0;
+    protected bool $shouldExit = false;
 
     public static function startProcess(): void {
         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
@@ -55,6 +56,9 @@ class RQueue {
                 @ini_set('memory_limit', $memoryLimit . 'M');
                 MemoryMonitor::start('redis:queue');
                 self::instance()->watch($config['redis_queue_mc'] ?? 32);
+                while (!self::instance()->shouldExit()) {
+                    Coroutine::sleep(0.2);
+                }
             }
         }, false, 0, true);
         $pid = $process->start();
@@ -82,6 +86,7 @@ class RQueue {
      * @return int
      */
     public function watch(int $mc = 32): int {
+        $this->shouldExit = false;
         $mc = min($mc, 32);
         //将待重试加入队列
         if ($retryCount = $this->count(2)) {
@@ -104,7 +109,14 @@ class RQueue {
         Timer::after(1000, function () use ($mc) {
             $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
             if ($this->managerId != $latestManagerId) {
+                if ((int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0) > 0) {
+                    Timer::after(200, function () use ($mc) {
+                        $this->loop($mc);
+                    });
+                    return;
+                }
                 Timer::clearAll();
+                $this->shouldExit = true;
             } else {
                 if ($count = $this->count()) {
                     $successed = 0;
@@ -131,6 +143,10 @@ class RQueue {
         });
     }
 
+    public function shouldExit(): bool {
+        return $this->shouldExit;
+    }
+
     /**
      * 取出一个待执行任务并执行,待执行任务标识为:key+0
      * @return bool
@@ -138,10 +154,13 @@ class RQueue {
     public function pop(): bool {
         if ($queue = Redis::pool()->rPop(QueueStatus::IN->key())) {
             $queue = QueueStruct::factory($queue);
+            Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESSING);
             try {
                 return call_user_func('\\' . $queue->handler . '::start', $queue);
             } catch (Throwable $e) {
                 Log::instance()->setModule('RQueue')->error($e->getMessage());
+            } finally {
+                Counter::instance()->decr(Key::COUNTER_REDIS_QUEUE_PROCESSING);
             }
         }
         return false;

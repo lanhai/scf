@@ -209,7 +209,7 @@ function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, 
             if ($port <= 0) {
                 continue;
             }
-            if (\Scf\Core\Server::isPortInUse($port)) {
+            if (\Scf\Core\Server::isListeningPortInUse($port)) {
                 $occupied = true;
                 break;
             }

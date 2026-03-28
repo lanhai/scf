@@ -64,9 +64,19 @@ class ConsoleRelay {
             'message' => $message,
             'source_type' => $sourceType,
             'node' => $node ?: SERVER_HOST,
+            'old_instance' => (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true && Runtime::instance()->serverIsDraining()),
         ];
 
         try {
+            $ipcResponse = LocalIpc::request(
+                LocalIpc::gatewaySocketPath($port),
+                'gateway.console.log',
+                $payload,
+                1.0
+            );
+            if (($ipcResponse['ok'] ?? false) === true && (int)($ipcResponse['status'] ?? 0) === 200) {
+                return (bool)($ipcResponse['data']['accepted'] ?? false);
+            }
             if (Coroutine::getCid() > 0) {
                 return self::postByCoroutine($port, self::INTERNAL_CONSOLE_LOG_PATH, $payload);
             }
@@ -85,9 +95,19 @@ class ConsoleRelay {
         }
 
         try {
-            $enabled = Coroutine::getCid() > 0
-                ? self::fetchByCoroutine($port, self::INTERNAL_CONSOLE_SUBSCRIPTION_PATH)
-                : self::fetchByStream($port, self::INTERNAL_CONSOLE_SUBSCRIPTION_PATH);
+            $ipcResponse = LocalIpc::request(
+                LocalIpc::gatewaySocketPath($port),
+                'gateway.console.subscription',
+                [],
+                1.0
+            );
+            if (($ipcResponse['ok'] ?? false) === true && (int)($ipcResponse['status'] ?? 0) === 200) {
+                $enabled = (bool)($ipcResponse['data']['enabled'] ?? false);
+            } else {
+                $enabled = Coroutine::getCid() > 0
+                    ? self::fetchByCoroutine($port, self::INTERNAL_CONSOLE_SUBSCRIPTION_PATH)
+                    : self::fetchByStream($port, self::INTERNAL_CONSOLE_SUBSCRIPTION_PATH);
+            }
         } catch (\Throwable) {
             $enabled = false;
         }

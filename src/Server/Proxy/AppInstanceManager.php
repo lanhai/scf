@@ -10,6 +10,9 @@ class AppInstanceManager {
     protected array $rrIndex = [];
     protected array $connectionBindings = [];
     protected array $instanceConnectionCount = [];
+    protected array $instanceProxyHttpRequestCount = [];
+    protected array $instanceRuntimeState = [];
+    protected bool $hasDrainingGeneration = false;
 
     public function __construct(
         protected UpstreamRegistry $registry
@@ -19,6 +22,7 @@ class AppInstanceManager {
 
     public function reload(): void {
         $this->state = $this->registry->load();
+        $this->refreshStateFlags();
     }
 
     public function state(): array {
@@ -159,6 +163,9 @@ class AppInstanceManager {
     }
 
     public function removeVersion(string $version): array {
+        foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
+            $this->clearInstanceRuntimeStatus((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0));
+        }
         unset($this->state['generations'][$version]);
         if (($this->state['active_version'] ?? null) === $version) {
             $this->state['active_version'] = null;
@@ -168,6 +175,7 @@ class AppInstanceManager {
     }
 
     public function removeInstance(string $host, int $port): array {
+        $this->clearInstanceRuntimeStatus($host, $port);
         foreach ($this->state['generations'] as $version => &$generation) {
             $generation['instances'] = array_values(array_filter($generation['instances'], static function ($instance) use ($host, $port) {
                 return !(($instance['host'] ?? '') === $host && (int)($instance['port'] ?? 0) === $port);
@@ -182,6 +190,57 @@ class AppInstanceManager {
         unset($generation);
         $this->touchState();
         return $this->snapshot();
+    }
+
+    public function updateInstanceRuntimeStatus(string $host, int $port, array $runtimeStatus): void {
+        if ($host === '' || $port <= 0) {
+            return;
+        }
+        $this->instanceRuntimeState[$this->runtimeStateKey($host, $port)] = [
+            'http_request_processing' => max(0, (int)($runtimeStatus['http_request_processing'] ?? 0)),
+            'rpc_request_processing' => max(0, (int)($runtimeStatus['rpc_request_processing'] ?? 0)),
+            'redis_queue_processing' => max(0, (int)($runtimeStatus['redis_queue_processing'] ?? 0)),
+            'crontab_busy' => max(0, (int)($runtimeStatus['crontab_busy'] ?? 0)),
+            'updated_at' => time(),
+        ];
+    }
+
+    public function mergeInstanceMetadata(string $host, int $port, array $metadataPatch): void {
+        if ($host === '' || $port <= 0 || !$metadataPatch) {
+            return;
+        }
+        $changed = false;
+        foreach ($this->state['generations'] as &$generation) {
+            foreach ($generation['instances'] as &$instance) {
+                if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
+                    continue;
+                }
+                $metadata = (array)($instance['metadata'] ?? []);
+                foreach ($metadataPatch as $key => $value) {
+                    if ($value === null) {
+                        continue;
+                    }
+                    if (($metadata[$key] ?? null) === $value) {
+                        continue;
+                    }
+                    $metadata[$key] = $value;
+                    $changed = true;
+                }
+                $instance['metadata'] = $metadata;
+            }
+            unset($instance);
+        }
+        unset($generation);
+        if ($changed) {
+            $this->touchState();
+        }
+    }
+
+    public function clearInstanceRuntimeStatus(string $host, int $port): void {
+        if ($host === '' || $port <= 0) {
+            return;
+        }
+        unset($this->instanceRuntimeState[$this->runtimeStateKey($host, $port)]);
     }
 
     public function reconcileInstances(callable $keeper): array {
@@ -287,6 +346,15 @@ class AppInstanceManager {
         return $this->pickGenerationInstance($this->state['generations'][$activeVersion], $affinityKey);
     }
 
+    public function pickHttpUpstreamExcluding(array $excludeInstanceIds = [], ?string $affinityKey = null): ?array {
+        $this->tick();
+        $activeVersion = $this->state['active_version'] ?? null;
+        if (!$activeVersion || !isset($this->state['generations'][$activeVersion])) {
+            return null;
+        }
+        return $this->pickGenerationInstance($this->state['generations'][$activeVersion], $affinityKey, $excludeInstanceIds);
+    }
+
     public function pickRpcUpstream(): ?array {
         $upstream = $this->pickHttpUpstream();
         if (!$upstream) {
@@ -303,7 +371,7 @@ class AppInstanceManager {
         return $upstream;
     }
 
-    public function bindWebsocketUpstream(int $fd, ?string $affinityKey = null): ?array {
+    public function bindConnectionUpstream(int $fd, ?string $affinityKey = null): ?array {
         $upstream = $this->pickHttpUpstream($affinityKey);
         if (!$upstream) {
             return null;
@@ -317,11 +385,64 @@ class AppInstanceManager {
         return $upstream;
     }
 
+    public function bindWebsocketUpstream(int $fd, ?string $affinityKey = null): ?array {
+        return $this->bindConnectionUpstream($fd, $affinityKey);
+    }
+
+    public function retainProxyHttpRequest(array $instance): void {
+        $instanceId = (string)($instance['id'] ?? '');
+        if ($instanceId === '') {
+            return;
+        }
+        $this->instanceProxyHttpRequestCount[$instanceId] = ($this->instanceProxyHttpRequestCount[$instanceId] ?? 0) + 1;
+    }
+
+    public function releaseProxyHttpRequest(array $instance): void {
+        $instanceId = (string)($instance['id'] ?? '');
+        if ($instanceId === '' || !isset($this->instanceProxyHttpRequestCount[$instanceId])) {
+            return;
+        }
+        $this->instanceProxyHttpRequestCount[$instanceId] = max(0, $this->instanceProxyHttpRequestCount[$instanceId] - 1);
+        if ($this->instanceProxyHttpRequestCount[$instanceId] === 0) {
+            unset($this->instanceProxyHttpRequestCount[$instanceId]);
+        }
+    }
+
     public function websocketBinding(int $fd): ?array {
         return $this->connectionBindings[$fd] ?? null;
     }
 
-    public function releaseWebsocketBinding(int $fd): void {
+    public function gatewayConnectionCountFor(string $version, string $host, int $port): int {
+        if (!isset($this->state['generations'][$version])) {
+            return 0;
+        }
+        foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
+            if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
+                continue;
+            }
+            return (int)($this->instanceConnectionCount[$instance['id']] ?? 0);
+        }
+        return 0;
+    }
+
+    public function proxyHttpRequestCountFor(string $version, string $host, int $port): int {
+        if (!isset($this->state['generations'][$version])) {
+            return 0;
+        }
+        foreach (($this->state['generations'][$version]['instances'] ?? []) as $instance) {
+            if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
+                continue;
+            }
+            return (int)($this->instanceProxyHttpRequestCount[(string)($instance['id'] ?? '')] ?? 0);
+        }
+        return 0;
+    }
+
+    public function totalProxyHttpRequestCount(): int {
+        return array_sum($this->instanceProxyHttpRequestCount);
+    }
+
+    public function releaseConnectionBinding(int $fd): void {
         if (!isset($this->connectionBindings[$fd])) {
             return;
         }
@@ -336,16 +457,24 @@ class AppInstanceManager {
         $this->tick();
     }
 
+    public function releaseWebsocketBinding(int $fd): void {
+        $this->releaseConnectionBinding($fd);
+    }
+
     public function tick(): void {
+        if (!$this->hasDrainingGeneration) {
+            return;
+        }
         $changed = false;
         $now = time();
         foreach ($this->state['generations'] as $version => &$generation) {
             if (($generation['status'] ?? '') !== 'draining') {
                 continue;
             }
-            $deadline = (int)($generation['drain_deadline_at'] ?? 0);
             $connections = $this->generationConnectionCount($generation);
-            if ($connections === 0 || ($deadline > 0 && $now >= $deadline)) {
+            $httpProcessing = $this->generationHttpProcessingCount($generation);
+            $rpcProcessing = $this->generationRpcProcessingCount($generation);
+            if ($connections === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
                 $generation['status'] = 'offline';
                 $generation['drain_started_at'] = $generation['drain_started_at'] ?: $now;
                 foreach ($generation['instances'] as &$instance) {
@@ -365,6 +494,26 @@ class AppInstanceManager {
         }
     }
 
+    public function drainingDiagnostics(): array {
+        $diagnostics = [];
+        foreach ($this->state['generations'] as $version => $generation) {
+            if (($generation['status'] ?? '') !== 'draining') {
+                continue;
+            }
+            $diagnostics[] = [
+                'version' => (string)$version,
+                'connections' => $this->generationConnectionCount($generation),
+                'http_processing' => $this->generationHttpProcessingCount($generation),
+                'rpc_processing' => $this->generationRpcProcessingCount($generation),
+                'redis_queue_processing' => $this->generationRedisQueueProcessingCount($generation),
+                'crontab_busy' => $this->generationCrontabBusyCount($generation),
+                'drain_started_at' => (int)($generation['drain_started_at'] ?? 0),
+                'drain_deadline_at' => (int)($generation['drain_deadline_at'] ?? 0),
+            ];
+        }
+        return $diagnostics;
+    }
+
     protected function generationConnectionCount(array $generation): int {
         $count = 0;
         foreach ($generation['instances'] as $instance) {
@@ -373,32 +522,92 @@ class AppInstanceManager {
         return $count;
     }
 
-    protected function pickGenerationInstance(array $generation, ?string $affinityKey = null): ?array {
-        $instances = array_values(array_filter($generation['instances'] ?? [], static function ($instance) {
+    protected function generationHttpProcessingCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['http_request_processing'] ?? 0);
+            $count += (int)($this->instanceProxyHttpRequestCount[(string)($instance['id'] ?? '')] ?? 0);
+        }
+        return $count;
+    }
+
+    protected function generationRpcProcessingCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['rpc_request_processing'] ?? 0);
+        }
+        return $count;
+    }
+
+    protected function generationRedisQueueProcessingCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['redis_queue_processing'] ?? 0);
+        }
+        return $count;
+    }
+
+    protected function generationCrontabBusyCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['crontab_busy'] ?? 0);
+        }
+        return $count;
+    }
+
+    protected function runtimeStateKey(string $host, int $port): string {
+        return $host . ':' . $port;
+    }
+
+    protected function pickGenerationInstance(array $generation, ?string $affinityKey = null, array $excludeInstanceIds = []): ?array {
+        $excluded = array_fill_keys(array_values(array_filter(array_map('strval', $excludeInstanceIds))), true);
+        $instances = array_values(array_filter($generation['instances'] ?? [], static function ($instance) use ($excluded) {
+            if (isset($excluded[(string)($instance['id'] ?? '')])) {
+                return false;
+            }
             return in_array($instance['status'] ?? 'offline', ['active', 'prepared'], true);
         }));
         if (!$instances) {
             return null;
         }
-        $key = $generation['version'];
-        $expanded = [];
-        foreach ($instances as $instance) {
-            $copies = max(1, (int)($instance['weight'] ?? 1));
-            for ($i = 0; $i < $copies; $i++) {
-                $expanded[] = $instance;
-            }
+        if (count($instances) === 1) {
+            return $instances[0];
         }
-        if (!$expanded) {
+
+        $key = $generation['version'];
+        $totalWeight = 0;
+        foreach ($instances as $instance) {
+            $totalWeight += max(1, (int)($instance['weight'] ?? 1));
+        }
+        if ($totalWeight <= 0) {
             return null;
         }
+
         if (!is_null($affinityKey) && $affinityKey !== '') {
-            $index = abs(crc32($affinityKey)) % count($expanded);
-            return $expanded[$index];
+            $index = abs(crc32($affinityKey)) % $totalWeight;
+            return $this->pickInstanceByWeightedIndex($instances, $index);
         }
+
         $index = $this->rrIndex[$key] ?? 0;
-        $picked = $expanded[$index % count($expanded)];
-        $this->rrIndex[$key] = ($index + 1) % max(1, count($expanded));
+        $picked = $this->pickInstanceByWeightedIndex($instances, $index % $totalWeight);
+        $this->rrIndex[$key] = ($index + 1) % $totalWeight;
         return $picked;
+    }
+
+    protected function pickInstanceByWeightedIndex(array $instances, int $index): ?array {
+        $offset = 0;
+        foreach ($instances as $instance) {
+            $weight = max(1, (int)($instance['weight'] ?? 1));
+            $offset += $weight;
+            if ($index < $offset) {
+                return $instance;
+            }
+        }
+        return $instances[array_key_last($instances)] ?? null;
     }
 
     protected function markGenerationDraining(array &$generation, int $now, int $graceSeconds): void {
@@ -413,6 +622,17 @@ class AppInstanceManager {
 
     protected function touchState(): void {
         $this->state['updated_at'] = time();
+        $this->refreshStateFlags();
         $this->registry->save($this->state);
+    }
+
+    protected function refreshStateFlags(): void {
+        $this->hasDrainingGeneration = false;
+        foreach (($this->state['generations'] ?? []) as $generation) {
+            if (($generation['status'] ?? '') === 'draining') {
+                $this->hasDrainingGeneration = true;
+                break;
+            }
+        }
     }
 }

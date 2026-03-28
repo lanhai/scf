@@ -75,7 +75,9 @@ class Manager extends Component {
         if ($port <= 0 && $localMaster) {
             $port = $this->resolveLocalMasterPort();
         } elseif ($port <= 0 && MASTER_PORT) {
-            $port = (int)MASTER_PORT;
+            $port = $this->resolveGatewayControlPort((int)MASTER_PORT);
+        } elseif ($port <= 0) {
+            $port = $this->resolveGatewayControlPort((int)(Config::server()['port'] ?? 0));
         }
 
         $normalized = $hostPart . ($port > 0 ? ':' . $port : '');
@@ -93,7 +95,29 @@ class Manager extends Component {
     }
 
     protected function resolveLocalMasterPort(): int {
-        return (int)(MASTER_PORT ?: Runtime::instance()->httpPort());
+        $dashboardPort = (int)(Runtime::instance()->dashboardPort() ?: 0);
+        if ($dashboardPort > 0) {
+            return $dashboardPort;
+        }
+        return $this->resolveGatewayControlPort((int)(MASTER_PORT ?: Runtime::instance()->httpPort()));
+    }
+
+    protected function resolveGatewayControlPort(int $businessPort): int {
+        if ($businessPort <= 0) {
+            return 0;
+        }
+        $serverConfig = Config::server();
+        $mode = strtolower(trim((string)($serverConfig['gateway_traffic_mode'] ?? 'nginx')));
+        if (!in_array($mode, ['tcp', 'nginx'], true)) {
+            return $businessPort;
+        }
+        $configPort = (int)($serverConfig['port'] ?? $businessPort);
+        $configuredControlPort = (int)($serverConfig['gateway_control_port'] ?? 0);
+        if ($configuredControlPort > 0) {
+            $offset = max(1, $configuredControlPort - $configPort);
+            return $businessPort + $offset;
+        }
+        return $businessPort + 1000;
     }
 
     /**

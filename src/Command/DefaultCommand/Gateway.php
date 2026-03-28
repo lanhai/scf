@@ -9,6 +9,7 @@ use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Core\Config;
 use Scf\Core\Env;
+use Scf\Server\Proxy\LocalIpc;
 use Scf\Server\Proxy\CliBootstrap;
 use Swoole\Process;
 
@@ -33,6 +34,7 @@ class Gateway implements CommandInterface {
         $commandHelp->addActionOpt('-port', 'Gateway 监听端口');
         $commandHelp->addActionOpt('-rpc_port', 'Gateway 对外 RPC 监听端口, 默认沿用应用 rpc_port');
         $commandHelp->addActionOpt('-host', 'Gateway 监听地址');
+        $commandHelp->addActionOpt('-control_port', 'Gateway 控制面监听端口, tcp模式下默认自动偏移');
         $commandHelp->addActionOpt('-upstream_host', '业务 server 地址, 默认 127.0.0.1');
         $commandHelp->addActionOpt('-upstream_port', '业务 server 端口, 不传则自动分配');
         $commandHelp->addActionOpt('-upstream_rpc_port', '业务 server 内部 RPC 端口, 由 Gateway 转发到此端口, 不传则自动分配');
@@ -117,6 +119,21 @@ class Gateway implements CommandInterface {
     }
 
     protected function requestLocalGateway(int $port, string $path, string $method = 'GET', array $payload = []): array {
+        $ipcAction = match ([$method, $path]) {
+            ['POST', '/_gateway/internal/command'] => 'gateway.command',
+            ['GET', '/_gateway/internal/console/subscription'] => 'gateway.console.subscription',
+            ['GET', '/_gateway/healthz'] => 'gateway.health',
+            default => '',
+        };
+        if ($ipcAction !== '') {
+            $ipcResponse = LocalIpc::request(LocalIpc::gatewaySocketPath($port), $ipcAction, $payload, 2.0);
+            if (is_array($ipcResponse)) {
+                return [
+                    'status' => (int)($ipcResponse['status'] ?? 0),
+                    'body' => json_encode($ipcResponse['data'] ?? ['message' => (string)($ipcResponse['message'] ?? '')], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                ];
+            }
+        }
         $socket = @stream_socket_client(
             "tcp://127.0.0.1:{$port}",
             $errno,

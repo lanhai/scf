@@ -12,6 +12,7 @@ require_once __DIR__ . '/UpstreamSupervisor.php';
 
 use Scf\Command\Manager;
 use Scf\Core\App;
+use Scf\Core\Console;
 use Scf\Core\Env;
 use RuntimeException;
 use Scf\Server\Http;
@@ -65,6 +66,8 @@ class CliBootstrap {
         $configPort = (int)($serverConfig['port'] ?? 9580);
         $configRpcPort = (int)($serverConfig['rpc_port'] ?? 0);
         $bindPort = (int)($opts['port'] ?? $configPort);
+        $trafficMode = self::resolveTrafficMode($opts, $serverConfig);
+        $controlBindPort = self::resolveControlPort($opts, $serverConfig, $bindPort, $configPort);
         $rpcBindPortExplicit = array_key_exists('rpc_port', $opts);
         if ($rpcBindPortExplicit) {
             $rpcBindPort = (int)$opts['rpc_port'];
@@ -77,6 +80,14 @@ class CliBootstrap {
             }
         } else {
             $rpcBindPort = 0;
+        }
+        if (in_array($trafficMode, ['tcp', 'nginx'], true)) {
+            if ($controlBindPort === $bindPort) {
+                throw new RuntimeException("{$trafficMode}流量模式下控制面端口不能与业务端口相同: {$bindPort}");
+            }
+            if ($rpcBindPort > 0 && $controlBindPort === $rpcBindPort) {
+                throw new RuntimeException("{$trafficMode}流量模式下控制面端口不能与Gateway RPC端口相同: {$rpcBindPort}");
+            }
         }
         $workerNum = (int)($opts['worker_num'] ?? 1);
         $version = (string)($opts['upstream_version'] ?? \Scf\Core\App::version() ?? 'current');
@@ -195,8 +206,36 @@ class CliBootstrap {
             $manager->removeOtherInstances($version, $upstreamHost, $upstreamPort);
         }
 
-        $server = new GatewayServer($manager, $bindHost, $bindPort, $workerNum, $launcher, $managedUpstreamPlans, $rpcBindPort);
+        $server = new GatewayServer(
+            $manager,
+            $bindHost,
+            $bindPort,
+            $workerNum,
+            $launcher,
+            $managedUpstreamPlans,
+            $rpcBindPort,
+            $controlBindPort,
+            $trafficMode
+        );
         $server->start();
+    }
+
+    protected static function resolveTrafficMode(array $opts, array $serverConfig): string {
+        $mode = strtolower(trim((string)($opts['traffic_mode'] ?? $opts['gateway_traffic_mode'] ?? ($serverConfig['gateway_traffic_mode'] ?? 'nginx'))));
+        return in_array($mode, ['http', 'tcp', 'nginx'], true) ? $mode : 'nginx';
+    }
+
+    protected static function resolveControlPort(array $opts, array $serverConfig, int $bindPort, int $configPort): int {
+        if (array_key_exists('control_port', $opts) || array_key_exists('gateway_control_port', $opts)) {
+            $configured = (int)($opts['control_port'] ?? $opts['gateway_control_port'] ?? 0);
+            return $configured > 0 ? $configured : ($bindPort + 1000);
+        }
+        $configured = (int)($serverConfig['gateway_control_port'] ?? 0);
+        if ($configured > 0) {
+            $offset = max(1, $configured - $configPort);
+            return $bindPort + $offset;
+        }
+        return $bindPort + 1000;
     }
 
     protected static function reconcileRegistry(AppInstanceManager $manager, AppServerLauncher $launcher, string $bindHost, int $bindPort): void {
@@ -239,17 +278,17 @@ class CliBootstrap {
             return;
         }
 
-        echo date('m-d H:i:s') . " 【Gateway】启动前清理历史托管实例: " . count($managedInstances) . PHP_EOL;
+        echo Console::timestamp() . " 【Gateway】启动前清理历史托管实例: " . count($managedInstances) . PHP_EOL;
         foreach ($managedInstances as $instance) {
             $host = (string)($instance['host'] ?? '127.0.0.1');
             $port = (int)($instance['port'] ?? 0);
             $rpcPort = (int)(($instance['metadata']['rpc_port'] ?? 0));
             $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
-            echo date('m-d H:i:s') . " 【Gateway】清理历史托管实例: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
+            echo Console::timestamp() . " 【Gateway】清理历史托管实例: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
             $launcher->stop($instance, 2);
         }
         $manager->removeManagedInstances();
-        echo date('m-d H:i:s') . " 【Gateway】历史托管实例清理完成" . PHP_EOL;
+        echo Console::timestamp() . " 【Gateway】历史托管实例清理完成" . PHP_EOL;
     }
 
     protected static function findExistingRpcPort(AppInstanceManager $manager, string $version, string $host, int $port): int {

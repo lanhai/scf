@@ -99,11 +99,30 @@ class Request {
     }
 
     public static function host(): string|null {
-        return self::header('host') ?: 'locahost';
+        return self::header('x-forwarded-host') ?: self::header('host') ?: 'locahost';
     }
 
     public static function ip(): array|string {
-        return self::header('x-real-ip') ?: self::server('remote_addr');
+        $realIp = self::header('x-real-ip');
+        if (!empty($realIp)) {
+            return $realIp;
+        }
+        $forwardedFor = self::header('x-forwarded-for');
+        if (!empty($forwardedFor)) {
+            $parts = array_values(array_filter(array_map('trim', explode(',', (string)$forwardedFor))));
+            if ($parts) {
+                return $parts[0];
+            }
+        }
+        return self::server('remote_addr');
+    }
+
+    public static function port(): int {
+        $forwardedPort = (int)(self::header('x-forwarded-port') ?: 0);
+        if ($forwardedPort > 0) {
+            return $forwardedPort;
+        }
+        return (int)(self::server('server_port') ?: 0);
     }
 
     public static function url(): string|null {

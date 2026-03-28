@@ -34,6 +34,8 @@ use function Co\run;
 
 class SubProcessManager {
     protected const PROCESS_EXIT_GRACE_SECONDS = 8;
+    protected const PROCESS_EXIT_WARN_AFTER_SECONDS = 60;
+    protected const PROCESS_EXIT_WARN_INTERVAL_SECONDS = 60;
 
     protected array $processList = [];
     protected array $pidList = [];
@@ -117,12 +119,12 @@ class SubProcessManager {
         }
         while (true) {
             if (!Runtime::instance()->serverIsAlive()) {
-                $this->drainManagedProcesses();
+                $this->drainManagedProcesses($this->managedProcessDrainGraceSeconds());
                 break;
             }
             while ($ret = Process::wait(false)) {
                 if (!Runtime::instance()->serverIsAlive()) {
-                    $this->drainManagedProcesses();
+                    $this->drainManagedProcesses($this->managedProcessDrainGraceSeconds());
                     break;
                 }
                 $pid = $ret['pid'];
@@ -169,7 +171,9 @@ class SubProcessManager {
     }
 
     protected function drainManagedProcesses(int $graceSeconds = self::PROCESS_EXIT_GRACE_SECONDS): void {
-        $deadline = microtime(true) + max(1, $graceSeconds);
+        $startedAt = microtime(true);
+        $deadline = $startedAt + max(1, $graceSeconds);
+        $nextWarnAt = $startedAt + self::PROCESS_EXIT_WARN_AFTER_SECONDS;
         do {
             while ($ret = Process::wait(false)) {
                 $pid = (int)($ret['pid'] ?? 0);
@@ -181,6 +185,15 @@ class SubProcessManager {
             $remaining = $this->aliveManagedProcesses();
             if (!$remaining) {
                 return;
+            }
+
+            $now = microtime(true);
+            if ($now >= $nextWarnAt) {
+                $elapsed = max(1, (int)floor($now - $startedAt));
+                foreach ($remaining as $name => $pid) {
+                    Console::warning("【{$name}】子进程#{$pid}仍在等待平滑退出({$elapsed}s)");
+                }
+                $nextWarnAt += self::PROCESS_EXIT_WARN_INTERVAL_SECONDS;
             }
 
             usleep(200000);
@@ -233,6 +246,16 @@ class SubProcessManager {
         }
 
         return $alive;
+    }
+
+    protected function managedProcessDrainGraceSeconds(): int {
+        if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
+            return max(
+                \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS,
+                (int)(Config::server()['proxy_upstream_shutdown_timeout'] ?? \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
+            );
+        }
+        return self::PROCESS_EXIT_GRACE_SECONDS;
     }
 
     protected function triggerShutdown(): void {
@@ -322,6 +345,8 @@ class SubProcessManager {
     }
 
     public function shutdown(): void {
+        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
         //Process::kill($this->consolePushProcess->pid, SIGTERM);
         $this->consolePushProcess?->write('shutdown');
         foreach ($this->processList as $process) {
@@ -330,6 +355,12 @@ class SubProcessManager {
             //$process->exit();
             //Process::kill($process->pid, SIGTERM);
         }
+    }
+
+    public function quiesceBusinessProcesses(): void {
+        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
+        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
+        $this->sendCommand('upgrade', [], ['CrontabManager', 'RedisQueue']);
     }
 
     public function sendCommand($cmd, array $params = [], ?array $targets = null): void {
@@ -385,6 +416,10 @@ class SubProcessManager {
         return false;
     }
 
+    protected function shouldPushManagedLifecycleLog(): bool {
+        return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
+    }
+
     /**
      * 控制台消息推送socket
      * @return Process
@@ -416,7 +451,7 @@ class SubProcessManager {
                                 ]]));
                             } elseif ($msg == 'shutdown') {
                                 $masterSocket->close();
-                                Console::error('【ConsolePush】管理进程退出,结束推送', false);
+                                Console::warning('【ConsolePush】管理进程退出,结束推送', false);
                                 MemoryMonitor::stop();
                                 return;
                             }
@@ -439,13 +474,18 @@ class SubProcessManager {
             }
             Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
             define('IS_REDIS_QUEUE_PROCESS', true);
+            $quiescing = false;
             while (true) {
+                if (!Runtime::instance()->serverIsAlive()) {
+                    Console::warning("【RedisQueue】服务器已关闭,结束运行");
+                    break;
+                }
                 if (!Runtime::instance()->serverIsReady()) {
                     sleep(1);
                     continue;
                 }
                 $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-                if (!Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive()) {
+                if (!$quiescing && !Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive() && !Runtime::instance()->serverIsDraining()) {
                     $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
                     Runtime::instance()->redisQueueProcessStatus(true);
                     RQueue::startProcess();
@@ -453,12 +493,14 @@ class SubProcessManager {
                 Runtime::instance()->redisQueueProcessStatus(false);
                 $cmd = $process->read();
                 if ($cmd == 'shutdown') {
-                    Console::error("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
+                    Console::warning("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
                     break;
-                } else {
-                    Console::warning("【RedisQueue】#{$managerId}管理进程已迭代,重新创建进程");
-                    sleep(1);
                 }
+                if ($cmd !== '') {
+                    $quiescing = true;
+                    Console::warning("【RedisQueue】#{$managerId} 管理进程进入迭代排空,停止接新任务");
+                }
+                sleep(1);
             }
         });
     }
@@ -476,13 +518,14 @@ class SubProcessManager {
             }
             Console::info("【Crontab】排程任务管理PID:" . $process->pid, false);
             define('IS_CRONTAB_PROCESS', true);
+            $quiescing = false;
             while (true) {
                 if (!Runtime::instance()->serverIsReady()) {
                     sleep(1);
                     continue;
                 }
                 $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-                if (!Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive()) {
+                if (!$quiescing && !Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive() && !Runtime::instance()->serverIsDraining()) {
                     $taskList = CrontabManager::start();
                     Runtime::instance()->crontabProcessStatus(true);
                     if ($taskList) {
@@ -519,7 +562,7 @@ class SubProcessManager {
                     }
                 }
                 $shouldExit = false;
-                run(function () use ($process, $managerId, &$shouldExit) {
+                run(function () use ($process, $managerId, &$shouldExit, &$quiescing) {
                     $socket = $process->exportSocket();
                     $msg = $socket->recv(timeout: 5);
                     if ($msg) {
@@ -529,6 +572,8 @@ class SubProcessManager {
                             Console::log("【Crontab】#{$managerId} 收到命令:" . Color::cyan($command));
                             switch ($command) {
                                 case 'upgrade':
+                                    $quiescing = true;
+                                    Console::warning("【Crontab】#{$managerId} 管理进程进入迭代排空,停止接新任务");
                                 case 'shutdown':
                                     Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
                                     Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
@@ -545,7 +590,7 @@ class SubProcessManager {
                     unset($socket);
                 });
                 if ($shouldExit) {
-                    Console::error("【Crontab】服务器已关闭,结束运行", false);
+                    Console::warning("【Crontab】服务器已关闭,结束运行", $this->shouldPushManagedLifecycleLog());
                     break;
                 }
             }
@@ -591,7 +636,7 @@ class SubProcessManager {
                                 $expectedShutdown = true;
                                 Timer::clearAll();
                                 MemoryMonitor::stop();
-                                Console::error("【MemoryMonitor】收到 shutdown，安全退出", false);
+                                Console::warning("【MemoryMonitor】收到shutdown,安全退出", $this->shouldPushManagedLifecycleLog());
                                 return;
                             }
                             // 2) 执行一次完整统计
@@ -708,7 +753,7 @@ class SubProcessManager {
                 $node->ip = SERVER_HOST;
                 $node->fingerprint = APP_FINGERPRINT;
                 $node->port = Runtime::instance()->httpPort();
-                $node->socketPort = Runtime::instance()->httpPort();
+                $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
                 $node->started = time();
                 $node->restart_times = 0;
                 $node->master_pid = $this->server->master_pid;
@@ -829,13 +874,14 @@ class SubProcessManager {
                 if ($clearCount) {
                     Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
                 }
+                
                 $sock = $process->exportSocket();
                 while (true) {
                     $cmd = $sock->recv(timeout: 0.1);
                     if ($cmd == 'shutdown') {
                         Timer::clearAll();
                         MemoryMonitor::stop();
-                        Console::error("【LogBackup】管理进程退出,结束备份", false);
+                        Console::warning("【LogBackup】管理进程退出,结束备份", false);
                         return;
                     }
                     if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
@@ -908,7 +954,7 @@ class SubProcessManager {
                         $expectedShutdown = true;
                         Timer::clearAll();
                         MemoryMonitor::stop();
-                        Console::error("【FileWatcher】管理进程退出,结束监听", false);
+                        Console::warning("【FileWatcher】管理进程退出,结束监听", false);
                         return;
                     }
                     $changed = false;

@@ -172,7 +172,8 @@ abstract class Server {
      * @param string $str
      */
     public function log(string $str): void {
-        Console::info("【Server】" . $str, false);
+        $push = defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
+        Console::info("【Server】" . $str, $push);
     }
 
     /**
@@ -185,6 +186,14 @@ abstract class Server {
             return self::getUseablePort($port + 1);
         }
         return $port;
+    }
+
+    /**
+     * 检查 TCP 端口是否存在真实监听进程
+     * 仅用于启动前等待/平滑重启等待，避免把 CLOSED/TIME_WAIT 误判成占用。
+     */
+    public static function isListeningPortInUse(int $port): bool {
+        return self::findPidsByPort($port) !== [];
     }
 
     /**

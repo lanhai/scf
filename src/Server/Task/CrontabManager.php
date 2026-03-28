@@ -370,6 +370,20 @@ class CrontabManager {
         return $list;
     }
 
+    public static function busyCount(): int {
+        $tasks = CrontabTable::instance()->rows();
+        if (!$tasks) {
+            return 0;
+        }
+        $count = 0;
+        foreach ($tasks as $task) {
+            if ((int)($task['is_busy'] ?? 0) === 1) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
     public static function status($namespace): array {
         try {
             $crontab = self::copyInstance($namespace);

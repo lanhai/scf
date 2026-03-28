@@ -42,7 +42,13 @@ class WorkerListener extends Listener {
                 case E_PARSE :
                 case E_CORE_ERROR :
                 case E_COMPILE_ERROR :
-                    Log::instance()->error("Worker#" . ($workerId + 1) . " 发生致命错误" . $error['message']);
+                    $message = "Worker#" . ($workerId + 1) . " 发生致命错误" . ($error['message'] ?? '');
+                    Console::error($message, false);
+                    @file_put_contents(
+                        APP_LOG_PATH . '/error.log',
+                        date('m-d H:i:s') . '.' . substr((string)(microtime(true) * 1000), -3) . ' ' . $message . PHP_EOL,
+                        FILE_APPEND
+                    );
                     break;
             }
         });
@@ -74,6 +80,9 @@ class WorkerListener extends Listener {
             }
             Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
+            if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
+                \Scf\Server\Http::instance()->startLocalIpcServer();
+            }
             $info = <<<INFO
 ---------Workers启动完成---------
 应用版本：{$version}
@@ -99,5 +108,11 @@ INFO;
     }
 
     protected function onWorkerStop(Server $server, $workerId): void {
+        if ($workerId === 0 && defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
+            try {
+                \Scf\Server\Http::instance()->stopLocalIpcServer();
+            } catch (Throwable) {
+            }
+        }
     }
 }

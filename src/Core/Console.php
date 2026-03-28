@@ -21,6 +21,14 @@ class Console {
     protected static string $enablePushKey = 'CONSOLE_LOG_PUSH_ENABLE';
     protected static $pushHandler = null;
 
+    protected static function currentTimestamp(): string {
+        return date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3);
+    }
+
+    public static function timestamp(): string {
+        return self::currentTimestamp();
+    }
+
     protected static function shouldPushConsole(): bool {
         if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
             return true;
@@ -32,6 +40,24 @@ class Console {
             return true;
         }
         return defined('IS_HTTP_SERVER') && IS_HTTP_SERVER;
+    }
+
+    protected static function shouldGrayOldInstanceOutput(): bool {
+        return defined('PROXY_UPSTREAM_MODE')
+            && PROXY_UPSTREAM_MODE === true
+            && Runtime::instance()->serverIsDraining();
+    }
+
+    protected static function oldProxyInstanceId(): string {
+        $port = (int)(Runtime::instance()->httpPort() ?: 0);
+        if ($port > 0) {
+            return "U{$port}";
+        }
+        return defined('APP_NODE_ID') ? ('U' . APP_NODE_ID) : 'U';
+    }
+
+    protected static function applyTerminalGray(string $str): string {
+        return "\033[90m{$str}\e[0m";
     }
 
     /**
@@ -233,26 +259,32 @@ class Console {
      * @param null $color
      */
     public static function log(string $str, bool $push = true, $color = null): void {
+        $timestamp = self::currentTimestamp();
         if ($push && self::shouldPushConsole() && defined('APP_ID') && Runtime::instance()->get(self::$enablePushKey) == STATUS_ON) {
             try {
-                $time = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3);
                 $message = Log::filter($str);
                 if (is_callable(self::$pushHandler)) {
-                    (self::$pushHandler)($time, $message);
+                    (self::$pushHandler)($timestamp, $message);
                 } else {
-                    Http::instance()->pushConsoleLog($time, $message);
+                    Http::instance()->pushConsoleLog($timestamp, $message);
                 }
             } catch (Throwable $e) {
                 Console::warning("控制台消息推送失败:" . $e->getMessage(), false);
             }
         }
         if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
-            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . Color::notice("【Server】") . $str . "\n";
+            $str = $timestamp . Color::notice("【Server】") . $str . "\n";
         } else {
-            if ($color) {
-                $str = Color::$color($str);
+            if (self::shouldGrayOldInstanceOutput()) {
+                $prefix = '#' . self::oldProxyInstanceId() . ' ';
+                $body = self::applyTerminalGray($prefix . $str);
+            } else {
+                $body = $str;
             }
-            $str = date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3) . " " . $str . "\n";
+            if (!self::shouldGrayOldInstanceOutput() && $color) {
+                $body = Color::$color($body);
+            }
+            $str = $timestamp . " " . $body . "\n";
         }
         echo $str;
         //fwrite(STDOUT, $str);
