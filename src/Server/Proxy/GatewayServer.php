@@ -2581,16 +2581,16 @@ class GatewayServer {
                 $this->scheduleGatewayShutdown(true);
                 return true;
             case 'appoint_update':
-                $taskId = (string)($params['task_id'] ?? '');
-                $type = (string)($params['type'] ?? '');
-                $version = (string)($params['version'] ?? '');
-                $result = $this->dashboardUpdate($type, $version);
-                if ($result->hasError()) {
-                    $socket->push("【" . SERVER_HOST . "】版本更新任务投递失败:{$type} => {$version},原因:" . $result->getMessage());
-                } else {
-                    $socket->push("【" . SERVER_HOST . "】版本更新任务已开始:{$type} => {$version}");
-                }
-                return true;
+                // slave 收到 master 转发的 appoint_update 时，不能在 cluster 协调进程里
+                // 再走一遍 dashboardUpdate()。那条入口会把当前节点当成“发起升级的 gateway”，
+                // 重新进入 dispatch_cluster/accepted 状态机，日志里就会出现
+                // `stage=dispatch_cluster, slaves=0`，同时真正的本地升级执行链反而被绕开。
+                //
+                // 这里显式回退给 SubProcessManager 的内置 appoint_update 分支处理，由它统一：
+                // 1. 转交 GatewayBusinessCoordinator 执行本地升级；
+                // 2. 在 slave 本机完成 rolling upstream / 业务子进程迭代；
+                // 3. 把 running/success/failed/pending 回报给 master。
+                return false;
             default:
                 return false;
         }
