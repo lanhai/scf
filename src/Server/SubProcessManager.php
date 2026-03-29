@@ -1051,11 +1051,14 @@ class SubProcessManager {
                     $params = (array)($payload['params'] ?? []);
                     $requestId = (string)($params['request_id'] ?? '');
                     unset($params['request_id']);
+                    Console::info("【GatewayBusiness】收到业务编排命令: command={$command}" . ($requestId !== '' ? ", request_id={$requestId}" : ''), false);
                     $result = $this->executeGatewayBusinessCommand($command, $params);
+                    Console::info("【GatewayBusiness】业务编排命令执行完成: command={$command}" . ($requestId !== '' ? ", request_id={$requestId}" : '') . ", ok=" . (!empty($result['ok']) ? 'yes' : 'no') . ", message=" . (string)($result['message'] ?? ''), false);
                     if ($requestId !== '') {
                         $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
                         Runtime::instance()->delete($resultKey);
                         Runtime::instance()->set($resultKey, $result);
+                        Console::info("【GatewayBusiness】业务编排结果已写回: command={$command}, request_id={$requestId}, result_key={$resultKey}", false);
                     }
                 }
             });

@@ -171,7 +171,7 @@ class Framework implements CommandInterface {
         $phar->setDefaultStub('version.php', 'version.php');
         $localFile = $buildDir . "/" . $version . ".update";
         exec('mv ' . $buildFilePath . ' ' . $localFile);
-        exec('cp ' . $localFile . ' ' . SCF_ROOT . "/build/src.pack");
+        $this->replaceRuntimeSourcePack($localFile, SCF_ROOT . "/build/src.pack");
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
             'build' => date('Y-m-d H:i:s'),
@@ -212,6 +212,41 @@ class Framework implements CommandInterface {
         unlink($localFile);
         if (!File::write($versionFile, $versionFileContent)) {
             Console::log('本地版本文件还原写入失败:' . $versionFile);
+        }
+    }
+
+    /**
+     * 将新构建的框架包原子替换到运行时 src.pack。
+     *
+     * 这里不能直接原地 cp 覆盖目标文件。运行中的网关/子进程会通过
+     * phar://.../build/src.pack 读取框架代码，若复制过程中读取到半写状态，
+     * 就会出现随机的 parse error。先复制到目标目录内的临时文件，再 rename
+     * 到正式文件，才能保证读者只能看到旧包或完整新包。
+     *
+     * @param string $sourcePack 新构建完成的框架包
+     * @param string $targetPack 当前运行时使用的 src.pack
+     * @return void
+     */
+    protected function replaceRuntimeSourcePack(string $sourcePack, string $targetPack): void {
+        $targetDir = dirname($targetPack);
+        if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true) && !is_dir($targetDir)) {
+            Console::log('运行时包目录创建失败:' . $targetDir);
+            exit();
+        }
+        $tempPack = $targetPack . '.tmp.' . getmypid();
+        if (file_exists($tempPack)) {
+            @unlink($tempPack);
+        }
+        // 先在目标目录内写入完整临时包，避免读到半写状态。
+        if (!copy($sourcePack, $tempPack)) {
+            Console::log('运行时包临时写入失败:' . $tempPack);
+            exit();
+        }
+        // 同目录 rename 在同一文件系统内是原子的，读者只能看到旧包或完整新包。
+        if (!@rename($tempPack, $targetPack)) {
+            @unlink($tempPack);
+            Console::log('运行时包原子替换失败:' . $targetPack);
+            exit();
         }
     }
 

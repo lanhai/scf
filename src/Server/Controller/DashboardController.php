@@ -33,6 +33,7 @@ use Scf\Util\Date;
 use Scf\Util\Des;
 use Scf\Util\File;
 use Scf\Util\Random;
+use Swoole\Coroutine;
 use Throwable;
 
 class DashboardController extends Controller {
@@ -587,6 +588,45 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionUpdateDashboard(): Result {
+        if ((bool)(Runtime::instance()->get('_DASHBOARD_UPDATE_RUNNING_') ?? false)) {
+            return Result::success([
+                'accepted' => true,
+                'message' => '面板升级任务已在执行',
+            ]);
+        }
+        Runtime::instance()->set('_DASHBOARD_UPDATE_RUNNING_', true);
+        Coroutine::create(function (): void {
+            try {
+                $result = $this->performDashboardUpdate();
+                if ($result->hasError()) {
+                    Console::warning('【Dashboard】面板升级失败:' . $result->getMessage(), false);
+                    return;
+                }
+                $message = is_array($result->getData())
+                    ? JsonHelper::toJson($result->getData())
+                    : (string)($result->getData() ?: $result->getMessage());
+                Console::success('【Dashboard】' . $message, false);
+            } catch (Throwable $throwable) {
+                Console::warning('【Dashboard】面板升级异常:' . $throwable->getMessage(), false);
+            } finally {
+                Runtime::instance()->delete('_DASHBOARD_UPDATE_RUNNING_');
+            }
+        });
+        return Result::success([
+            'accepted' => true,
+            'message' => '面板升级任务已开始',
+        ]);
+    }
+
+    /**
+     * 实际执行 dashboard 前端资源包升级。
+     *
+     * HTTP 入口只负责投递任务，这里保留原有同步升级逻辑，
+     * 由后台协程继续完成下载、解压和版本文件更新。
+     *
+     * @return Result
+     */
+    protected function performDashboardUpdate(): Result {
         $dashboardDir = SCF_ROOT . '/build/public/dashboard';
         $versionJson = $dashboardDir . '/version.json';
         if (!file_exists($versionJson)) {

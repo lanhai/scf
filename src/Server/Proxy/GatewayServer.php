@@ -914,12 +914,14 @@ class GatewayServer {
     protected function waitForGatewayBusinessCommandResult(string $requestId, int $timeoutSeconds = 30): Result {
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+        Console::info("【Gateway】等待业务编排结果: request_id={$requestId}, timeout={$timeoutSeconds}s");
         while (microtime(true) < $deadline) {
             $payload = Runtime::instance()->get($resultKey);
             if (is_array($payload) && array_key_exists('ok', $payload)) {
                 Runtime::instance()->delete($resultKey);
                 $message = (string)($payload['message'] ?? ($payload['ok'] ? 'success' : 'failed'));
                 $data = (array)($payload['data'] ?? []);
+                Console::info("【Gateway】收到业务编排结果: request_id={$requestId}, ok=" . (!empty($payload['ok']) ? 'yes' : 'no') . ", message={$message}");
                 return !empty($payload['ok'])
                     ? Result::success($data ?: $message)
                     : Result::error($message, 'SERVICE_ERROR', $data);
@@ -927,6 +929,7 @@ class GatewayServer {
             usleep(100000);
         }
         Runtime::instance()->delete($resultKey);
+        Console::warning("【Gateway】业务编排结果等待超时: request_id={$requestId}, timeout={$timeoutSeconds}s");
         return Result::error('Gateway 业务编排子进程执行超时');
     }
 
@@ -958,12 +961,37 @@ class GatewayServer {
             $requestId = uniqid('gateway_business_', true);
             Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
             $params['request_id'] = $requestId;
+            Console::info("【Gateway】投递业务编排命令: command={$command}, request_id={$requestId}, wait=yes, timeout={$timeoutSeconds}s");
+        } else {
+            Console::info("【Gateway】投递业务编排命令: command={$command}, wait=no");
         }
         $this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator']);
         if (!$waitForResult) {
             return Result::success($acceptedMessage ?: 'accepted');
         }
         return $this->waitForGatewayBusinessCommandResult($requestId, $timeoutSeconds);
+    }
+
+    /**
+     * 异步投递一条 gateway 业务编排命令，并返回共享内存 request_id。
+     *
+     * 升级类命令会在后台继续推进本地包替换、rolling upstream、节点汇总与重启收口，
+     * HTTP 入口只负责接受任务，不能再同步把整条长链绑定在请求超时上。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @return string|false 投递成功时返回 request_id，失败返回 false
+     */
+    protected function dispatchGatewayBusinessCommandAsync(string $command, array $params = []): string|false {
+        if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('GatewayBusinessCoordinator')) {
+            return false;
+        }
+        $requestId = uniqid('gateway_business_', true);
+        Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
+        $params['request_id'] = $requestId;
+        Console::info("【Gateway】异步投递业务编排命令: command={$command}, request_id={$requestId}");
+        $this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator']);
+        return $requestId;
     }
 
     /**
@@ -1069,78 +1097,139 @@ class GatewayServer {
             ]);
         }
 
-        $this->logUpdateStage($taskId, $type, $version, 'apply_local_package');
-        $localResult = $this->dispatchGatewayBusinessCommand('appoint_update', [
+        $this->emitLocalNodeUpdateState($taskId, $type, $version, 'running', "【" . SERVER_HOST . "】开始更新 {$type} => {$version}");
+        $requestId = $this->dispatchGatewayBusinessCommandAsync('appoint_update', [
             'task_id' => $taskId,
             'type' => $type,
             'version' => $version,
-        ], true, self::DASHBOARD_UPDATE_LOCAL_TIMEOUT_SECONDS);
-        $localData = (array)($localResult->getData() ?: []);
-        if ($localResult->hasError() && !$localData) {
-            $error = (string)($localResult->getMessage() ?: '更新失败');
+        ]);
+        if ($requestId === false) {
+            $error = 'Gateway 业务编排子进程未启用';
             $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
             Console::error("【Gateway】升级失败: type={$type}, version={$version}, error={$error}");
             return Result::error($error);
         }
-        $restartSummary = (array)($localData['restart_summary'] ?? [
-            'success_count' => 0,
-            'failed_nodes' => [],
+
+        Coroutine::create(function () use ($requestId, $taskId, $type, $version, $slaveHosts): void {
+            $localResult = $this->waitForGatewayBusinessCommandResult($requestId, self::DASHBOARD_UPDATE_LOCAL_TIMEOUT_SECONDS);
+            $localData = (array)($localResult->getData() ?: []);
+            if ($localResult->hasError() && !$localData) {
+                $error = (string)($localResult->getMessage() ?: '更新失败');
+                $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
+                $this->emitLocalNodeUpdateState($taskId, $type, $version, 'failed', "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}", $error);
+                Console::error("【Gateway】升级失败: type={$type}, version={$version}, error={$error}");
+                return;
+            }
+
+            $restartSummary = (array)($localData['restart_summary'] ?? [
+                'success_count' => 0,
+                'failed_nodes' => [],
+            ]);
+            if (!empty($localData['iterate_business_processes']) && !$localResult->hasError()) {
+                $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
+                $this->iterateGatewayBusinessProcesses();
+            }
+
+            $this->logUpdateStage($taskId, $type, $version, 'wait_cluster_result');
+            $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, self::DASHBOARD_UPDATE_CLUSTER_TIMEOUT_SECONDS);
+            $pendingHosts = [];
+            $masterState = (string)($localData['master']['state'] ?? ($localResult->hasError() ? 'failed' : 'success'));
+            $masterError = (string)($localData['master']['error'] ?? ($localResult->hasError() ? (string)$localResult->getMessage() : ''));
+            $totalNodes = max(1, count($slaveHosts) + 1);
+            if ($masterState === 'pending') {
+                $pendingHosts[] = SERVER_HOST;
+            }
+
+            $payload = [
+                'task_id' => $taskId,
+                'type' => $type,
+                'version' => $version,
+                'total_nodes' => $totalNodes,
+                'success_count' => $summary['success'] + ($masterState === 'success' ? 1 : 0),
+                'failed_count' => count($summary['failed_nodes']) + count($restartSummary['failed_nodes']) + ($masterState === 'failed' ? 1 : 0),
+                'pending_count' => count($summary['pending_hosts']) + count($pendingHosts),
+                'failed_nodes' => array_merge($summary['failed_nodes'], $restartSummary['failed_nodes']),
+                'pending_hosts' => array_merge($summary['pending_hosts'], $pendingHosts),
+                'master' => [
+                    'host' => SERVER_HOST,
+                    'state' => $masterState,
+                    'error' => $masterError,
+                ],
+            ];
+            $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
+            $this->pushDashboardStatus();
+            if ($payload['failed_nodes']) {
+                Console::warning("【Gateway】升级完成但存在失败实例: type={$type}, version={$version}, success={$payload['success_count']}, failed=" . count($payload['failed_nodes']));
+            } else {
+                Console::success("【Gateway】升级完成: type={$type}, version={$version}, success={$payload['success_count']}");
+            }
+            $this->logUpdateStage($taskId, $type, $version, 'completed', [
+                'success' => (int)$payload['success_count'],
+                'failed' => (int)$payload['failed_count'],
+                'pending' => (int)$payload['pending_count'],
+            ]);
+
+            if ($payload['failed_nodes']) {
+                $error = $masterError !== '' ? $masterError : '部分节点升级失败';
+                $this->emitLocalNodeUpdateState($taskId, $type, $version, 'failed', "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}", $error);
+                return;
+            }
+
+            if ($masterState === 'pending') {
+                $this->emitLocalNodeUpdateState($taskId, $type, $version, 'pending', "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}");
+                Timer::after(200, function (): void {
+                    $this->scheduleGatewayShutdown(true);
+                });
+                return;
+            }
+
+            $this->emitLocalNodeUpdateState($taskId, $type, $version, 'success', "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}");
+        });
+
+        $this->logUpdateStage($taskId, $type, $version, 'accepted', [
+            'slaves' => count($slaveHosts),
         ]);
-        if (!empty($localData['iterate_business_processes']) && !$localResult->hasError()) {
-            $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
-            $this->iterateGatewayBusinessProcesses();
-        }
-
-        $this->logUpdateStage($taskId, $type, $version, 'wait_cluster_result');
-        $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, self::DASHBOARD_UPDATE_CLUSTER_TIMEOUT_SECONDS);
-        $pendingHosts = [];
-        $masterState = (string)($localData['master']['state'] ?? ($localResult->hasError() ? 'failed' : 'success'));
-        $masterError = (string)($localData['master']['error'] ?? ($localResult->hasError() ? (string)$localResult->getMessage() : ''));
-        $totalNodes = max(1, count($slaveHosts) + 1);
-        if ($masterState === 'pending') {
-            $pendingHosts[] = SERVER_HOST;
-        }
-
-        $payload = [
+        return Result::success([
+            'accepted' => true,
             'task_id' => $taskId,
             'type' => $type,
             'version' => $version,
-            'total_nodes' => $totalNodes,
-            'success_count' => $summary['success'] + ($masterState === 'success' ? 1 : 0),
-            'failed_count' => count($summary['failed_nodes']) + count($restartSummary['failed_nodes']) + ($masterState === 'failed' ? 1 : 0),
-            'pending_count' => count($summary['pending_hosts']) + count($pendingHosts),
-            'failed_nodes' => array_merge($summary['failed_nodes'], $restartSummary['failed_nodes']),
-            'pending_hosts' => array_merge($summary['pending_hosts'], $pendingHosts),
-            'master' => [
-                'host' => SERVER_HOST,
-                'state' => $masterState,
-                'error' => $masterError,
-            ],
-        ];
-        $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
-
-        $this->pushDashboardStatus();
-        if ($payload['failed_nodes']) {
-            Console::warning("【Gateway】升级完成但存在失败实例: type={$type}, version={$version}, success={$payload['success_count']}, failed=" . count($payload['failed_nodes']));
-        } else {
-            Console::success("【Gateway】升级完成: type={$type}, version={$version}, success={$payload['success_count']}");
-        }
-        $this->logUpdateStage($taskId, $type, $version, 'completed', [
-            'success' => (int)$payload['success_count'],
-            'failed' => (int)$payload['failed_count'],
-            'pending' => (int)$payload['pending_count'],
+            'message' => '升级任务已开始，请留意节点状态',
+            'slave_count' => count($slaveHosts),
         ]);
-        // framework 升级只是在本地落下新的 update.pack，必须显式重启 gateway 控制面，
-        // boot 才会把新包切成当前生效版本。这里沿用“仅重启控制面、保留业务 upstream”的收口方式。
-        if ($masterState === 'pending') {
-            Timer::after(200, function (): void {
-                $this->scheduleGatewayShutdown(true);
-            });
-        }
-        if ($payload['failed_nodes']) {
-            return Result::error('部分节点升级失败', 'SERVICE_ERROR', $payload);
-        }
-        return Result::success($payload);
+    }
+
+    /**
+     * 向 dashboard 广播本机 master 的升级状态。
+     *
+     * slave 节点是通过 websocket 把 `node_update_state` 回传给 master；
+     * 本机 master 不会经过这条链，因此升级入口改成异步后，需要在本机
+     * 主动补发同结构事件，保证 dashboard 仍能看到 running/success/failed/pending。
+     *
+     * @param string $taskId 升级任务 id
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @param string $state running/success/failed/pending
+     * @param string $message 展示给 dashboard 的消息
+     * @param string $error 失败时的错误文案
+     * @return void
+     */
+    protected function emitLocalNodeUpdateState(string $taskId, string $type, string $version, string $state, string $message, string $error = ''): void {
+        $payload = [
+            'task_id' => $taskId,
+            'host' => APP_NODE_ID,
+            'type' => $type,
+            'version' => $version,
+            'state' => $state,
+            'message' => $message,
+            'error' => $error,
+            'updated_at' => time(),
+        ];
+        Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, APP_NODE_ID), $payload);
+        Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
+            'event' => 'node_update_state',
+            'data' => $payload,
+        ]));
     }
 
     /**
@@ -1164,8 +1253,10 @@ class GatewayServer {
             return Result::error('更新类型和版本号不能为空');
         }
         $taskId !== '' && $this->logUpdateStage($taskId, $type, $version, 'apply_local_package');
+        Console::info("【Gateway】开始执行本地升级: task={$taskId}, type={$type}, version={$version}");
         if (!App::appointUpdateTo($type, $version, false)) {
             $error = App::getLastUpdateError() ?: '更新失败';
+            Console::warning("【Gateway】本地升级失败: task={$taskId}, type={$type}, version={$version}, error={$error}");
             return Result::error($error, 'SERVICE_ERROR', [
                 'restart_summary' => [
                     'success_count' => 0,
@@ -1178,6 +1269,7 @@ class GatewayServer {
                 ],
             ]);
         }
+        Console::info("【Gateway】本地包应用完成: task={$taskId}, type={$type}, version={$version}");
 
         $restartSummary = [
             'success_count' => 0,
@@ -1185,7 +1277,9 @@ class GatewayServer {
         ];
         if ($type !== 'public') {
             $taskId !== '' && $this->logUpdateStage($taskId, $type, $version, 'rolling_upstreams');
+            Console::info("【Gateway】开始滚动升级业务实例: task={$taskId}, type={$type}, version={$version}");
             $restartSummary = $this->rollingUpdateManagedUpstreams($type, $version);
+            Console::info("【Gateway】滚动升级业务实例结束: task={$taskId}, success=" . (int)($restartSummary['success_count'] ?? 0) . ", failed=" . count((array)($restartSummary['failed_nodes'] ?? [])));
         }
         if ($type !== 'public' && $restartSummary['success_count'] > 0 && !$restartSummary['failed_nodes']) {
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
@@ -1207,6 +1301,7 @@ class GatewayServer {
         if ($restartSummary['failed_nodes']) {
             return Result::error('部分业务实例升级失败', 'SERVICE_ERROR', $payload);
         }
+        Console::success("【Gateway】本地升级执行完成: task={$taskId}, type={$type}, version={$version}, state={$master['state']}");
         return Result::success($payload);
     }
 
@@ -1964,51 +2059,11 @@ class GatewayServer {
                 $taskId = (string)($params['task_id'] ?? '');
                 $type = (string)($params['type'] ?? '');
                 $version = (string)($params['version'] ?? '');
-                $statePayload = [
-                    'event' => 'node_update_state',
-                    'data' => [
-                        'task_id' => $taskId,
-                        'host' => APP_NODE_ID,
-                        'type' => $type,
-                        'version' => $version,
-                        'updated_at' => time(),
-                    ]
-                ];
-                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                    'data' => [
-                        'state' => 'running',
-                        'message' => "【" . SERVER_HOST . "】开始更新 {$type} => {$version}",
-                    ]
-                ])));
-                $result = $this->dispatchGatewayBusinessCommand('appoint_update', [
-                    'task_id' => $taskId,
-                    'type' => $type,
-                    'version' => $version,
-                ], true, 300);
+                $result = $this->dashboardUpdate($type, $version);
                 if ($result->hasError()) {
-                    $resultData = (array)($result->getData() ?: []);
-                    $masterError = (string)($resultData['master']['error'] ?? '');
-                    $error = $masterError !== '' ? $masterError : (string)($result->getMessage() ?: '未知原因');
-                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                        'data' => [
-                            'state' => 'failed',
-                            'error' => $error,
-                            'message' => "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}",
-                            'updated_at' => time(),
-                        ]
-                    ])));
+                    $socket->push("【" . SERVER_HOST . "】版本更新任务投递失败:{$type} => {$version},原因:" . $result->getMessage());
                 } else {
-                    $resultData = (array)($result->getData() ?: []);
-                    $masterState = (string)($resultData['master']['state'] ?? 'success');
-                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                        'data' => [
-                            'state' => $masterState === 'pending' ? 'pending' : 'success',
-                            'message' => $masterState === 'pending'
-                                ? "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}"
-                                : "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}",
-                            'updated_at' => time(),
-                        ]
-                    ])));
+                    $socket->push("【" . SERVER_HOST . "】版本更新任务已开始:{$type} => {$version}");
                 }
                 return true;
             default:

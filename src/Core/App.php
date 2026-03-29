@@ -60,22 +60,28 @@ class App {
     public static function appointUpdateTo($type, $version, bool $autoReload = true): bool {
         self::$_lastUpdateError = null;
         try {
+            Console::info("【App】开始执行 appointUpdateTo: type={$type}, version={$version}, auto_reload=" . ($autoReload ? 'yes' : 'no'));
             $updater = Updater::instance();
             $updater->resetLastError();
             if ($updater->appointUpdateTo($type, $version)) {
                 if ($type == 'public') {
+                    Console::success("【App】appointUpdateTo 完成: type={$type}, version={$version}");
                     return true;
                 }
                 if ($autoReload) {
+                    Console::info("【App】appointUpdateTo 已完成，准备触发 reload: type={$type}, version={$version}");
                     self::scheduleUpdateReload($type);
                 }
+                Console::success("【App】appointUpdateTo 完成: type={$type}, version={$version}");
                 return true;
             }
             self::$_lastUpdateError = $updater->getLastError() ?: "更新失败:{$type} => {$version}";
+            Console::warning("【App】appointUpdateTo 失败: type={$type}, version={$version}, error=" . self::$_lastUpdateError);
             return false;
         } catch (Throwable $throwable) {
             self::$_lastUpdateError = $throwable->getMessage();
             Log::instance()->error('【Server】升级执行异常:' . $throwable->getMessage());
+            Console::warning("【App】appointUpdateTo 异常: type={$type}, version={$version}, error=" . self::$_lastUpdateError);
             return false;
         }
     }

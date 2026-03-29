@@ -59,6 +59,19 @@ class Updater {
     }
 
     /**
+     * 输出升级链路的细粒度步骤日志。
+     *
+     * 升级问题经常不是“最终成功/失败”两态，而是卡在版本查询、下载、解压、
+     * 原子替换或版本文件写回中的某一步。这里统一用一套前缀把每一步串起来。
+     *
+     * @param string $message 当前步骤说明
+     * @return void
+     */
+    protected function logUpdateStep(string $message): void {
+        Console::info('【updater】' . $message);
+    }
+
+    /**
      * 更新应用到最新版本
      * @param bool $isInstall
      * @return bool
@@ -83,6 +96,7 @@ class Updater {
      */
     public function changeAppVersion($version, bool $isInstall = false, ?string $appoint = 'all'): bool {
         $this->resetLastError();
+        $this->logUpdateStep("changeAppVersion start: version={$version}, install=" . ($isInstall ? 'yes' : 'no') . ", appoint={$appoint}");
         $requestedVersion = $this->normalizeVersion((string)$version);
         $result = $this->getRemoteVersionsRecord(true);
         if ($result->hasError()) {
@@ -97,10 +111,12 @@ class Updater {
             Log::instance()->error('【Server】升级失败:未查询到版本:' . $version);
             return false;
         }
+        $this->logUpdateStep("changeAppVersion matched version record: version=" . (string)($versionInfo['version'] ?? '') . ", has_app=" . (!empty($versionInfo['app_object']) ? 'yes' : 'no') . ", has_public=" . (!empty($versionInfo['public_object']) ? 'yes' : 'no'));
         return $this->applyVersionUpdate($versionInfo['version'], $appVersions, $versionInfo, $isInstall, $appoint);
     }
 
     protected function applyVersionUpdate(string $version, array $appVersions, array $versionInfo, bool $isInstall = false, ?string $appoint = 'all'): bool {
+        $this->logUpdateStep("applyVersionUpdate start: version={$version}, install=" . ($isInstall ? 'yes' : 'no') . ", appoint={$appoint}");
         $app = App::info();
         if (!is_null($appoint)) {
             //指定更新
@@ -158,16 +174,21 @@ class Updater {
                 $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
                 $publicStageDir = $this->createTemporaryPath(APP_UPDATE_DIR . '/public-stage-' . $version);
                 $this->prepareDirectory($publicStageDir);
+                $this->logUpdateStep("准备下载资源包: target={$publicFilePath}");
                 $this->downloadPackage($versionInfo, $versionInfo['public_object'], $publicFilePath, '资源包');
+                $this->logUpdateStep("开始解压资源包: source={$publicFilePath}, target={$publicStageDir}");
                 $this->extractZipArchive($publicFilePath, $publicStageDir, $app->app_auth_key);
                 if (!$this->directoryHasContent($publicStageDir)) {
                     throw new \RuntimeException('资源包解压后为空');
                 }
+                $this->logUpdateStep("资源包解压完成: target={$publicStageDir}");
             }
             if ($versionInfo['app_object']) {
                 $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
                 $appStageFile = $this->createTemporaryPath(APP_UPDATE_DIR . '/app-v' . $version . '.app');
+                $this->logUpdateStep("准备下载源码包: target={$updateFilePath}");
                 $this->downloadPackage($versionInfo, $versionInfo['app_object'], $updateFilePath, '源码包');
+                $this->logUpdateStep("开始读取源码包: source={$updateFilePath}");
                 $updateContent = File::read($updateFilePath);
                 if ($updateContent === false) {
                     throw new \RuntimeException('源码包读取失败');
@@ -179,16 +200,21 @@ class Updater {
                 if (!File::write($appStageFile, $code)) {
                     throw new \RuntimeException('更新写入失败');
                 }
+                $this->logUpdateStep("源码包解码完成: stage={$appStageFile}");
             }
             if ($appStageFile) {
+                $this->logUpdateStep("开始切换核心文件: target={$appFile}");
                 $appBackupFile = $this->replaceFileAtomically($appStageFile, $appFile);
                 $appStageFile = null;
                 $appUpdated = true;
+                $this->logUpdateStep("核心文件切换完成: target={$appFile}");
             }
             if ($publicStageDir) {
+                $this->logUpdateStep("开始切换资源目录: target=" . APP_PUBLIC_PATH);
                 $publicBackupDir = $this->replaceDirectoryAtomically($publicStageDir, APP_PUBLIC_PATH);
                 $publicStageDir = null;
                 $publicUpdated = true;
+                $this->logUpdateStep("资源目录切换完成: target=" . APP_PUBLIC_PATH);
             }
             if ($publicUpdated || $appUpdated) {
                 $installer = App::installer();
@@ -202,6 +228,7 @@ class Updater {
                 if (!$installer->update()) {
                     throw new \RuntimeException('更新版本配置文件失败');
                 }
+                $this->logUpdateStep("版本配置文件已更新: version={$version}, public_version={$publicVersion}");
                 if ($isInstall && !$installer->isInstalled()) {
                     throw new \RuntimeException('安装未完成: 应用核心文件未就绪');
                 }
@@ -213,9 +240,11 @@ class Updater {
             ];
             File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
             clearstatcache();
+            $this->logUpdateStep("applyVersionUpdate completed: version={$version}");
             return true;
         } catch (Throwable $e) {
             $this->setLastError($e->getMessage());
+            $this->logUpdateStep("applyVersionUpdate failed: version={$version}, error=" . $e->getMessage());
             if ($publicUpdated) {
                 if ($this->rollbackDirectory($publicBackupDir, APP_PUBLIC_PATH)) {
                     $publicBackupDir = null;
@@ -258,6 +287,7 @@ class Updater {
      */
     public function appointUpdateTo($type, $version): bool {
         $this->resetLastError();
+        $this->logUpdateStep("appointUpdateTo start: type={$type}, version={$version}");
         if ($type == 'framework') {
             $saveDir = SCF_ROOT . '/build';
             if (!is_dir($saveDir) && !mkdir($saveDir, 0775)) {
@@ -274,6 +304,7 @@ class Updater {
             }
             $remoteVersion = $remoteVersionResponse->getData();
             $updateFile = $saveDir . '/update.pack';
+            $this->logUpdateStep("开始下载框架升级包: url=" . (string)($remoteVersion['url'] ?? ''));
             $client = Http::create($remoteVersion['url']);
             $downloadResult = $client->download($updateFile, 1800);
             if ($downloadResult->hasError()) {
@@ -283,6 +314,7 @@ class Updater {
             }
             //下载引导文件
             $bootFile = SCF_ROOT . '/boot';
+            $this->logUpdateStep("开始下载框架引导文件: url=" . (string)($remoteVersion['boot'] ?? ''));
             $client = Http::create($remoteVersion['boot']);
             $downloadResult = $client->download($bootFile, 1800);
             if ($downloadResult->hasError()) {
@@ -318,6 +350,7 @@ class Updater {
             Console::warning("【updater】未匹配到版本记录:type={$type},version={$requestedVersion}");
             return false;
         }
+        $this->logUpdateStep("appointUpdateTo matched version: version=" . (string)($versionInfo['version'] ?? '') . ", type={$type}, has_app=" . (!empty($versionInfo['app_object']) ? 'yes' : 'no') . ", has_public=" . (!empty($versionInfo['public_object']) ? 'yes' : 'no'));
         if ($type == 'app' && !$versionInfo['app_object']) {
             $this->setLastError('未匹配到内核文件');
             Console::warning('【updater】未匹配到内核文件');
@@ -331,6 +364,7 @@ class Updater {
             Console::warning('【updater】更新失败');
             return false;
         }
+        $this->logUpdateStep("appointUpdateTo completed: type={$type}, version={$version}");
         return true;
     }
 
@@ -505,6 +539,7 @@ class Updater {
     protected function downloadPackage(array $versionInfo, string $remotePath, string $savePath, string $label): void {
         $host = $versionInfo['server'];
         $port = $versionInfo['port'] ?? 80;
+        $this->logUpdateStep("downloadPackage start: label={$label}, host={$host}, port={$port}, path={$remotePath}, save={$savePath}, timeout=" . self::PACKAGE_DOWNLOAD_TIMEOUT_SECONDS . "s");
         $client = new Client($host, $port, $port == 443);
         $client->set(['timeout' => self::PACKAGE_DOWNLOAD_TIMEOUT_SECONDS]);
         $client->setHeaders([
@@ -515,6 +550,7 @@ class Updater {
         ]);
         $client->download($remotePath, $savePath);
         $statusCode = $client->getStatusCode();
+        $this->logUpdateStep("downloadPackage response: label={$label}, status={$statusCode}, err=" . (string)($client->errMsg ?: ''));
         if ($statusCode !== 200) {
             $message = $client->errMsg ?: 'unknown error';
             throw new \RuntimeException($label . '下载失败:' . $message . '(' . $statusCode . ')');
@@ -522,6 +558,7 @@ class Updater {
         if (!file_exists($savePath) || filesize($savePath) <= 0) {
             throw new \RuntimeException($label . '下载失败:文件为空');
         }
+        $this->logUpdateStep("downloadPackage completed: label={$label}, bytes=" . (int)filesize($savePath));
     }
 
     protected function replaceFileAtomically(string $source, string $target): ?string {
