@@ -182,7 +182,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 ];
                 continue;
             }
-            Console::success("【Gateway】新业务实例已就绪(serverIsReady)，等待切换流量: " . $this->describePlan($newPlan));
+            Console::success("【Gateway】新业务实例已通过就绪探测，等待切换流量: " . $this->describePlan($newPlan));
 
             $this->registerManagedPlan($newPlan, false);
             $registeredPlans[] = $newPlan;
@@ -759,7 +759,6 @@ trait GatewayManagedUpstreamLifecycleTrait {
         if ($activate) {
             $this->instanceManager->activateVersion($version, 0);
             $this->notifyManagedUpstreamGenerationIterated($version);
-            $this->syncNginxProxyTargets('register_managed_plan_activate');
         }
         $this->bootstrappedManagedInstances[$version . '@' . $host . ':' . $port] = true;
     }
@@ -1037,7 +1036,11 @@ trait GatewayManagedUpstreamLifecycleTrait {
             }
         }
         if ($removedVersions) {
-            Console::success("【Gateway】旧业务实例代际已移除: count=" . count($removedVersions) . ", generations=" . implode(' | ', $removedVersions));
+            if ($this->startupSummaryPending()) {
+                $this->recordStartupRemovedGenerations($removedVersions);
+            } else {
+                Console::success("【Gateway】旧业务实例代际已移除: count=" . count($removedVersions) . ", generations=" . implode(' | ', $removedVersions));
+            }
         }
     }
 
@@ -1158,9 +1161,15 @@ trait GatewayManagedUpstreamLifecycleTrait {
             }
         }
         unset($this->pendingManagedRecycleWarnState[$key], $this->pendingManagedRecycles[$key], $this->pendingManagedRecycleCompletions[$key]);
-        Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
+        if (!$this->startupSummaryPending()) {
+            Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
+        }
         if ($removedGeneration !== '') {
-            Console::success("【Gateway】旧业务实例代际已移除: count=1, generations={$removedGeneration}");
+            if ($this->startupSummaryPending()) {
+                $this->recordStartupRemovedGenerations([$removedGeneration]);
+            } else {
+                Console::success("【Gateway】旧业务实例代际已移除: count=1, generations={$removedGeneration}");
+            }
         }
         $activeVersion = (string)($this->instanceManager->snapshot()['active_version'] ?? '');
         if ($activeVersion !== '') {

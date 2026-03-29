@@ -146,6 +146,44 @@ class GatewayNginxProxyHandler {
     }
 
     /**
+     * 返回适合日志摘要展示的 nginx 关键配置。
+     *
+     * 这里改成结构化数据而不是直接拼好的长句，方便 GatewayServer 按“路径/参数”
+     * 等分组输出，避免终端宽度稍窄时把整块日志折成难读的多段。
+     *
+     * @return array<string, string>
+     */
+    public function startupSummaryData(): array {
+        $runtimeMeta = $this->nginxRuntimeMeta();
+        $disableLogs = (bool)($this->gateway->serverConfig()['gateway_nginx_disable_global_logs'] ?? true);
+        $proxyConnectTimeout = max(1, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_connect_timeout'] ?? 3));
+        $proxyIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_io_timeout'] ?? 31536000));
+        $clientIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_client_io_timeout'] ?? $proxyIoTimeout));
+        $buffering = (bool)($this->gateway->serverConfig()['gateway_nginx_proxy_buffering'] ?? true);
+        $realIpHeader = trim((string)($this->gateway->serverConfig()['gateway_nginx_real_ip_header'] ?? 'X-Forwarded-For'));
+        $realIpRecursive = (bool)($this->gateway->serverConfig()['gateway_nginx_real_ip_recursive'] ?? true);
+        $trustedProxies = $this->trustedRealIpProxies();
+        $bodyBytes = (int)($this->gateway->serverConfig()['package_max_length'] ?? 10 * 1024 * 1024);
+
+        return [
+            'bin' => (string)($runtimeMeta['bin'] ?? 'nginx'),
+            'conf' => (string)($runtimeMeta['conf_path'] ?? '--'),
+            'dir' => (string)($runtimeMeta['conf_dir'] ?? '--'),
+            'body' => $this->formatBytes(max(0, $bodyBytes)) . ' (' . $this->clientMaxBodySizeDirectiveValue() . ')',
+            'proxy' => 'buffer:' . ($buffering ? 'on' : 'off')
+                . ', conn:' . $proxyConnectTimeout . 's'
+                . ', io:' . $proxyIoTimeout . 's'
+                . ', client:' . $clientIoTimeout . 's',
+            'log' => 'http:' . ($disableLogs ? 'off' : 'keep')
+                . ', error:' . ($disableLogs ? '/dev/null crit' : 'keep')
+                . ', static:off',
+            'realip' => ($realIpHeader !== '' ? $realIpHeader : '--')
+                . ', recursive:' . ($realIpRecursive ? 'on' : 'off')
+                . ', trusted:' . ($trustedProxies ? implode(',', $trustedProxies) : '--'),
+        ];
+    }
+
+    /**
      * 校验当前 nginx 生效配置里已经包含 gateway 生成的 include 文件。
      *
      * 这里使用 `nginx -T` 读取当前完整配置展开结果。如果这些文件没有出现在
@@ -306,6 +344,7 @@ class GatewayNginxProxyHandler {
         $controlName = $this->controlUpstreamName();
         $defaultUpstream = $this->shouldRouteBusinessTrafficToControlPlane() ? $controlName : $businessName;
         $upgradeMapVar = '$' . $this->safeToken('scf_gateway_connection_upgrade_' . APP_DIR_NAME . '_' . SERVER_ROLE . '_' . $listenPort);
+        $clientMaxBodySize = $this->clientMaxBodySizeDirectiveValue();
         $realIpHeader = trim((string)($this->gateway->serverConfig()['gateway_nginx_real_ip_header'] ?? 'X-Forwarded-For'));
         $realIpRecursive = (bool)($this->gateway->serverConfig()['gateway_nginx_real_ip_recursive'] ?? true);
         $trustedProxies = $this->trustedRealIpProxies();
@@ -333,6 +372,10 @@ class GatewayNginxProxyHandler {
             'server {',
             '    listen ' . $listenPort . ';',
             '    server_name ' . $serverName . ';',
+            // Gateway 入口最终仍由应用 HTTP 服务接收请求体，因此这里把 nginx 的
+            // body 限制对齐到应用 server 配置，避免入口层和业务进程对“大请求”
+            // 的判定不一致，出现 nginx 已拦截或后端已断开其中一层先失败的情况。
+            '    client_max_body_size ' . $clientMaxBodySize . ';',
             // gateway 往往监听在 9580 这类内部端口，外层再由公网域名反代接管。
             // 一旦 nginx 在这个 server 块里自己生成绝对重定向（目录补斜杠、规范化等），
             // 浏览器就会被带到 `host:9580`。这里统一关闭绝对跳转和端口拼接，让任何
@@ -552,6 +595,47 @@ class GatewayNginxProxyHandler {
     }
 
     /**
+     * 计算写入 nginx `client_max_body_size` 的值。
+     *
+     * gateway 入口最终转发给同一套应用 HTTP 服务处理，因此这里直接复用应用
+     * `server.php` 的 `package_max_length` 作为请求体上限。这样可以让 nginx 与
+     * 后端 Swoole 对允许的最大请求体保持一致，避免两层限制不一致导致排障困难。
+     *
+     * @return string nginx 可接受的大小文本，默认返回字节数；0 表示不限制。
+     */
+    protected function clientMaxBodySizeDirectiveValue(): string {
+        $packageMaxLength = (int)($this->gateway->serverConfig()['package_max_length'] ?? 10 * 1024 * 1024);
+        if ($packageMaxLength <= 0) {
+            return '0';
+        }
+
+        return (string)$packageMaxLength;
+    }
+
+    /**
+     * 以人类可读的方式格式化字节数，便于启动日志快速阅读。
+     *
+     * @param int $bytes 原始字节数。
+     * @return string 格式化后的大小文本。
+     */
+    protected function formatBytes(int $bytes): string {
+        if ($bytes <= 0) {
+            return '0 B';
+        }
+
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $value = (float)$bytes;
+        $unitIndex = 0;
+        while ($value >= 1024 && $unitIndex < count($units) - 1) {
+            $value /= 1024;
+            $unitIndex++;
+        }
+
+        $precision = $value >= 100 || $unitIndex === 0 ? 0 : 2;
+        return number_format($value, $precision, '.', '') . ' ' . $units[$unitIndex];
+    }
+
+    /**
      * 判断一条静态路径是否应关闭缓存。
      *
      * 目录首页和明确声明的 HTML/TXT 入口通常承载的是后台面板或校验文件，内容变更
@@ -640,9 +724,9 @@ class GatewayNginxProxyHandler {
     /**
      * nginx 配置输出目录。
      *
-     * 这里必须以当前 nginx 主配置推导出的 include 目录为准，而不是应用配置。
-     * 否则同一套框架在不同机器上会被业务配置硬编码到错误目录，出现“文件已生成，
-     * 但 nginx 实际没有 include 这份配置”的问题。
+     * 默认以当前 nginx 主配置推导出的 include 目录为准；只有在运维显式指定
+     * `gateway_nginx_conf_dir` 时，才允许用配置值覆盖自动探测结果，专门处理
+     * 多个 include 目录同时存在且无法靠语义唯一判定的环境。
      *
      * @return string 实际使用的 nginx conf.d/servers 目录。
      */
@@ -882,8 +966,56 @@ class GatewayNginxProxyHandler {
             $meta['pid_path'] = $this->extractNginxBuildArg($versionInfo, 'pid-path');
         }
 
+        // 双 nginx / 面板改造环境里，http include 目录可能同时存在 conf.d 与
+        // sites-enabled。此时如果运维已经明确指定输出目录，应优先尊重显式配置，
+        // 避免自动探测在“多个都像候选”的情况下直接中断整条切流链路。
+        $configuredConfDir = $this->configuredNginxConfDir((string)$meta['conf_path']);
+        if ($configuredConfDir !== '') {
+            $meta['conf_dir'] = $configuredConfDir;
+            return $meta;
+        }
+
         $meta['conf_dir'] = $this->detectNginxConfDir((string)$meta['conf_path']);
         return $meta;
+    }
+
+    /**
+     * 解析业务显式指定的 nginx 配置输出目录。
+     *
+     * `gateway_nginx_conf_dir` 是给运维留的最终裁决开关，专门用于“主配置里存在
+     * 多个 http include 候选目录，但当前机器只能确定其中一个才是真正承载业务
+     * server/upstream 的目录”这类场景。留空时仍走自动探测；填写后允许用相对
+     * nginx.conf 所在目录的相对路径，但仍必须能被当前 `http {}` include 链命中。
+     * 这样可以避免把配置写进一个 nginx 根本不会加载的目录里。
+     *
+     * @param string $confPath nginx 主配置路径。
+     * @return string 显式指定的输出目录；未配置时返回空字符串。
+     */
+    protected function configuredNginxConfDir(string $confPath): string {
+        $configured = trim((string)($this->gateway->serverConfig()['gateway_nginx_conf_dir'] ?? ''));
+        if ($configured === '') {
+            return '';
+        }
+
+        if (!str_starts_with($configured, '/')) {
+            $baseDir = $confPath !== '' ? dirname($confPath) : '';
+            $configured = $baseDir !== ''
+                ? rtrim($baseDir, '/') . '/' . ltrim($configured, '/')
+                : $configured;
+        }
+
+        $configured = rtrim($configured, '/');
+        $includeMeta = $this->inspectNginxHttpIncludes($confPath);
+        $candidates = $includeMeta['wildcard_candidates'];
+        if (in_array($configured, $candidates, true)) {
+            return $configured;
+        }
+
+        throw new RuntimeException(
+            "gateway_nginx_conf_dir 未被 nginx http include 链引用: {$configured}"
+            . (!empty($candidates) ? "\nhttp include candidates: " . implode(' | ', $candidates) : '')
+            . (!empty($includeMeta['declared_includes']) ? "\nhttp declared includes: " . implode(' | ', $includeMeta['declared_includes']) : '')
+        );
     }
 
     /**
@@ -1083,6 +1215,35 @@ class GatewayNginxProxyHandler {
      * @throws RuntimeException 当无法从 nginx.conf 的 http include 链中明确推导目录时抛出。
      */
     protected function detectNginxConfDir(string $confPath): string {
+        $includeMeta = $this->inspectNginxHttpIncludes($confPath);
+        $declaredIncludes = $includeMeta['declared_includes'];
+        $wildcardCandidates = $includeMeta['wildcard_candidates'];
+
+        $selected = $this->pickManagedIncludeDir($wildcardCandidates);
+        if ($selected !== '') {
+            return $selected;
+        }
+
+        if (!$declaredIncludes) {
+            throw new RuntimeException("nginx 主配置未声明可用的 include 目录: {$confPath}");
+        }
+
+        throw new RuntimeException(
+            "nginx 主配置 include 未命中现有目录: " . implode(' | ', $declaredIncludes)
+        );
+    }
+
+    /**
+     * 读取 nginx 主配置里 http 上下文声明的 include 目录候选。
+     *
+     * 这一步只负责抽取 `http {}` 内的 include 原文与目录通配候选，供自动探测
+     * 和显式配置校验复用，避免两条路径各自解析导致规则漂移。
+     *
+     * @param string $confPath nginx 主配置文件路径。
+     * @return array{declared_includes: array<int, string>, wildcard_candidates: array<int, string>}
+     * @throws RuntimeException 当主配置不存在或未找到 http 块时抛出。
+     */
+    protected function inspectNginxHttpIncludes(string $confPath): array {
         if ($confPath === '') {
             throw new RuntimeException('无法从 nginx -V 中解析 conf-path，不能确定 nginx 配置输出目录');
         }
@@ -1096,6 +1257,7 @@ class GatewayNginxProxyHandler {
         if ($httpBlock === '') {
             throw new RuntimeException("nginx 主配置未找到 http 配置块: {$confPath}");
         }
+
         $declaredIncludes = [];
         $wildcardCandidates = [];
         if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $httpBlock, $matches)) {
@@ -1115,18 +1277,10 @@ class GatewayNginxProxyHandler {
             }
         }
 
-        $selected = $this->pickManagedIncludeDir($wildcardCandidates);
-        if ($selected !== '') {
-            return $selected;
-        }
-
-        if (!$declaredIncludes) {
-            throw new RuntimeException("nginx 主配置未声明可用的 include 目录: {$confPath}");
-        }
-
-        throw new RuntimeException(
-            "nginx 主配置 include 未命中现有目录: " . implode(' | ', $declaredIncludes)
-        );
+        return [
+            'declared_includes' => array_values(array_unique($declaredIncludes)),
+            'wildcard_candidates' => array_values(array_unique($wildcardCandidates)),
+        ];
     }
 
     /**
@@ -1202,13 +1356,16 @@ class GatewayNginxProxyHandler {
     /**
      * 从 http include 候选目录里挑选最适合承载 gateway 配置的目录。
      *
-     * 这里不再按“第一个通配 include”直接返回，而是优先选择语义上明显用于
-     * server/vhost 扩展配置的目录，例如 `servers`、`conf.d`、`vhosts`。
-     * 如果候选不唯一且无法明确判断，就直接报错，避免继续擅自写错目录。
+     * 先优先沿用当前 app 已经落过 gateway 配置的目录，避免历史运行中已经选定
+     * 的目录在一次重启后突然切换，导致旧目录残留文件与新目录新文件同时被加载。
+     *
+     * 如果当前 app 还没有历史文件，则按固定优先级挑选语义上最像 server/vhost
+     * 扩展目录的候选，例如 `servers`、`conf.d`、`vhosts`。这能让
+     * `/etc/nginx/conf.d` 与 `/etc/nginx/sites-enabled` 同时存在时仍有稳定结果，
+     * 而不是把“两个都合法”误判成错误。
      *
      * @param array<int, string> $candidates 候选目录列表。
      * @return string
-     * @throws RuntimeException 当目录候选存在歧义时抛出。
      */
     protected function pickManagedIncludeDir(array $candidates): string {
         $candidates = array_values(array_unique(array_filter(array_map(static fn($item) => rtrim((string)$item, '/'), $candidates))));
@@ -1219,17 +1376,53 @@ class GatewayNginxProxyHandler {
             return $candidates[0];
         }
 
-        $preferredNames = ['servers', 'conf.d', 'vhosts', 'sites-enabled', 'http.d'];
-        $preferred = array_values(array_filter($candidates, static function (string $candidate) use ($preferredNames) {
-            return in_array(strtolower(basename($candidate)), $preferredNames, true);
-        }));
-        if (count($preferred) === 1) {
-            return $preferred[0];
+        $existingManaged = array_values(array_filter($candidates, fn(string $candidate): bool => $this->candidateContainsManagedFiles($candidate)));
+        if (count($existingManaged) === 1) {
+            return $existingManaged[0];
         }
 
-        throw new RuntimeException(
-            'nginx 主配置 include 目录存在歧义: ' . implode(' | ', $candidates)
-        );
+        $preferredNames = ['servers', 'conf.d', 'vhosts', 'sites-enabled', 'http.d'];
+        foreach ($preferredNames as $preferredName) {
+            foreach ($candidates as $candidate) {
+                if (strtolower(basename($candidate)) === $preferredName) {
+                    return $candidate;
+                }
+            }
+        }
+
+        sort($candidates, SORT_STRING);
+        return $candidates[0];
+    }
+
+    /**
+     * 判断某个候选目录里是否已经存在当前 app 的 gateway 配置文件。
+     *
+     * 这里只检查 app 维度的 upstream/server/example 文件，不把全局文件
+     * `scf_gateway.global.conf` 作为判据，避免多个应用共享全局文件时把目录误判成
+     * “当前 app 已在使用”。
+     *
+     * @param string $candidate 候选目录。
+     * @return bool 当前 app 的 gateway 文件已经存在时返回 true。
+     */
+    protected function candidateContainsManagedFiles(string $candidate): bool {
+        $candidate = rtrim($candidate, '/');
+        if ($candidate === '') {
+            return false;
+        }
+
+        $baseName = $this->fileBaseName();
+        $paths = [
+            $candidate . '/' . $baseName . '.upstreams.conf',
+            $candidate . '/' . $baseName . '.server.conf',
+            $candidate . '/' . $baseName . '.server.example',
+        ];
+        foreach ($paths as $path) {
+            if (is_file($path)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

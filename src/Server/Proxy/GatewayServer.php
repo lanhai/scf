@@ -223,7 +223,6 @@ class GatewayServer {
             if ($dashboardPort > 0) {
                 File::write(SERVER_DASHBOARD_PORT_FILE, (string)$dashboardPort);
             }
-            $this->renderStartupInfo();
         });
         $this->server->on('BeforeReload', function (Server $server) {
             Runtime::instance()->serverIsReady(false);
@@ -253,6 +252,7 @@ class GatewayServer {
             }
             Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
+            $this->scheduleStartupInfoRender();
         });
         $this->server->on('PipeMessage', function (Server $server, int $srcWorkerId, mixed $message): void {
             $this->onPipeMessage($server, $srcWorkerId, $message);
@@ -415,9 +415,300 @@ class GatewayServer {
         Runtime::instance()->rpcPort($this->rpcPort);
         Runtime::instance()->set(Key::RUNTIME_SERVER_STARTED_AT, $this->startedAt);
         Runtime::instance()->dashboardPort($this->resolvedDashboardPort());
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING, true);
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_READY, false);
+        Runtime::instance()->delete(Key::RUNTIME_GATEWAY_STARTUP_READY_INSTANCES);
+        Runtime::instance()->delete(Key::RUNTIME_GATEWAY_UPSTREAM_SUPERVISOR_SYNC_INSTANCES);
+        Runtime::instance()->delete(Key::RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS);
         ConsoleRelay::setGatewayPort($this->port);
         ConsoleRelay::setLocalSubscribed(false);
         ConsoleRelay::setRemoteSubscribed(false);
+    }
+
+    /**
+     * 判断当前是否仍处在 Gateway 启动摘要收集阶段。
+     *
+     * 启动早期各类子进程和结果态日志并不是同一个时机完成，所以这里用一个共享
+     * Runtime 开关统一收口：未完成摘要前先写状态、不逐条打印；摘要打完后恢复
+     * 正常的细粒度日志。
+     *
+     * @return bool
+     */
+    protected function startupSummaryPending(): bool {
+        return (bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false);
+    }
+
+    /**
+     * 记录一次启动阶段的 UpstreamSupervisor 同步结果。
+     *
+     * 这份数据会被 worker#0 的启动摘要直接消费，用来替代启动期那条独立的
+     * “状态已同步”日志，避免摘要和单行日志重复描述同一个结果态。
+     *
+     * @param int $pid supervisor 进程 PID
+     * @param int $instanceCount 本次同步的业务实例数量
+     * @return void
+     */
+    protected function recordStartupUpstreamSupervisorSync(int $pid, int $instanceCount): void {
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_UPSTREAM_SUPERVISOR_SYNC_INSTANCES, [
+            'pid' => $pid,
+            'instances' => $instanceCount,
+        ]);
+    }
+
+    /**
+     * 合并记录启动阶段移除掉的旧业务代际。
+     *
+     * 启动早期可能会在多个分支上陆续清掉旧代，所以这里做增量合并，最终在
+     * Gateway 启动摘要里一次性展示，而不是在终端里连续刷多条“代际已移除”。
+     *
+     * @param array<int, string> $generations 被移除的代际版本列表
+     * @return void
+     */
+    protected function recordStartupRemovedGenerations(array $generations): void {
+        $normalized = array_values(array_unique(array_filter(array_map(
+            static fn(mixed $generation): string => trim((string)$generation),
+            $generations
+        ))));
+        if (!$normalized) {
+            return;
+        }
+        $existing = (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS) ?: []);
+        $merged = array_values(array_unique(array_merge(
+            array_values(array_filter(array_map(
+                static fn(mixed $generation): string => trim((string)$generation),
+                (array)($existing['generations'] ?? [])
+            ))),
+            $normalized
+        )));
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS, [
+            'count' => count($merged),
+            'generations' => $merged,
+        ]);
+    }
+
+    /**
+     * 记录启动阶段已经 ready 的业务实例。
+     *
+     * Gateway 启动时真正影响运维判断的是“最终拉起了哪个实例、监听在哪些端口”，
+     * 而不是中间经历过多少次等待。这里把 ready 结果落到 Runtime，供启动摘要
+     * 统一展示，避免 `启动业务实例/等待端口/端口就绪` 逐条刷屏。
+     *
+     * @param array<string, mixed> $plan 已 ready 的业务实例计划
+     * @return void
+     */
+    protected function recordStartupReadyInstance(array $plan): void {
+        $version = trim((string)($plan['version'] ?? ''));
+        $host = trim((string)($plan['host'] ?? '127.0.0.1'));
+        $port = (int)($plan['port'] ?? 0);
+        if ($version === '' || $port <= 0) {
+            return;
+        }
+        $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        $descriptor = $version . ' ' . $host . ':' . $port . ($rpcPort > 0 ? ', RPC:' . $rpcPort : '');
+        $existing = array_values(array_filter(array_map(
+            static fn(mixed $item): string => trim((string)$item),
+            (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_READY_INSTANCES) ?: [])
+        )));
+        if (in_array($descriptor, $existing, true)) {
+            return;
+        }
+        $existing[] = $descriptor;
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_STARTUP_READY_INSTANCES, array_values($existing));
+    }
+
+    /**
+     * 在 worker#0 上延迟输出 Gateway 启动摘要。
+     *
+     * 摘要不能放在 master onStart 里立即打印，因为那时子进程 PID、supervisor
+     * 初始同步、旧代清理等结果态还没落到 Runtime。这里由 worker#0 轮询少量
+     * 共享状态，等关键结果齐了或达到超时窗口后再统一打印。
+     *
+     * @return void
+     */
+    protected function scheduleStartupInfoRender(): void {
+        if ((bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_READY) ?? false)) {
+            return;
+        }
+        $scheduledAt = microtime(true);
+        Timer::tick(200, function (int $timerId) use ($scheduledAt): void {
+            if (!Runtime::instance()->serverIsAlive()) {
+                Timer::clear($timerId);
+                return;
+            }
+            if ((bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_READY) ?? false)) {
+                Timer::clear($timerId);
+                return;
+            }
+
+            $resultRows = $this->startupResultRows();
+            if (!$this->shouldRenderStartupInfo($resultRows, microtime(true) - $scheduledAt)) {
+                return;
+            }
+
+            $this->renderStartupInfo($resultRows);
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING, false);
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_READY, true);
+            Timer::clear($timerId);
+        });
+    }
+
+    /**
+     * 判断启动摘要是否已经具备输出条件。
+     *
+     * 我们优先等待核心 gateway 子进程和 supervisor 初始同步结果都到齐；如果
+     * 个别可选组件启动偏慢，则在超时后也要先把摘要打印出来，避免卡住整条启动链。
+     *
+     * @param array<int, array{section:string, label:string, value:string}> $resultRows 已收集到的结果行
+     * @param float $elapsedSeconds 自调度开始后的等待秒数
+     * @return bool
+     */
+    protected function shouldRenderStartupInfo(array $resultRows, float $elapsedSeconds): bool {
+        $requiredKeys = [
+            Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID,
+            Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+            Key::RUNTIME_MEMORY_MONITOR_PID,
+            Key::RUNTIME_HEARTBEAT_PID,
+            Key::RUNTIME_LOG_BACKUP_PID,
+        ];
+        foreach ($requiredKeys as $key) {
+            if ((int)(Runtime::instance()->get($key) ?? 0) <= 0) {
+                return $elapsedSeconds >= 5.0;
+            }
+        }
+
+        $supervisorSync = Runtime::instance()->get(Key::RUNTIME_GATEWAY_UPSTREAM_SUPERVISOR_SYNC_INSTANCES);
+        if ($supervisorSync === false || $supervisorSync === null) {
+            return $elapsedSeconds >= 5.0;
+        }
+
+        if ($this->managedUpstreamPlans) {
+            $readyInstances = (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_READY_INSTANCES) ?: []);
+            if (!$readyInstances) {
+                return $elapsedSeconds >= 5.0;
+            }
+        }
+
+        if ((int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0) > 0
+            && (int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_WORKER_PID) ?? 0) <= 0
+        ) {
+            return $elapsedSeconds >= 5.0;
+        }
+
+        return !empty($resultRows);
+    }
+
+    /**
+     * 收集 Gateway 启动摘要里的“结果态”行。
+     *
+     * 这里只读取启动阶段已经写入 Runtime 的最终态数据，不再重新推导业务逻辑，
+     * 避免 worker#0 和业务编排子进程对同一份状态机各算各的。
+     *
+     * @return array<int, array{label:string, value:string}>
+     */
+    protected function startupResultRows(): array {
+        $pidRows = [
+            '业务编排' => (int)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID) ?? 0),
+            '健康检查' => (int)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID) ?? 0),
+            '内存监控' => (int)(Runtime::instance()->get(Key::RUNTIME_MEMORY_MONITOR_PID) ?? 0),
+            '心跳进程' => (int)(Runtime::instance()->get(Key::RUNTIME_HEARTBEAT_PID) ?? 0),
+            '日志备份' => (int)(Runtime::instance()->get(Key::RUNTIME_LOG_BACKUP_PID) ?? 0),
+            '队列管理' => (int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0),
+            '队列执行' => (int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_WORKER_PID) ?? 0),
+            '文件监听' => (int)(Runtime::instance()->get(Key::RUNTIME_FILE_WATCHER_PID) ?? 0),
+            '集群协调' => (int)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID) ?? 0),
+        ];
+        $rows = [];
+        foreach ($pidRows as $label => $pid) {
+            if ($pid > 0) {
+                $rows[] = ['label' => $label, 'value' => 'PID:' . $pid];
+            }
+        }
+
+        $readyInstances = array_values(array_filter(array_map(
+            static fn(mixed $item): string => trim((string)$item),
+            (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_READY_INSTANCES) ?: [])
+        )));
+        foreach ($readyInstances as $index => $descriptor) {
+            $rows[] = [
+                'label' => '业务实例' . ($index + 1),
+                'value' => $descriptor,
+            ];
+        }
+
+        $supervisorSync = (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_UPSTREAM_SUPERVISOR_SYNC_INSTANCES) ?: []);
+        if ($supervisorSync) {
+            $rows[] = [
+                'label' => 'Supervisor',
+                'value' => 'Supervisor PID:' . (int)($supervisorSync['pid'] ?? 0) . ', 实例:' . (int)($supervisorSync['instances'] ?? 0),
+            ];
+        }
+
+        $removedGenerations = (array)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS) ?: []);
+        $generationList = array_values(array_filter(array_map(
+            static fn(mixed $generation): string => trim((string)$generation),
+            (array)($removedGenerations['generations'] ?? [])
+        )));
+        if ($generationList) {
+            $rows[] = [
+                'label' => '代际清理',
+                'value' => 'count=' . count($generationList) . ', versions=' . implode(' | ', $generationList),
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * 把摘要结果行格式化成稳定的双列表现。
+     *
+     * 启动结果需要和上半区基础信息保持同一种阅读节奏，所以这里只做对齐，
+     * 不再插入分组标题和空行，避免日志被割裂成多段。
+     *
+     * @param array<int, array{label:string, value:string}> $rows 原始结果行
+     * @return array<int, string>
+     */
+    protected function formatStartupResultRows(array $rows): array {
+        return $this->formatAlignedPairs($rows);
+    }
+
+    /**
+     * 把一组标签/value 行格式化成与启动摘要上半区一致的“键：值”样式。
+     *
+     * @param array<int, array{label:string, value:string}> $rows
+     * @return array<int, string>
+     */
+    protected function formatAlignedPairs(array $rows, ?int $labelWidth = null): array {
+        unset($labelWidth);
+        $formatted = [];
+        foreach ($rows as $row) {
+            $label = trim((string)($row['label'] ?? ''));
+            $value = trim((string)($row['value'] ?? ''));
+            if ($label === '' || $value === '') {
+                continue;
+            }
+            $formatted[] = $label . '：' . $value;
+        }
+        return $formatted;
+    }
+
+    /**
+     * 计算一段文本在终端中的近似显示宽度。
+     *
+     * 启动摘要里会混用中文和 ASCII，直接用 strlen 做补位会明显错位。这里按
+     * “ASCII 算 1，非 ASCII 算 2”的终端常见宽度规则做一个轻量估算即可。
+     *
+     * @param string $text
+     * @return int
+     */
+    protected function displayTextWidth(string $text): int {
+        if ($text === '') {
+            return 0;
+        }
+        $width = 0;
+        foreach (preg_split('//u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $char) {
+            $width += strlen($char) === 1 ? 1 : 2;
+        }
+        return $width;
     }
 
     protected function ensureLocalIpcServerStarted(): void {
@@ -1990,10 +2281,10 @@ class GatewayServer {
         return $this->nginxProxyHandler;
     }
 
-    protected function syncNginxProxyTargets(?string $reason = null): void {
+    protected function syncNginxProxyTargets(?string $reason = null, array $summaryContext = []): bool {
         $handler = $this->nginxProxyHandler();
         if (!$handler->enabled()) {
-            return;
+            return false;
         }
         try {
             $result = $handler->sync($reason);
@@ -2017,7 +2308,7 @@ class GatewayServer {
             ]));
             $now = time();
             if ($fingerprint === $this->lastNginxSyncLogFingerprint && ($now - $this->lastNginxSyncLoggedAt) <= 15) {
-                return;
+                return true;
             }
             $this->lastNginxSyncLogFingerprint = $fingerprint;
             $this->lastNginxSyncLoggedAt = $now;
@@ -2034,10 +2325,109 @@ class GatewayServer {
             if ($displayPaths) {
                 $message .= ', files=' . implode(' | ', $displayPaths);
             }
-            Console::info($message);
+            if ($summaryContext) {
+                $this->renderNginxSyncSummary(
+                    $handler,
+                    (string)($result['reason'] ?? ''),
+                    (bool)($result['reloaded'] ?? false),
+                    (bool)($result['tested'] ?? false),
+                    $displayPaths,
+                    $summaryContext
+                );
+            } else {
+                Console::info($message);
+                $this->renderNginxSyncSummary(
+                    $handler,
+                    (string)($result['reason'] ?? ''),
+                    (bool)($result['reloaded'] ?? false),
+                    (bool)($result['tested'] ?? false),
+                    $displayPaths
+                );
+            }
+            return true;
         } catch (Throwable $throwable) {
             Console::warning('【Gateway】nginx转发配置同步失败: ' . $throwable->getMessage());
+            return false;
         }
+    }
+
+    /**
+     * 在 nginx 转发配置真正同步完成后输出入口层参数概览。
+     *
+     * 这组信息不能跟 Gateway 启动摘要放在同一个时机，因为真正决定入口层生效
+     * 状态的是业务实例 ready 后那次 sync/test/reload。只有在这里打印，日志时序
+     * 才能准确表达“当前这些 nginx 参数已经对应到本轮转发配置”。
+     *
+     * @param GatewayNginxProxyHandler $handler 当前 nginx 配置同步器。
+     * @return void
+     */
+    protected function renderNginxSyncSummary(
+        GatewayNginxProxyHandler $handler,
+        string $reason,
+        bool $reloaded,
+        bool $tested,
+        array $displayPaths,
+        array $contextLines = []
+    ): void {
+        $summaryData = $handler->startupSummaryData();
+        $rows = [];
+        foreach ($contextLines as $label => $value) {
+            if (is_string($label)) {
+                $rows[] = ['label' => '切流' . $label, 'value' => (string)$value];
+            } elseif (is_string($value) && $value !== '') {
+                $rows[] = ['label' => '切流实例', 'value' => $value];
+            }
+        }
+        $rows[] = ['label' => '切流原因', 'value' => $this->describeNginxSyncReason($reason)];
+        $rows[] = ['label' => '切流执行', 'value' => 'reload:' . ($reloaded ? 'yes' : 'no') . ', test:' . ($tested ? 'yes' : 'no')];
+
+        if ($displayPaths) {
+            $fileRows = [];
+            foreach (array_values($displayPaths) as $index => $path) {
+                $fileRows[] = ['label' => '同步文件' . ($index + 1), 'value' => $path];
+            }
+            $rows = array_merge($rows, $fileRows);
+        }
+
+        $rows = array_merge($rows, [
+            ['label' => 'Nginx二进制', 'value' => (string)($summaryData['bin'] ?? '--')],
+            ['label' => 'Nginx主配置', 'value' => (string)($summaryData['conf'] ?? '--')],
+            ['label' => 'Nginx引用目录', 'value' => (string)($summaryData['dir'] ?? '--')],
+            ['label' => 'Nginx请求体', 'value' => (string)($summaryData['body'] ?? '--')],
+            ['label' => 'Nginx代理', 'value' => (string)($summaryData['proxy'] ?? '--')],
+            ['label' => 'Nginx日志', 'value' => (string)($summaryData['log'] ?? '--')],
+            ['label' => 'Nginx真实IP', 'value' => (string)($summaryData['realip'] ?? '--')],
+        ]);
+        $lines = $this->formatAlignedPairs($rows);
+        if (!$lines) {
+            return;
+        }
+
+        $info = "------------------Nginx转发到新实例已完成------------------\n"
+            . implode("\n", $lines)
+            . "\n--------------------------------------------------";
+        Console::write(Color::cyan($info));
+    }
+
+    /**
+     * 把 nginx 同步原因整理成更适合运维阅读的文本。
+     *
+     * 内部 reason 需要保持稳定，方便流程判断；但日志摘要更关注“这次为什么切流”。
+     * 这里做一层展示翻译，避免把内部枚举值直接暴露成阅读负担。
+     *
+     * @param string $reason 内部同步原因。
+     * @return string 面向日志阅读的原因描述。
+     */
+    protected function describeNginxSyncReason(string $reason): string {
+        return match ($reason) {
+            'register_managed_plan_activate' => '业务实例激活切流',
+            'install_takeover' => '应用未安装，入口切到控制面',
+            'install_takeover_release' => '应用安装完成，入口回切业务',
+            'rolling_restart_activate' => '滚动重启切流',
+            'rolling_update_activate' => '滚动升级切流',
+            '', 'manual' => '手动同步',
+            default => $reason,
+        };
     }
 
     /**
@@ -2890,9 +3280,10 @@ class GatewayServer {
             return;
         }
         $this->lastUpstreamSupervisorSyncAt = $now;
+        $this->recordStartupUpstreamSupervisorSync($this->lastObservedUpstreamSupervisorPid, count($instances));
         if ($syncReason === 'restart') {
             Console::success('【Gateway】UpstreamSupervisor 已异常重建，状态已重新同步: pid=' . $this->lastObservedUpstreamSupervisorPid . ', instances=' . count($instances));
-        } elseif ($syncReason === 'initial') {
+        } elseif ($syncReason === 'initial' && !$this->startupSummaryPending()) {
             Console::info('【Gateway】UpstreamSupervisor 状态已同步: pid=' . $this->lastObservedUpstreamSupervisorPid . ', instances=' . count($instances));
         }
         $this->pendingUpstreamSupervisorSyncReason = null;
@@ -4677,9 +5068,18 @@ class GatewayServer {
                 if (!$this->upstreamSupervisor) {
                     continue;
                 }
-                Console::info("【Gateway】启动业务实例: " . $this->describePlan($plan));
+                if (!$this->startupSummaryPending()) {
+                    Console::info("【Gateway】启动业务实例: " . $this->describePlan($plan));
+                }
                 $this->upstreamSupervisor->sendCommand(['action' => 'spawn', 'plan' => $plan]);
-                if (!$this->launcher->waitUntilServicesReady($host, $port, $rpcPort, (int)($plan['start_timeout'] ?? 25))) {
+                if (!$this->launcher->waitUntilServicesReady(
+                    $host,
+                    $port,
+                    $rpcPort,
+                    (int)($plan['start_timeout'] ?? 25),
+                    200,
+                    !$this->startupSummaryPending()
+                )) {
                     continue;
                 }
             }
@@ -4696,14 +5096,31 @@ class GatewayServer {
             $metadata['started_at'] = (int)($metadata['started_at'] ?? time());
             $metadata['managed_mode'] = 'gateway_supervisor';
 
+            if ($this->startupSummaryPending()) {
+                $this->recordStartupReadyInstance($plan);
+            }
             $this->registerManagedPlan($plan, true);
             $this->instanceManager->removeOtherInstances($version, $host, $port);
             $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
-            Console::success("【Gateway】业务实例就绪 {$version} {$host}:{$port}{$rpcInfo}");
+            $cutoverReady = $this->syncNginxProxyTargets('register_managed_plan_activate', [
+                '实例' => $version . ' ' . $host . ':' . $port . $rpcInfo,
+            ]);
+            if (!$cutoverReady) {
+                Console::warning("【Gateway】业务实例已启动，但入口切换未完成: {$version} {$host}:{$port}{$rpcInfo}");
+            }
         }
     }
 
-    protected function renderStartupInfo(): void {
+    /**
+     * 输出 Gateway 启动完成摘要。
+     *
+     * 上半部分保留基础运行信息，下半部分以结果表的方式收口启动阶段异步完成的
+     * 子进程与清理结果，减少“一行一个 PID”带来的刷屏感。
+     *
+     * @param array<int, array{section:string, label:string, value:string}> $resultRows 启动阶段结果态行
+     * @return void
+     */
+    protected function renderStartupInfo(array $resultRows = []): void {
         $appInfo = App::info()?->toArray() ?: [];
         $appVersion = $this->resolveAppVersion($appInfo);
         $publicVersion = $this->resolvePublicVersion($appInfo);
@@ -4711,44 +5128,47 @@ class GatewayServer {
         $frameworkRoot = Root::dir();
         $frameworkBuildTime = FRAMEWORK_BUILD_TIME;
         $packageVersion = $frameworkBuildTime === 'development' ? 'development' : FRAMEWORK_BUILD_VERSION;
+        $packagistVersion = SCF_COMPOSER_VERSION === 'development' ? '非composer引用' : SCF_COMPOSER_VERSION;
         $loadedFiles = count(get_included_files());
         $taskWorkers = (int)(Config::server()['task_worker_num'] ?? 0);
         $listenLabel = $this->nginxProxyModeEnabled() ? '业务入口' : '业务TCP入口';
         $listenValue = "{$this->host}:{$this->port}";
         $controlValue = $this->internalControlHost() . ':' . $this->controlPort();
         $rpcValue = $this->rpcPort > 0 ? ($this->host . ':' . $this->rpcPort) : '--';
-        $info = <<<INFO
-------------------Gateway启动完成------------------
-应用指纹：{APP_FINGERPRINT}
-运行系统：{OS_ENV}
-运行环境：{SERVER_RUN_ENV}
-应用目录：{APP_DIR_NAME}
-源码类型：{APP_SRC_TYPE}
-节点角色：{SERVER_ROLE}
-文件加载：{$loadedFiles}
-环境版本：{SWOOLE_VERSION}
-框架源码：{$frameworkRoot}
-框架版本：{SCF_COMPOSER_VERSION}
-打包版本：{$packageVersion}
-打包时间：{$frameworkBuildTime}
-工作进程：{$this->workerNum}
-任务进程：{$taskWorkers}
-主机地址：{SERVER_HOST}
-应用版本：{$appVersion}
-资源版本：{$publicVersion}
-流量模式：{$this->trafficMode()}
-{$listenLabel}：{$listenValue}
-控制面：{$controlValue}
-RPC监听：{$rpcValue}
-进程信息：Master:{$this->serverMasterPid},Manager:{$this->serverManagerPid}
-状态文件：{$stateFile}
---------------------------------------------------
-INFO;
-        $info = str_replace(
-            ['{APP_FINGERPRINT}', '{OS_ENV}', '{SERVER_RUN_ENV}', '{APP_DIR_NAME}', '{APP_SRC_TYPE}', '{SERVER_ROLE}', '{SWOOLE_VERSION}', '{SCF_COMPOSER_VERSION}', '{SERVER_HOST}'],
-            [APP_FINGERPRINT, OS_ENV, SERVER_RUN_ENV, APP_DIR_NAME, APP_SRC_TYPE, SERVER_ROLE, swoole_version(), SCF_COMPOSER_VERSION, SERVER_HOST],
-            $info
-        );
+        $masterPid = $this->serverMasterPid > 0 ? $this->serverMasterPid : (int)($this->server->master_pid ?? 0);
+        $managerPid = $this->serverManagerPid > 0 ? $this->serverManagerPid : (int)($this->server->manager_pid ?? 0);
+        $infoLines = [
+            '------------------Gateway启动完成------------------',
+            '应用指纹：' . APP_FINGERPRINT,
+            '运行系统：' . OS_ENV,
+            '运行环境：' . SERVER_RUN_ENV,
+            '应用目录：' . APP_DIR_NAME,
+            '源码类型：' . APP_SRC_TYPE,
+            '节点角色：' . SERVER_ROLE,
+            '文件加载：' . $loadedFiles,
+            '环境版本：' . swoole_version(),
+            '框架源码：' . $frameworkRoot,
+            'Packagist：' . $packagistVersion,
+            '打包版本：' . $packageVersion,
+            '打包时间：' . $frameworkBuildTime,
+            '工作进程：' . $this->workerNum,
+            '任务进程：' . $taskWorkers,
+            '主机地址：' . SERVER_HOST,
+            '应用版本：' . $appVersion,
+            '资源版本：' . $publicVersion,
+            '流量模式：' . $this->trafficMode(),
+            $listenLabel . '：' . $listenValue,
+            '控制面：' . $controlValue,
+            'RPC监听：' . $rpcValue,
+            '进程信息：Master:' . $masterPid . ',Manager:' . $managerPid,
+            '状态文件：' . $stateFile,
+        ];
+        $formattedResultRows = $this->formatStartupResultRows($resultRows);
+        if ($formattedResultRows) {
+            $infoLines = array_merge($infoLines, $formattedResultRows);
+        }
+        $infoLines[] = '--------------------------------------------------';
+        $info = implode("\n", $infoLines);
         Console::write(Color::cyan($info));
     }
 

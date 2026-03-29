@@ -754,9 +754,11 @@ class SubProcessManager {
                     define('IS_GATEWAY_SUB_PROCESS', true);
                 }
                 App::mount();
-                Console::info("【GatewayCluster】集群协调PID:" . $process->pid, false);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID, (int)$process->pid);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time());
+                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                    Console::info("【GatewayCluster】集群协调PID:" . $process->pid, false);
+                }
                 if (App::isMaster()) {
                     $this->runGatewayMasterClusterLoop($process);
                     return;
@@ -1024,9 +1026,11 @@ class SubProcessManager {
                 if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
                     define('IS_GATEWAY_SUB_PROCESS', true);
                 }
-                Console::info("【GatewayBusiness】业务编排PID:" . $process->pid, false);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID, (int)$process->pid);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT, time());
+                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                    Console::info("【GatewayBusiness】业务编排PID:" . $process->pid, false);
+                }
                 $lastTickAt = 0;
                 $socket = $process->exportSocket();
                 while (true) {
@@ -1089,9 +1093,11 @@ class SubProcessManager {
                 if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
                     define('IS_GATEWAY_SUB_PROCESS', true);
                 }
-                Console::info("【GatewayHealth】健康检查PID:" . $process->pid, false);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID, (int)$process->pid);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time());
+                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                    Console::info("【GatewayHealth】健康检查PID:" . $process->pid, false);
+                }
                 $socket = $process->exportSocket();
                 while (true) {
                     if (!Runtime::instance()->serverIsAlive()) {
@@ -1502,7 +1508,10 @@ class SubProcessManager {
             if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
-            Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID, (int)$process->pid);
+            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
+            }
             define('IS_REDIS_QUEUE_PROCESS', true);
             // 升级/关停时 manager 需要持续回收消费子进程，不能被 pipe read 阻塞住。
             // 这里直接读取 pipe fd 的非阻塞 stream，避免 Process::read() 在 EAGAIN 时持续刷 warning。
@@ -1731,7 +1740,10 @@ class SubProcessManager {
             }
             $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
             is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
+            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, (int)$process->pid);
+            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
+            }
             MemoryMonitor::start('MemoryMonitor');
             $nextTickAt = 0.0;
             while (true) {
@@ -1818,7 +1830,10 @@ class SubProcessManager {
                     define('IS_GATEWAY_SUB_PROCESS', true);
                 }
                 App::mount();
-                Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
+                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, (int)$process->pid);
+                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                    Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
+                }
                 if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !App::isMaster()) {
                     MemoryMonitor::start('Heatbeat');
                     $processSocket = $process->exportSocket();
@@ -1958,7 +1973,10 @@ class SubProcessManager {
             if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
-            Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, (int)$process->pid);
+            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
+            }
             App::mount();
             MemoryMonitor::start('LogBackup');
             $serverConfig = Config::server();
@@ -2014,7 +2032,10 @@ class SubProcessManager {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
             run(function () use ($process) {
-                Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
+                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, (int)$process->pid);
+                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                    Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
+                }
                 sleep(1);
                 App::mount();
                 MemoryMonitor::start('FileWatcher');

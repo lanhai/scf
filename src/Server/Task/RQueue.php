@@ -115,7 +115,10 @@ class RQueue {
             Console::error("【RedisQueue】#{$managerId} 队列管理进程启动失败");
             return null;
         }
-        Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
+        Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_WORKER_PID, (int)$pid);
+        if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+            Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
+        }
         File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
         return $process;
     }

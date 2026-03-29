@@ -237,8 +237,6 @@ class UpstreamSupervisor {
             ],
         ];
 
-        $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
-        Console::success("【Gateway】业务实例已就绪(serverIsReady) {$version} {$host}:{$port}{$rpcInfo} PID:{$this->managedInstances[$key]['metadata']['pid']}");
     }
 
     /**
