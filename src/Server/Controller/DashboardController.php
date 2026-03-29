@@ -326,6 +326,9 @@ class DashboardController extends Controller {
             'type' => Request\Validator::required('更新类型错误'),
             'version' => Request\Validator::required('版本号不能为空')
         ])->assign($type, $version);
+        if ($type == 'framework' && !FRAMEWORK_IS_PHAR) {
+            return Result::error('当前为源码模式,框架在线升级不可用');
+        }
         if ($type == 'framework' && file_exists(SCF_ROOT . '/build/update.pack')) {
             return Result::error('正在等待升级,请重启服务器');
         }

@@ -62,6 +62,16 @@ class LinuxCrontabManager {
     public function overview(): array {
         $config = $this->readConfig();
         $systemCrontab = $this->readSystemCrontab();
+        if (empty($config['items']) && $systemCrontab !== '') {
+            $recoveredItems = $this->recoverEntriesFromSystemCrontab($systemCrontab);
+            if ($recoveredItems) {
+                $config = ['items' => $recoveredItems];
+                self::persistConfigPayload([
+                    'items' => $recoveredItems,
+                    'updated_at' => time(),
+                ]);
+            }
+        }
         $installedLineCount = $this->extractInstalledLineCount($systemCrontab);
         $items = [];
 
@@ -105,6 +115,151 @@ class LinuxCrontabManager {
                 ['label' => '每周定时', 'value' => 'weekly'],
             ],
         ];
+    }
+
+    /**
+     * 从当前节点系统 crontab 中恢复托管排程条目。
+     *
+     * 当配置文件被清空、覆盖或迁移异常时，页面不能因为 `items` 为空就完全失去
+     * 已安装排程的可见性。这里按当前 env/role 作用域扫描系统 crontab 里的托管行，
+     * 把能明确反解出来的条目重新组装成配置结构，并回写到 db 存储。
+     *
+     * @param string $content
+     * @return array<int, array<string, mixed>>
+     */
+    protected function recoverEntriesFromSystemCrontab(string $content): array {
+        $grouped = [];
+        $scopePattern = '/#\s+' . preg_quote($this->scopeMarker() . ':', '/') . '([a-z0-9_]+)/i';
+        $legacyPattern = '/#\s+' . preg_quote(self::legacyMarkerPrefix() . ':', '/') . '([a-z0-9_]+)/i';
+
+        foreach (preg_split('/\r?\n/', $content) as $line) {
+            $line = trim((string)$line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if (preg_match($scopePattern, $line, $matches)) {
+                $id = trim((string)($matches[1] ?? ''));
+            } elseif (preg_match($legacyPattern, $line, $matches) && $this->lineTargetsCurrentNode($line)) {
+                $id = trim((string)($matches[1] ?? ''));
+            } else {
+                continue;
+            }
+
+            if ($id === '') {
+                continue;
+            }
+            $grouped[$id][] = $line;
+        }
+
+        $entries = [];
+        foreach ($grouped as $id => $lines) {
+            $entry = $this->recoverEntryFromCronLines($id, $lines);
+            if ($entry !== null) {
+                $entries[] = $entry;
+            }
+        }
+
+        usort($entries, static function (array $left, array $right): int {
+            return strcmp((string)($left['name'] ?? ''), (string)($right['name'] ?? ''));
+        });
+
+        return $entries;
+    }
+
+    /**
+     * 从同一条排程的多条 cron 行里恢复配置定义。
+     *
+     * @param string $id
+     * @param array<int, string> $lines
+     * @return array<string, mixed>|null
+     */
+    protected function recoverEntryFromCronLines(string $id, array $lines): ?array {
+        if (!$lines) {
+            return null;
+        }
+
+        $namespace = '';
+        $env = '';
+        $role = '';
+        $times = [];
+        $weekdays = [];
+        $isInterval = false;
+        $intervalMinutes = 5;
+        $lockEnabled = false;
+
+        foreach ($lines as $line) {
+            if ($namespace === '' && preg_match("/-namespace='([^']+)'/", $line, $matches)) {
+                $namespace = trim((string)$matches[1]);
+            }
+            if ($env === '' && preg_match("/-env='([^']+)'/", $line, $matches)) {
+                $env = trim((string)$matches[1]);
+            }
+            if ($role === '' && preg_match("/-role='([^']+)'/", $line, $matches)) {
+                $role = trim((string)$matches[1]);
+            }
+            if (!$lockEnabled && str_contains($line, 'flock')) {
+                $lockEnabled = true;
+            }
+
+            $expression = preg_replace('/\s+cd\s+.+$/', '', $line);
+            $expression = trim((string)$expression);
+            if ($expression === '') {
+                continue;
+            }
+            $parts = preg_split('/\s+/', $expression);
+            if (count($parts) < 5) {
+                continue;
+            }
+
+            [$minute, $hour, , , $weekdayField] = array_slice($parts, 0, 5);
+            $minute = trim((string)$minute);
+            $hour = trim((string)$hour);
+            $weekdayField = trim((string)$weekdayField);
+
+            if (preg_match('/^\*\/(\d+)$/', $minute, $matches)) {
+                $isInterval = true;
+                $intervalMinutes = max(1, (int)$matches[1]);
+            } elseif (is_numeric($minute) && is_numeric($hour)) {
+                $times[] = str_pad((string)(int)$hour, 2, '0', STR_PAD_LEFT) . ':' . str_pad((string)(int)$minute, 2, '0', STR_PAD_LEFT);
+            }
+
+            if ($weekdayField !== '*' && $weekdayField !== '') {
+                foreach (explode(',', $weekdayField) as $day) {
+                    $day = trim($day);
+                    if ($day === '' || !is_numeric($day)) {
+                        continue;
+                    }
+                    $weekdays[] = (int)$day;
+                }
+            }
+        }
+
+        if ($namespace === '') {
+            return null;
+        }
+
+        $times = array_values(array_unique($times));
+        sort($times);
+        $weekdays = array_values(array_unique($weekdays));
+        sort($weekdays);
+
+        $scheduleType = $isInterval ? 'interval' : (!empty($weekdays) ? 'weekly' : 'daily');
+
+        return $this->normalizeEntry([
+            'id' => $id,
+            'name' => $this->shortClassName($namespace),
+            'namespace' => $namespace,
+            'schedule_type' => $scheduleType,
+            'interval_minutes' => $intervalMinutes,
+            'times' => $scheduleType === 'interval' ? [] : $times,
+            'weekdays' => $weekdays,
+            'lock_enabled' => $lockEnabled ? 1 : 0,
+            'enabled' => 1,
+            'env' => $env !== '' ? $env : $this->scopeEnv(),
+            'role' => $role !== '' ? $role : SERVER_ROLE,
+            'remark' => 'recovered_from_system_crontab',
+        ], false);
     }
 
     /**

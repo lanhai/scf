@@ -1049,6 +1049,12 @@ class GatewayServer {
         if ($type === '' || $version === '') {
             return Result::error('更新类型和版本号不能为空');
         }
+        if ($type === 'framework' && !FRAMEWORK_IS_PHAR) {
+            return Result::error('当前为源码模式,框架在线升级不可用');
+        }
+        if ($type === 'framework' && file_exists(SCF_ROOT . '/build/update.pack')) {
+            return Result::error('正在等待升级,请重启服务器');
+        }
 
         Console::info("【Gateway】开始执行升级: type={$type}, version={$version}");
         $taskId = uniqid('gateway_update_', true);
@@ -1124,6 +1130,13 @@ class GatewayServer {
             'failed' => (int)$payload['failed_count'],
             'pending' => (int)$payload['pending_count'],
         ]);
+        // framework 升级只是在本地落下新的 update.pack，必须显式重启 gateway 控制面，
+        // boot 才会把新包切成当前生效版本。这里沿用“仅重启控制面、保留业务 upstream”的收口方式。
+        if ($masterState === 'pending') {
+            Timer::after(200, function (): void {
+                $this->scheduleGatewayShutdown(true);
+            });
+        }
         if ($payload['failed_nodes']) {
             return Result::error('部分节点升级失败', 'SERVICE_ERROR', $payload);
         }
