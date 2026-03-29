@@ -236,17 +236,24 @@ class NodeManager {
     }
 
     /**
-     * 向所有节点发送更新到指定版本命令
+     * 向 master 投递一条升级任务，并只等待“任务已接收”的短回执。
+     *
+     * dashboard 的升级入口不再同步等待整轮集群升级完成，否则前端会被
+     * 下载、滚动重启、节点汇总整条长链路直接拖住，看起来像“卡死”。
+     *
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @return Result
      */
     public function appointUpdate($type, $version): Result {
         $socket = Manager::instance()->getMasterSocketConnection();
         $taskId = uniqid('update_', true);
         $timeout = 60 * 11;
-        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version, 'timeout' => $timeout, 'task_id' => $taskId]]));
-        $reply = $socket->recv($timeout + 5);
+        $socket->push(JsonHelper::toJson(['event' => 'appoint_update', 'data' => ['type' => $type, 'version' => $version, 'timeout' => $timeout, 'task_id' => $taskId, 'async' => 1]]));
+        $reply = $socket->recv(5);
         if ($reply === false || $reply->data == '') {
             $socket->close();
-            return Result::error('响应超时,升级失败');
+            return Result::error('升级任务投递失败');
         }
         $socket->close();
         if (JsonHelper::is($reply->data)) {

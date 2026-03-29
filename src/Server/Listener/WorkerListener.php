@@ -31,8 +31,10 @@ class WorkerListener extends Listener {
         });
         if (!(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)) {
             //监控内存使用
-            $limitMb = Config::server()['worker_memory_limit'] ?? 256;
-            MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: true);
+            $serverConfig = Config::server();
+            $limitMb = (int)($serverConfig['worker_memory_limit'] ?? 256);
+            $autoRestart = (bool)($serverConfig['worker_memory_auto_restart'] ?? false);
+            MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: $autoRestart);
         }
         // 保留 worker 级致命错误记录能力，这和本次 rshutdown warning 根因无关。
         register_shutdown_function(function () use ($workerId) {

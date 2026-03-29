@@ -119,10 +119,11 @@ class GatewayNginxProxyHandler {
             }
         }
 
-        // “写盘成功”或“reload 成功”都不代表 nginx 真正吃到了这几份 include。
-        // 在这里直接用 `nginx -T` 校验当前有效配置，确保最终对外流量入口已经
-        // 引用了 gateway 刚生成的文件；否则宁可让 sync 失败，也不要误报成功。
-        $this->validateManagedFilesLoaded([$globalFile, $upstreamFile, $serverFile]);
+        // 只有当前这次同步真的触发了 reload/start，才要求 nginx 立刻能在 `-T`
+        // 里看到这些文件。手工 reload 模式下配置可以先落盘、稍后再由运维触发加载。
+        if ($reloaded) {
+            $this->validateManagedFilesLoaded([$globalFile, $upstreamFile, $serverFile]);
+        }
 
         return [
             'reason' => $reason ?: 'manual',
@@ -179,7 +180,7 @@ class GatewayNginxProxyHandler {
             if ($normalizedPath === '') {
                 continue;
             }
-            if (!str_contains($effectiveConfig, $normalizedPath) && !str_contains($effectiveConfig, basename($normalizedPath))) {
+            if (!str_contains($effectiveConfig, $normalizedPath)) {
                 $missing[] = $normalizedPath;
             }
         }
@@ -341,7 +342,7 @@ class GatewayNginxProxyHandler {
             '',
         ], $realIpLines, [
             // `/dashboard.socket` 和 `/_gateway` 都属于控制面，必须绕过业务 upstream。
-            '    location = /dashboard.socket {',
+            '    location ~ /dashboard\\.socket$ {',
             '        proxy_http_version 1.1;',
             '        proxy_set_header Host $host;',
             '        proxy_set_header Upgrade $http_upgrade;',
@@ -477,15 +478,18 @@ class GatewayNginxProxyHandler {
 
             // 静态资源路由只负责本地文件命中，不参与 upstream 切流。
             if ($this->looksLikeStaticFile($path)) {
+                $disableCache = $this->shouldDisableStaticCache($path);
                 $blocks[] = '    location = ' . $path . ' {';
                 $blocks[] = '        root ' . $publicRoot . ';';
                 $blocks[] = '        access_log off;';
                 $blocks[] = '        log_not_found off;';
-                $blocks[] = '        etag off;';
-                $blocks[] = '        if_modified_since off;';
-                $blocks[] = '        expires -1;';
-                $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
-                $blocks[] = '        add_header Pragma "no-cache" always;';
+                if ($disableCache) {
+                    $blocks[] = '        etag off;';
+                    $blocks[] = '        if_modified_since off;';
+                    $blocks[] = '        expires -1;';
+                    $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
+                    $blocks[] = '        add_header Pragma "no-cache" always;';
+                }
                 $blocks[] = '        try_files $uri =404;';
                 $blocks[] = '    }';
                 continue;
@@ -525,15 +529,10 @@ class GatewayNginxProxyHandler {
             $blocks[] = '        try_files $uri/index.html =404;';
             $blocks[] = '    }';
             $blocks[] = '';
-            $blocks[] = '    location ^~ ' . $normalized . '/ {';
+            $blocks[] = '    location ' . $normalized . '/ {';
             $blocks[] = '        root ' . $publicRoot . ';';
             $blocks[] = '        access_log off;';
             $blocks[] = '        log_not_found off;';
-            $blocks[] = '        etag off;';
-            $blocks[] = '        if_modified_since off;';
-            $blocks[] = '        expires -1;';
-            $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
-            $blocks[] = '        add_header Pragma "no-cache" always;';
             $blocks[] = '        try_files $uri $uri/ =404;';
             $blocks[] = '    }';
         }
@@ -550,6 +549,20 @@ class GatewayNginxProxyHandler {
     protected function looksLikeStaticFile(string $path): bool {
         $basename = basename($path);
         return $basename !== '' && str_contains($basename, '.');
+    }
+
+    /**
+     * 判断一条静态路径是否应关闭缓存。
+     *
+     * 目录首页和明确声明的 HTML/TXT 入口通常承载的是后台面板或校验文件，内容变更
+     * 后希望立即生效；而 `/asset/*` 这类资源目录应继续保留 nginx 默认缓存语义。
+     *
+     * @param string $path 静态路径。
+     * @return bool
+     */
+    protected function shouldDisableStaticCache(string $path): bool {
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        return in_array($extension, ['html', 'htm', 'txt', 'json', 'webmanifest'], true);
     }
 
     /**
@@ -1084,6 +1097,7 @@ class GatewayNginxProxyHandler {
             throw new RuntimeException("nginx 主配置未找到 http 配置块: {$confPath}");
         }
         $declaredIncludes = [];
+        $wildcardCandidates = [];
         if (preg_match_all('/^\\s*include\\s+([^;]+);/m', $httpBlock, $matches)) {
             foreach ($matches[1] as $include) {
                 $include = trim((string)$include, "\"' ");
@@ -1096,9 +1110,14 @@ class GatewayNginxProxyHandler {
                 $declaredIncludes[] = $include;
                 $candidate = $this->extractManagedIncludeDir($include);
                 if ($candidate !== '') {
-                    return rtrim($candidate, '/');
+                    $wildcardCandidates[] = rtrim($candidate, '/');
                 }
             }
+        }
+
+        $selected = $this->pickManagedIncludeDir($wildcardCandidates);
+        if ($selected !== '') {
+            return $selected;
         }
 
         if (!$declaredIncludes) {
@@ -1178,6 +1197,39 @@ class GatewayNginxProxyHandler {
         }
 
         return $directory;
+    }
+
+    /**
+     * 从 http include 候选目录里挑选最适合承载 gateway 配置的目录。
+     *
+     * 这里不再按“第一个通配 include”直接返回，而是优先选择语义上明显用于
+     * server/vhost 扩展配置的目录，例如 `servers`、`conf.d`、`vhosts`。
+     * 如果候选不唯一且无法明确判断，就直接报错，避免继续擅自写错目录。
+     *
+     * @param array<int, string> $candidates 候选目录列表。
+     * @return string
+     * @throws RuntimeException 当目录候选存在歧义时抛出。
+     */
+    protected function pickManagedIncludeDir(array $candidates): string {
+        $candidates = array_values(array_unique(array_filter(array_map(static fn($item) => rtrim((string)$item, '/'), $candidates))));
+        if (!$candidates) {
+            return '';
+        }
+        if (count($candidates) === 1) {
+            return $candidates[0];
+        }
+
+        $preferredNames = ['servers', 'conf.d', 'vhosts', 'sites-enabled', 'http.d'];
+        $preferred = array_values(array_filter($candidates, static function (string $candidate) use ($preferredNames) {
+            return in_array(strtolower(basename($candidate)), $preferredNames, true);
+        }));
+        if (count($preferred) === 1) {
+            return $preferred[0];
+        }
+
+        throw new RuntimeException(
+            'nginx 主配置 include 目录存在歧义: ' . implode(' | ', $candidates)
+        );
     }
 
     /**

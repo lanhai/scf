@@ -4,7 +4,8 @@ return [
     'port' => 9580,
     'rpc_port' => 9680,
     'worker_num' => 8,
-    'worker_memory_limit' => 256,//单worker内存使用限制(MB),超过设置定值将重启
+    'worker_memory_limit' => 256,//单worker内存使用限制(MB)
+    'worker_memory_auto_restart' => false,//单worker内存超限后是否自动平滑轮换,默认关闭
     'redis_queue_memory_limit' => 1024,//redis队列管理进程内存限制(MB)
     'max_wait_time' => 30,
     'task_worker_num' => 4,

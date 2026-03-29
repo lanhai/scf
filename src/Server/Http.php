@@ -143,6 +143,7 @@ class Http extends \Scf\Core\Server {
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(false);
         Runtime::instance()->serverIsAlive(true);
+        Runtime::instance()->set(Key::RUNTIME_SERVER_STARTED_AT, $this->started);
         //启动master节点管理面板服务器
         if (!$this->isProxyUpstreamMode()) {
             Dashboard::start();
@@ -515,6 +516,9 @@ class Http extends \Scf\Core\Server {
      * @return array<string, mixed>
      */
     protected function buildUpstreamWorkerRestartResponse(array $payload): array {
+        if (!(bool)(Config::server()['worker_memory_auto_restart'] ?? false)) {
+            return ['ok' => false, 'status' => 403, 'message' => 'worker memory auto restart disabled'];
+        }
         $processName = (string)($payload['process'] ?? '');
         $pid = (int)($payload['pid'] ?? 0);
         if (!preg_match('/^worker:(\d+)$/', $processName, $matches)) {

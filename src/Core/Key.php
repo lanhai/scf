@@ -8,6 +8,7 @@ class Key {
     public const RUNTIME_SOCKET_PORT = 'socket_port';
     public const RUNTIME_MASTERDB_PORT = 'master_db_port';
     public const RUNTIME_RPC_PORT = 'rpc_port';
+    public const RUNTIME_SERVER_STARTED_AT = 'server_started_at';
     public const RUNTIME_SERVER_STATUS = 'server_status';
     public const RUNTIME_SERVER_DRAINING = 'server_draining';
     public const RUNTIME_REDIS_QUEUE_STATUS = 'redis_queue_status';

@@ -927,7 +927,7 @@ class SubProcessManager {
         $node->fingerprint = APP_FINGERPRINT;
         $node->port = Runtime::instance()->httpPort();
         $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
-        $node->started = time();
+        $node->started = $this->serverStartedAt();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
         $node->master_pid = $this->server->master_pid;
         $node->manager_pid = $this->server->manager_pid;
@@ -960,6 +960,24 @@ class SubProcessManager {
             ? LinuxCrontabManager::nodeTasks()
             : CrontabManager::allStatus();
         return $this->buildNodeStatusPayload($node);
+    }
+
+    /**
+     * 返回当前节点稳定的启动时间。
+     *
+     * `started` 字段表示服务本轮启动时间，不能随着每次心跳刷新。这里优先复用
+     * server bootstrap 时写入 Runtime 的固定值，缺失时只补一次。
+     *
+     * @return int
+     */
+    protected function serverStartedAt(): int {
+        $startedAt = (int)(Runtime::instance()->get(Key::RUNTIME_SERVER_STARTED_AT) ?? 0);
+        if ($startedAt > 0) {
+            return $startedAt;
+        }
+        $startedAt = time();
+        Runtime::instance()->set(Key::RUNTIME_SERVER_STARTED_AT, $startedAt);
+        return $startedAt;
     }
 
     /**
@@ -1777,7 +1795,7 @@ class SubProcessManager {
                 $node->fingerprint = APP_FINGERPRINT;
                 $node->port = Runtime::instance()->httpPort();
                 $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
-                $node->started = time();
+                $node->started = $this->serverStartedAt();
                 $node->restart_times = 0;
                 $node->master_pid = $this->server->master_pid;
                 $node->manager_pid = $this->server->manager_pid;

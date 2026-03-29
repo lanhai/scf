@@ -97,18 +97,11 @@ class Manager extends Component {
             }
         }
 
-        $normalized = $hostPart . ($port > 0 ? ':' . $port : '');
-        $path = (string)($parsed['path'] ?? '');
-        if ($path !== '' && $path !== '/') {
-            $normalized .= $path;
-        }
-        if (!empty($parsed['query'])) {
-            $normalized .= '?' . $parsed['query'];
-        }
-        if (!empty($parsed['fragment'])) {
-            $normalized .= '#' . $parsed['fragment'];
-        }
-        return $normalized;
+        $parsed['host'] = $hostPart;
+        $parsed['port'] = $port > 0 ? $port : null;
+        return $this->buildTargetFromParts($parsed, isset($parsed['scheme']) && $parsed['scheme'] !== 'tcp'
+            ? ((string)$parsed['scheme'] . '://')
+            : '');
     }
 
     /**
@@ -161,11 +154,7 @@ class Manager extends Component {
      * @return WebSocket
      */
     public function getMasterSocketConnection(): WebSocket {
-        $socketHost = $this->getMasterHost();
-        $path = parse_url('ws://' . $socketHost, PHP_URL_PATH);
-        if (!$path || $path === '/') {
-            $socketHost .= '/dashboard.socket';
-        }
+        $socketHost = $this->ensureMasterSocketPath($this->getMasterHost());
         $startedAt = time();
         $attempt = 0;
         $retryDelay = 1;
@@ -222,19 +211,110 @@ class Manager extends Component {
     /**
      * 构建内部 websocket 地址。
      *
-     * 这里保持历史行为，默认仍使用 `ws://`，避免擅自改变现有 master 连接协议。
-     * 本轮只修复“域名不应自动补控制面端口”，不改动你现有的协议选择方式。
+     * 这里保留显式协议的语义：
+     * - `http://` -> `ws://`
+     * - `https://` -> `wss://`
+     * - `ws://` / `wss://` 原样沿用
+     * 未显式指定协议时，仍默认 `ws://`。
      *
-     * @param string $socketHost 不带协议头的 host[:port][/path]。
+     * @param string $socketHost 可带协议头的 host[:port][/path]。
      * @param string $subject 内部鉴权 token 的 subject。
      * @return string 完整 websocket URL。
      */
     public function buildInternalSocketUrl(string $socketHost, string $subject): string {
-        $query = http_build_query([
-            'token' => DashboardAuth::createInternalSocketToken($subject)
-        ]);
-        $separator = str_contains($socketHost, '?') ? '&' : '?';
-        return 'ws://' . $socketHost . $separator . $query;
+        $parts = parse_url(str_contains($socketHost, '://') ? $socketHost : ('ws://' . $socketHost));
+        if ($parts === false) {
+            $query = http_build_query([
+                'token' => DashboardAuth::createInternalSocketToken($subject)
+            ]);
+            $separator = str_contains($socketHost, '?') ? '&' : '?';
+            return 'ws://' . $socketHost . $separator . $query;
+        }
+
+        $scheme = strtolower((string)($parts['scheme'] ?? 'ws'));
+        $scheme = match ($scheme) {
+            'https' => 'wss',
+            'http' => 'ws',
+            'wss' => 'wss',
+            default => 'ws',
+        };
+        parse_str((string)($parts['query'] ?? ''), $queryParams);
+        $queryParams['token'] = DashboardAuth::createInternalSocketToken($subject);
+
+        $authority = trim((string)($parts['host'] ?? ''));
+        if ($authority === '') {
+            $authority = trim((string)($parts['path'] ?? ''), '/');
+            $parts['path'] = '';
+        }
+        $port = (int)($parts['port'] ?? 0);
+        if ($port > 0) {
+            $authority .= ':' . $port;
+        }
+        $path = (string)($parts['path'] ?? '');
+        if ($path === '' || $path === '/') {
+            $path = '/dashboard.socket';
+        }
+
+        return $scheme . '://' . $authority . $path . '?' . http_build_query($queryParams);
+    }
+
+    /**
+     * 确保 master 连接目标始终落到 dashboard websocket 路径。
+     *
+     * `master_host` 可能带前缀路径，例如 `/cp`。这里不能只在 path 为空时才补
+     * `/dashboard.socket`，否则 slave 会把页面入口路径当成 websocket 握手路径。
+     *
+     * @param string $socketHost 原始 master 目标。
+     * @return string
+     */
+    protected function ensureMasterSocketPath(string $socketHost): string {
+        $parts = parse_url(str_contains($socketHost, '://') ? $socketHost : ('ws://' . $socketHost));
+        if ($parts === false) {
+            return rtrim($socketHost, '/') . '/dashboard.socket';
+        }
+
+        $path = (string)($parts['path'] ?? '');
+        if ($path === '' || $path === '/') {
+            $path = '/dashboard.socket';
+        } elseif (!str_ends_with($path, '/dashboard.socket')) {
+            $path = rtrim($path, '/') . '/dashboard.socket';
+        }
+        $parts['path'] = $path;
+
+        return $this->buildTargetFromParts($parts, isset($parts['scheme']) ? ((string)$parts['scheme'] . '://') : '');
+    }
+
+    /**
+     * 依据 parse_url 结果重建目标地址。
+     *
+     * @param array<string, mixed> $parts parse_url 的返回结果。
+     * @param string $schemePrefix 协议前缀，例如 `ws://`。
+     * @return string
+     */
+    protected function buildTargetFromParts(array $parts, string $schemePrefix = ''): string {
+        $host = trim((string)($parts['host'] ?? ''));
+        if ($host === '') {
+            $host = trim((string)($parts['path'] ?? ''));
+            $parts['path'] = '';
+        }
+        $target = $schemePrefix . $host;
+        $port = (int)($parts['port'] ?? 0);
+        if ($port > 0) {
+            $target .= ':' . $port;
+        }
+        $path = (string)($parts['path'] ?? '');
+        if ($path !== '') {
+            $target .= $path;
+        }
+        $query = (string)($parts['query'] ?? '');
+        if ($query !== '') {
+            $target .= '?' . $query;
+        }
+        $fragment = (string)($parts['fragment'] ?? '');
+        if ($fragment !== '') {
+            $target .= '#' . $fragment;
+        }
+        return $target;
     }
 
     /**

@@ -71,88 +71,103 @@ class SocketListener extends Listener {
                     break;
                 case 'appoint_update':
                     $taskId = $data['data']['task_id'] ?? uniqid('update_', true);
-                    $slaveHosts = $this->connectedSlaveHosts($server);
-                    $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
-                    Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
-                        'type' => $data['data']['type'],
-                        'version' => $data['data']['version'],
-                        'task_id' => $taskId,
-                    ]);
-                    $timeout = $data['data']['timeout'] ?? 300;
-                    $masterUpdateDone = false;
-                    $masterUpdateSuccess = false;
-                    $masterUpdateError = null;
-                    Coroutine::create(function () use ($data, &$masterUpdateDone, &$masterUpdateSuccess, &$masterUpdateError) {
-                        $masterUpdateSuccess = App::appointUpdateTo($data['data']['type'], $data['data']['version'], false);
-                        if (!$masterUpdateSuccess) {
-                            $masterUpdateError = App::getLastUpdateError() ?: '未知原因';
-                        }
-                        $masterUpdateDone = true;
-                    });
-                    //等待所有节点升级完成
-                    $slaveSuccessCount = 0;
-                    $round = 1;
-                    // 用 Channel 等待定时器条件完成（协程友好，避免 Event::wait() 报错）
-                    $waitCh = new Channel(1);
-                    Timer::tick(1000 * 5, function ($timerId) use ($taskId, $slaveHosts, $timeout, &$slaveSuccessCount, &$round, $waitCh, &$masterUpdateDone) {
-                        $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
-                        $slaveSuccessCount = $summary['success'];
-                        if (($summary['finished'] && $masterUpdateDone) || $round >= ($timeout / 5)) {
-                            Timer::clear($timerId);
-                            // 通知等待方（非阻塞：如果已有人在等则唤醒）
-                            if (!$waitCh->isEmpty()) { /* no-op */
+                    $frameFd = $frame->fd;
+                    $runUpdateTask = function (bool $replyToRequester = true) use ($data, $server, $frameFd, $taskId) {
+                        $slaveHosts = $this->connectedSlaveHosts($server);
+                        $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
+                        Manager::instance()->sendCommandToAllNodeClients('appoint_update', [
+                            'type' => $data['data']['type'],
+                            'version' => $data['data']['version'],
+                            'task_id' => $taskId,
+                        ]);
+                        $timeout = $data['data']['timeout'] ?? 300;
+                        $masterUpdateDone = false;
+                        $masterUpdateSuccess = false;
+                        $masterUpdateError = null;
+                        Coroutine::create(function () use ($data, &$masterUpdateDone, &$masterUpdateSuccess, &$masterUpdateError) {
+                            $masterUpdateSuccess = App::appointUpdateTo($data['data']['type'], $data['data']['version'], false);
+                            if (!$masterUpdateSuccess) {
+                                $masterUpdateError = App::getLastUpdateError() ?: '未知原因';
                             }
-                            $waitCh->push(true);
+                            $masterUpdateDone = true;
+                        });
+                        $slaveSuccessCount = 0;
+                        $round = 1;
+                        $waitCh = new Channel(1);
+                        Timer::tick(1000 * 5, function ($timerId) use ($taskId, $slaveHosts, $timeout, &$slaveSuccessCount, &$round, $waitCh, &$masterUpdateDone) {
+                            $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
+                            $slaveSuccessCount = $summary['success'];
+                            if (($summary['finished'] && $masterUpdateDone) || $round >= ($timeout / 5)) {
+                                Timer::clear($timerId);
+                                if (!$waitCh->isEmpty()) { /* no-op */
+                                }
+                                $waitCh->push(true);
+                            }
+                            $round++;
+                        });
+                        $waitCh->pop($timeout + 3);
+                        if ($slaveSuccessCount) {
+                            Console::success("【Server】{$slaveSuccessCount} 个子节点更新完成，版本号:{$data['data']['version']}");
                         }
-                        $round++;
-                    });
-                    // 最多等待
-                    $waitCh->pop($timeout + 3);
-                    if ($slaveSuccessCount) {
-                        Console::success("【Server】{$slaveSuccessCount} 个子节点更新完成，版本号:{$data['data']['version']}");
-                    }
-                    $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
-                    if ($summary['failed_nodes']) {
-                        $failedDetails = array_map(static function ($item) {
-                            $error = $item['error'] ?? '';
-                            return $item['host'] . ($error ? '(' . $error . ')' : '');
-                        }, $summary['failed_nodes']);
-                        Console::warning("【Server】以下节点升级失败:" . implode('; ', $failedDetails));
-                    }
-                    if ($summary['pending_hosts']) {
-                        Console::warning("【Server】以下节点升级超时未完成:" . implode(',', $summary['pending_hosts']));
-                    }
-                    $masterState = 'pending';
-                    if ($masterUpdateSuccess) {
-                        $masterState = 'success';
-                    } elseif ($masterUpdateDone) {
-                        $masterState = 'failed';
-                        Console::warning("【Server】当前节点升级失败:{$data['data']['type']} => {$data['data']['version']},原因:{$masterUpdateError}");
+                        $summary = $this->summarizeNodeUpdateTask($taskId, $slaveHosts);
+                        if ($summary['failed_nodes']) {
+                            $failedDetails = array_map(static function ($item) {
+                                $error = $item['error'] ?? '';
+                                return $item['host'] . ($error ? '(' . $error . ')' : '');
+                            }, $summary['failed_nodes']);
+                            Console::warning("【Server】以下节点升级失败:" . implode('; ', $failedDetails));
+                        }
+                        if ($summary['pending_hosts']) {
+                            Console::warning("【Server】以下节点升级超时未完成:" . implode(',', $summary['pending_hosts']));
+                        }
+                        $masterState = 'pending';
+                        if ($masterUpdateSuccess) {
+                            $masterState = 'success';
+                        } elseif ($masterUpdateDone) {
+                            $masterState = 'failed';
+                            Console::warning("【Server】当前节点升级失败:{$data['data']['type']} => {$data['data']['version']},原因:{$masterUpdateError}");
+                        } else {
+                            Console::warning("【Server】当前节点升级超时未完成:{$data['data']['type']} => {$data['data']['version']}");
+                        }
+                        $responsePayload = [
+                            'task_id' => $taskId,
+                            'type' => $data['data']['type'],
+                            'version' => $data['data']['version'],
+                            'total_nodes' => count($slaveHosts) + 1,
+                            'success_count' => $summary['success'] + ($masterState === 'success' ? 1 : 0),
+                            'failed_count' => count($summary['failed_nodes']) + ($masterState === 'failed' ? 1 : 0),
+                            'pending_count' => count($summary['pending_hosts']) + ($masterState === 'pending' ? 1 : 0),
+                            'failed_nodes' => $summary['failed_nodes'],
+                            'pending_hosts' => $summary['pending_hosts'],
+                            'master' => [
+                                'host' => SERVER_HOST,
+                                'state' => $masterState,
+                                'error' => $masterState === 'failed' ? $masterUpdateError : '',
+                            ]
+                        ];
+                        $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
+                        if ($replyToRequester && $server->exist($frameFd) && $server->isEstablished($frameFd)) {
+                            $server->push($frameFd, JsonHelper::toJson($responsePayload));
+                        }
+                        if ($masterUpdateSuccess && $data['data']['type'] !== 'public') {
+                            App::scheduleUpdateReload($data['data']['type']);
+                        }
+                    };
+                    if (!empty($data['data']['async'])) {
+                        if ($server->exist($frameFd) && $server->isEstablished($frameFd)) {
+                            $server->push($frameFd, JsonHelper::toJson([
+                                'accepted' => true,
+                                'task_id' => $taskId,
+                                'type' => $data['data']['type'],
+                                'version' => $data['data']['version'],
+                                'message' => '升级任务已开始，请通过节点状态或控制台查看进度',
+                            ]));
+                        }
+                        Coroutine::create(function () use ($runUpdateTask) {
+                            $runUpdateTask(false);
+                        });
                     } else {
-                        Console::warning("【Server】当前节点升级超时未完成:{$data['data']['type']} => {$data['data']['version']}");
-                    }
-                    $responsePayload = [
-                        'task_id' => $taskId,
-                        'type' => $data['data']['type'],
-                        'version' => $data['data']['version'],
-                        'total_nodes' => count($slaveHosts) + 1,
-                        'success_count' => $summary['success'] + ($masterState === 'success' ? 1 : 0),
-                        'failed_count' => count($summary['failed_nodes']) + ($masterState === 'failed' ? 1 : 0),
-                        'pending_count' => count($summary['pending_hosts']) + ($masterState === 'pending' ? 1 : 0),
-                        'failed_nodes' => $summary['failed_nodes'],
-                        'pending_hosts' => $summary['pending_hosts'],
-                        'master' => [
-                            'host' => SERVER_HOST,
-                            'state' => $masterState,
-                            'error' => $masterState === 'failed' ? $masterUpdateError : '',
-                        ]
-                    ];
-                    $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
-                    if ($server->exist($frame->fd) && $server->isEstablished($frame->fd)) {
-                        $server->push($frame->fd, JsonHelper::toJson($responsePayload));
-                    }
-                    if ($masterUpdateSuccess && $data['data']['type'] !== 'public') {
-                        App::scheduleUpdateReload($data['data']['type']);
+                        $runUpdateTask();
                     }
                     break;
                 case 'restartAll':
@@ -200,6 +215,10 @@ class SocketListener extends Listener {
                     if ($taskId && $host) {
                         Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, $host), $payload);
                     }
+                    Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
+                        'event' => 'node_update_state',
+                        'data' => $payload,
+                    ]));
                     if (!empty($payload['message'])) {
                         Console::info($payload['message'], false);
                     }

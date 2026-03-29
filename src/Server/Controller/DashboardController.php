@@ -500,8 +500,9 @@ class DashboardController extends Controller {
         if (is_null($host)) {
             return Result::error('访问域名获取失败');
         }
+        $prefix = $this->dashboardRefererPathPrefix((string)$referer);
         if (!str_contains($host, 'localhost') || Env::inDocker()) {
-            $socketHost = $protocol . Request::header('host') . '/dashboard.socket';
+            $socketHost = $protocol . Request::header('host') . $prefix . '/dashboard.socket';
         } else {
             $socketHost = $protocol . 'localhost:' . Runtime::instance()->httpPort();
         }
@@ -551,6 +552,34 @@ class DashboardController extends Controller {
     }
 
     /**
+     * 从 dashboard Referer 中提取 websocket 入口前缀。
+     *
+     * 非 gateway 模式下 dashboard 也可能被挂在 `/cp` 这类静态目录里，因此
+     * websocket 入口不能永远固定写成根路径。
+     *
+     * @param string $referer 页面来源地址。
+     * @return string 无前缀时返回空字符串。
+     */
+    protected function dashboardRefererPathPrefix(string $referer): string {
+        if ($referer === '') {
+            return '';
+        }
+        $parts = parse_url($referer);
+        if (!is_array($parts)) {
+            return '';
+        }
+        $path = trim((string)($parts['path'] ?? ''));
+        if ($path === '' || $path === '/') {
+            return '';
+        }
+        if (str_contains(basename($path), '.')) {
+            $path = dirname($path);
+        }
+        $path = '/' . trim($path, '/');
+        return $path === '/' ? '' : rtrim($path, '/');
+    }
+
+    /**
      * 面板更新
      * @return Result
      */
@@ -582,7 +611,8 @@ class DashboardController extends Controller {
             $this->clearDashboard(SCF_ROOT . '/build/public/dashboard');
         }
         $downloadClient = Http::create($dashboardVersion['server'] . $dashboardVersion['file']);
-        $downloadResult = $downloadClient->download($publicFilePath);
+        // 面板资源更新也需要显式超时，避免下载层无界等待导致 dashboard 一直停留在 loading。
+        $downloadResult = $downloadClient->download($publicFilePath, Updater::PACKAGE_DOWNLOAD_TIMEOUT_SECONDS);
         if ($downloadResult->hasError()) {
             return Result::error("下载升级包失败:" . $downloadResult->getMessage());
         }

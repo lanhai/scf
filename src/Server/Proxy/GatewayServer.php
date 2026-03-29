@@ -55,6 +55,22 @@ use Throwable;
  * 真正承载业务请求的仍然是 upstream。
  */
 class GatewayServer {
+
+    /**
+     * dashboard 触发本地升级时等待业务编排子进程返回的最长时间。
+     *
+     * 该等待窗口需要与 Updater 下载包的超时保持一致，否则 worker 可能先超时，
+     * 而业务编排子进程还在无意义地等待下载层返回。
+     */
+    private const DASHBOARD_UPDATE_LOCAL_TIMEOUT_SECONDS = 300;
+
+    /**
+     * dashboard 等待 slave 节点汇总升级结果的最长时间。
+     *
+     * 本地更新完成后，worker 仍需给在线 slave 留出统一的收口窗口；该窗口保持
+     * 与前端 longTaskTimeout 兼容，避免请求尚未返回就先在浏览器侧超时。
+     */
+    private const DASHBOARD_UPDATE_CLUSTER_TIMEOUT_SECONDS = 300;
     protected const ROLLING_DRAIN_GRACE_SECONDS = 30;
     protected const ROLLING_CUTOVER_VERIFY_TIMEOUT_SECONDS = 8;
     protected const ROLLING_CUTOVER_STABLE_CHECKS = 3;
@@ -331,7 +347,7 @@ class GatewayServer {
 
     protected function onHandshake(Request $request, Response $response): bool {
         $uri = $request->server['request_uri'] ?? '/';
-        if ($uri === '/dashboard.socket') {
+        if ($this->isDashboardSocketPath($uri)) {
             if (!$this->dashboardEnabled()) {
                 $response->status(403);
                 $response->end('dashboard disabled');
@@ -396,6 +412,7 @@ class GatewayServer {
         Runtime::instance()->serverIsAlive(true);
         Runtime::instance()->httpPort($this->port);
         Runtime::instance()->rpcPort($this->rpcPort);
+        Runtime::instance()->set(Key::RUNTIME_SERVER_STARTED_AT, $this->startedAt);
         Runtime::instance()->dashboardPort($this->resolvedDashboardPort());
         ConsoleRelay::setGatewayPort($this->port);
         ConsoleRelay::setLocalSubscribed(false);
@@ -1051,7 +1068,7 @@ class GatewayServer {
             'task_id' => $taskId,
             'type' => $type,
             'version' => $version,
-        ], true, 300);
+        ], true, self::DASHBOARD_UPDATE_LOCAL_TIMEOUT_SECONDS);
         $localData = (array)($localResult->getData() ?: []);
         if ($localResult->hasError() && !$localData) {
             $error = (string)($localResult->getMessage() ?: '更新失败');
@@ -1069,7 +1086,7 @@ class GatewayServer {
         }
 
         $this->logUpdateStage($taskId, $type, $version, 'wait_cluster_result');
-        $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, 300);
+        $summary = $this->waitForNodeUpdateSummary($taskId, $slaveHosts, self::DASHBOARD_UPDATE_CLUSTER_TIMEOUT_SECONDS);
         $pendingHosts = [];
         $masterState = (string)($localData['master']['state'] ?? ($localResult->hasError() ? 'failed' : 'success'));
         $masterError = (string)($localData['master']['error'] ?? ($localResult->hasError() ? (string)$localResult->getMessage() : ''));
@@ -1384,6 +1401,10 @@ class GatewayServer {
                 if ($taskId !== '' && $host !== '') {
                     Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, $host), $payload);
                 }
+                Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
+                    'event' => 'node_update_state',
+                    'data' => $payload,
+                ]));
                 if (!empty($payload['message'])) {
                     Console::info((string)$payload['message'], false);
                 }
@@ -1699,7 +1720,7 @@ class GatewayServer {
     }
 
     protected function resolvedDashboardPort(): int {
-        return $this->dashboardEnabled() ? $this->port : 0;
+        return $this->dashboardEnabled() ? $this->controlPort() : 0;
     }
 
     public function internalControlHost(): string {
@@ -1707,7 +1728,7 @@ class GatewayServer {
     }
 
     public function shouldRoutePathToControlPlane(string $path): bool {
-        return $path === '/dashboard.socket'
+        return $this->isDashboardSocketPath($path)
             || str_starts_with($path, '/_gateway')
             || str_starts_with($path, '/~');
     }
@@ -3490,8 +3511,12 @@ class GatewayServer {
             $osActualMb = $pssMb ?? $rssMb;
         }
 
+        $serverConfig = Config::server();
+        $autoRestartEnabled = (bool)($serverConfig['worker_memory_auto_restart'] ?? false);
+
         if (
             $alive
+            && $autoRestartEnabled
             && $autoRestart === STATUS_ON
             && str_starts_with($name, 'worker:')
             && $limitMb > 0
@@ -3544,6 +3569,9 @@ class GatewayServer {
      * @return bool 请求被 upstream 接收时返回 true。
      */
     protected function requestUpstreamWorkerMemoryRestart(array $instance, string $processName, int $pid, float $osActualMb, int $limitMb): bool {
+        if (!(bool)(Config::server()['worker_memory_auto_restart'] ?? false)) {
+            return false;
+        }
         $host = (string)($instance['host'] ?? '127.0.0.1');
         $port = (int)($instance['port'] ?? 0);
         if ($port <= 0 || $processName === '' || $pid <= 0) {
@@ -3634,6 +3662,7 @@ class GatewayServer {
         $normalizedHost = trim($host);
         $normalizedReferer = trim($referer);
         $normalizedProto = strtolower(trim($forwardedProto));
+        $pathPrefix = $this->dashboardRefererPathPrefix($normalizedReferer);
 
         if ($this->isLoopbackDashboardHost($normalizedHost)) {
             $refererAuthority = $this->dashboardRefererAuthority($normalizedReferer);
@@ -3656,7 +3685,7 @@ class GatewayServer {
             ? 'wss://'
             : 'ws://';
 
-        return $protocol . $normalizedHost . '/dashboard.socket';
+        return $protocol . $normalizedHost . $pathPrefix . '/dashboard.socket';
     }
 
     protected function normalizeDashboardSocketAuthority(string $authority): string {
@@ -3709,6 +3738,57 @@ class GatewayServer {
         }
         $port = (int)($parts['port'] ?? 0);
         return $port > 0 ? ($host . ':' . $port) : $host;
+    }
+
+    /**
+     * 从 dashboard Referer 中提取 websocket 对外路径前缀。
+     *
+     * dashboard 可能被静态目录挂在 `/cp` 这类前缀下。此时 websocket 入口也必须
+     * 跟着变成 `/cp/dashboard.socket`，否则前端和 slave 节点都会连接到错误路径。
+     *
+     * @param string $referer dashboard 页面 Referer。
+     * @return string
+     */
+    protected function dashboardRefererPathPrefix(string $referer): string {
+        if ($referer === '') {
+            return '';
+        }
+        $parts = parse_url($referer);
+        if (!is_array($parts)) {
+            return '';
+        }
+        return $this->normalizeDashboardPathPrefix((string)($parts['path'] ?? ''));
+    }
+
+    /**
+     * 将 dashboard 页面路径归一化成 websocket 入口前缀。
+     *
+     * @param string $path 页面路径或静态文件路径。
+     * @return string 无前缀时返回空字符串。
+     */
+    protected function normalizeDashboardPathPrefix(string $path): string {
+        $path = trim($path);
+        if ($path === '' || $path === '/' || $path === '/~' || $this->isDashboardSocketPath($path) || str_starts_with($path, '/_gateway')) {
+            return '';
+        }
+        if (str_contains(basename($path), '.')) {
+            $path = dirname($path);
+        }
+        $path = '/' . trim($path, '/');
+        return $path === '/' ? '' : rtrim($path, '/');
+    }
+
+    /**
+     * 判断路径是否命中 dashboard websocket 入口。
+     *
+     * 为兼容 `/cp/dashboard.socket` 这类前缀部署，不能只认根路径的精确匹配。
+     *
+     * @param string $path 请求路径。
+     * @return bool
+     */
+    protected function isDashboardSocketPath(string $path): bool {
+        $path = trim($path);
+        return $path === '/dashboard.socket' || str_ends_with($path, '/dashboard.socket');
     }
 
     protected function buildDashboardVersionStatus(): array {

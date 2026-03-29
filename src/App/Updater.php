@@ -21,6 +21,15 @@ use Throwable;
 
 class Updater {
 
+    /**
+     * 业务包/资源包下载的最长等待时间。
+     *
+     * dashboard 触发的版本升级会同步等待本地 `apply_local_package` 阶段返回，
+     * 如果下载层无限等待，gateway worker 会长时间卡在“正在应用本地包”阶段。
+     * 这里统一给业务更新下载设置显式超时，避免上游下载抖动时整条升级链挂死。
+     */
+    public const PACKAGE_DOWNLOAD_TIMEOUT_SECONDS = 300;
+
     protected static array $_instances;
     protected ?array $_version = null;
     protected ?array $_remoteAppVersions = null;
@@ -497,7 +506,7 @@ class Updater {
         $host = $versionInfo['server'];
         $port = $versionInfo['port'] ?? 80;
         $client = new Client($host, $port, $port == 443);
-        $client->set(['timeout' => -1]);
+        $client->set(['timeout' => self::PACKAGE_DOWNLOAD_TIMEOUT_SECONDS]);
         $client->setHeaders([
             'Host' => $host,
             'User-Agent' => 'Chrome/49.0.2587.3',

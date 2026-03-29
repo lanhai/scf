@@ -661,19 +661,25 @@ class LinuxCrontabManager {
      * @return array
      */
     protected function readConfig(): array {
-        $file = $this->configFile();
-        if (!file_exists($file)) {
-            return ['items' => []];
+        $storageFile = self::storageConfigFile();
+        $storageConfig = self::readConfigPayloadFromFile($storageFile);
+        if ($storageConfig !== null && !empty($storageConfig['items'])) {
+            return $storageConfig;
         }
 
-        $json = File::readJson($file);
-        if (!is_array($json)) {
-            return ['items' => []];
+        $legacyFile = self::legacyConfigFile();
+        $legacyConfig = self::readConfigPayloadFromFile($legacyFile);
+        if ($legacyConfig !== null) {
+            // 旧文件里仍有配置时，优先恢复到新的 db 存储，避免页面因为空的新文件而看不到任务。
+            self::persistConfigPayload($legacyConfig);
+            return $legacyConfig;
         }
 
-        return [
-            'items' => array_values(is_array($json['items'] ?? null) ? $json['items'] : $json),
-        ];
+        if ($storageConfig !== null) {
+            return $storageConfig;
+        }
+
+        return ['items' => []];
     }
 
     /**
@@ -1278,21 +1284,59 @@ class LinuxCrontabManager {
      */
     protected function configFile(): string {
         $storageFile = self::storageConfigFile();
-        if (is_file($storageFile)) {
+        $storagePayload = self::readConfigPayloadFromFile($storageFile);
+        if ($storagePayload !== null && !empty($storagePayload['items'])) {
             return $storageFile;
         }
 
         $legacyFile = self::legacyConfigFile();
-        if (!is_file($legacyFile)) {
+        $legacyPayload = self::readConfigPayloadFromFile($legacyFile);
+        if ($legacyPayload === null) {
             return $storageFile;
         }
 
-        $payload = File::readJson($legacyFile);
-        if (is_array($payload) && self::persistConfigPayload($payload)) {
+        if (self::persistConfigPayload($legacyPayload)) {
+            return $storageFile;
+        }
+
+        if ($storagePayload !== null) {
             return $storageFile;
         }
 
         return $legacyFile;
+    }
+
+    /**
+     * 从指定文件中读取排程配置。
+     *
+     * 新老文件在历史上存在两种结构：
+     * - {'items': [...]}
+     * - 直接以数组保存 [...]
+     *
+     * 这里统一归一成 {'items': [...]}，并把“空文件/坏 JSON”视为无效配置，
+     * 避免它们遮住仍然有数据的旧文件。
+     *
+     * @param string $file
+     * @return array<string, mixed>|null
+     */
+    protected static function readConfigPayloadFromFile(string $file): ?array {
+        if (!is_file($file)) {
+            return null;
+        }
+
+        $json = File::readJson($file);
+        if (!is_array($json)) {
+            return null;
+        }
+
+        $items = array_values(is_array($json['items'] ?? null) ? $json['items'] : $json);
+        if (!$items && !array_key_exists('items', $json)) {
+            return null;
+        }
+
+        return [
+            'items' => $items,
+        ];
     }
 
     /**
