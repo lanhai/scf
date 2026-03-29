@@ -966,7 +966,9 @@ class GatewayServer {
         } else {
             Console::info("【Gateway】投递业务编排命令: command={$command}, wait=no");
         }
-        $this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator']);
+        if (!$this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator'])) {
+            return Result::error('Gateway 业务编排命令投递失败');
+        }
         if (!$waitForResult) {
             return Result::success($acceptedMessage ?: 'accepted');
         }
@@ -991,7 +993,10 @@ class GatewayServer {
         Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
         $params['request_id'] = $requestId;
         Console::info("【Gateway】异步投递业务编排命令: command={$command}, request_id={$requestId}");
-        $this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator']);
+        if (!$this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator'])) {
+            Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
+            return false;
+        }
         return $requestId;
     }
 

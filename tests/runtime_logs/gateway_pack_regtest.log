@@ -1,0 +1,73 @@
+Gateway framework pack 已同步
+03-29 13:13:48.403 [38;2;87;137;255m【Gateway】启动前等待端口释放: 20580, 20585, 20590[0m
+03-29 13:14:03.555 [38;2;87;137;255m【Gateway】等待端口释放超时，继续尝试启动: 20580, 20585, 20590[0m
+03-29 13:14:03.667 [38;2;87;137;255m【Gateway】监听端口占用，等待重试: 0.0.0.0:20590[0m
+PHP Fatal error:  Uncaught Swoole\Exception: failed to listen server port[0.0.0.0:20590], Error: Address already in use[48] in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php:1705
+Stack trace:
+#0 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(1705): Swoole\Server->__construct('0.0.0.0', 20590, 2, 1)
+#1 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(180): Scf\Server\Proxy\GatewayServer->createGatewaySocketServer()
+#2 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(259): Scf\Server\Proxy\GatewayServer->start()
+#3 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(43): Scf\Server\Proxy\CliBootstrap::startGateway(Array)
+#4 /Users/lanhai/projects/swoole/scf/src/Command/DefaultCommand/Gateway.php(101): Scf\Server\Proxy\CliBootstrap::bootedRun()
+#5 phar:///Users/lanhai/projects/swoole/scf/build/gateway.pack/Command/Manager.php(79): Scf\Command\DefaultCommand\Gateway->exec()
+#6 /Users/lanhai/projects/swoole/scf/src/Command/Runner.php(62): Scf\Command\Manager->run(Object(Scf\Command\Caller))
+#7 /Users/lanhai/projects/swoole/scf/boot(320): Scf\Command\Runner->run(Object(Scf\Command\Caller))
+#8 /Users/lanhai/projects/swoole/scf/boot(336): scf_run(Array)
+#9 [internal function]: {closure}(Object(Swoole\Process))
+#10 /Users/lanhai/projects/swoole/scf/boot(338): Swoole\Process->start()
+#11 /Users/lanhai/projects/swoole/scf/boot(39): scf_run_server_process_loop(Array)
+#12 /Users/lanhai/projects/swoole/scf/boot(31): scf_bootstrap(Array)
+#13 {main}
+
+Next RuntimeException: Gateway 监听失败，端口仍被占用: 0.0.0.0:20590 in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php:1708
+Stack trace:
+#0 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(180): Scf\Server\Proxy\GatewayServer->createGatewaySocketServer()
+#1 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(259): Scf\Server\Proxy\GatewayServer->start()
+#2 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(43): Scf\Server\Proxy\CliBootstrap::startGateway(Array)
+#3 /Users/lanhai/projects/swoole/scf/src/Command/DefaultCommand/Gateway.php(101): Scf\Server\Proxy\CliBootstrap::bootedRun()
+#4 phar:///Users/lanhai/projects/swoole/scf/build/gateway.pack/Command/Manager.php(79): Scf\Command\DefaultCommand\Gateway->exec()
+#5 /Users/lanhai/projects/swoole/scf/src/Command/Runner.php(62): Scf\Command\Manager->run(Object(Scf\Command\Caller))
+#6 /Users/lanhai/projects/swoole/scf/boot(320): Scf\Command\Runner->run(Object(Scf\Command\Caller))
+#7 /Users/lanhai/projects/swoole/scf/boot(336): scf_run(Array)
+#8 [internal function]: {closure}(Object(Swoole\Process))
+#9 /Users/lanhai/projects/swoole/scf/boot(338): Swoole\Process->start()
+#10 /Users/lanhai/projects/swoole/scf/boot(39): scf_run_server_process_loop(Array)
+#11 /Users/lanhai/projects/swoole/scf/boot(31): scf_bootstrap(Array)
+#12 {main}
+  thrown in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php on line 1708
+
+Fatal error: Uncaught Swoole\Exception: failed to listen server port[0.0.0.0:20590], Error: Address already in use[48] in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php:1705
+Stack trace:
+#0 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(1705): Swoole\Server->__construct('0.0.0.0', 20590, 2, 1)
+#1 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(180): Scf\Server\Proxy\GatewayServer->createGatewaySocketServer()
+#2 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(259): Scf\Server\Proxy\GatewayServer->start()
+#3 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(43): Scf\Server\Proxy\CliBootstrap::startGateway(Array)
+#4 /Users/lanhai/projects/swoole/scf/src/Command/DefaultCommand/Gateway.php(101): Scf\Server\Proxy\CliBootstrap::bootedRun()
+#5 phar:///Users/lanhai/projects/swoole/scf/build/gateway.pack/Command/Manager.php(79): Scf\Command\DefaultCommand\Gateway->exec()
+#6 /Users/lanhai/projects/swoole/scf/src/Command/Runner.php(62): Scf\Command\Manager->run(Object(Scf\Command\Caller))
+#7 /Users/lanhai/projects/swoole/scf/boot(320): Scf\Command\Runner->run(Object(Scf\Command\Caller))
+#8 /Users/lanhai/projects/swoole/scf/boot(336): scf_run(Array)
+#9 [internal function]: {closure}(Object(Swoole\Process))
+#10 /Users/lanhai/projects/swoole/scf/boot(338): Swoole\Process->start()
+#11 /Users/lanhai/projects/swoole/scf/boot(39): scf_run_server_process_loop(Array)
+#12 /Users/lanhai/projects/swoole/scf/boot(31): scf_bootstrap(Array)
+#13 {main}
+
+Next RuntimeException: Gateway 监听失败，端口仍被占用: 0.0.0.0:20590 in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php:1708
+Stack trace:
+#0 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php(180): Scf\Server\Proxy\GatewayServer->createGatewaySocketServer()
+#1 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(259): Scf\Server\Proxy\GatewayServer->start()
+#2 /Users/lanhai/projects/swoole/scf/src/Server/Proxy/CliBootstrap.php(43): Scf\Server\Proxy\CliBootstrap::startGateway(Array)
+#3 /Users/lanhai/projects/swoole/scf/src/Command/DefaultCommand/Gateway.php(101): Scf\Server\Proxy\CliBootstrap::bootedRun()
+#4 phar:///Users/lanhai/projects/swoole/scf/build/gateway.pack/Command/Manager.php(79): Scf\Command\DefaultCommand\Gateway->exec()
+#5 /Users/lanhai/projects/swoole/scf/src/Command/Runner.php(62): Scf\Command\Manager->run(Object(Scf\Command\Caller))
+#6 /Users/lanhai/projects/swoole/scf/boot(320): Scf\Command\Runner->run(Object(Scf\Command\Caller))
+#7 /Users/lanhai/projects/swoole/scf/boot(336): scf_run(Array)
+#8 [internal function]: {closure}(Object(Swoole\Process))
+#9 /Users/lanhai/projects/swoole/scf/boot(338): Swoole\Process->start()
+#10 /Users/lanhai/projects/swoole/scf/boot(39): scf_run_server_process_loop(Array)
+#11 /Users/lanhai/projects/swoole/scf/boot(31): scf_bootstrap(Array)
+#12 {main}
+  thrown in /Users/lanhai/projects/swoole/scf/src/Server/Proxy/GatewayServer.php on line 1708
+[manager] child exit pid=86519 code=255 signal=0
+Gateway framework pack 已同步

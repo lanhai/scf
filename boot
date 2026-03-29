@@ -9,13 +9,13 @@ if (version_compare(PHP_VERSION, '8.1.0', '<')) {
 }
 
 const SCF_ROOT = __DIR__;
-require_once SCF_ROOT . '/src/Util/FrameworkPackLocator.php';
 defined('BUILD_PATH') || define('BUILD_PATH', dirname(SCF_ROOT) . '/build/');
 defined('SCF_APPS_ROOT') || define('SCF_APPS_ROOT', dirname(SCF_ROOT) . '/apps');
 scf_define_runtime_constants($argv);
 
-$srcPack = scf_try_upgrade(true);
+$srcPack = scf_try_upgrade($argv, true);
 defined('FRAMEWORK_ACTIVE_PACK') || define('FRAMEWORK_ACTIVE_PACK', $srcPack);
+defined('FRAMEWORK_ACTIVE_PACK_SIGNATURE') || define('FRAMEWORK_ACTIVE_PACK_SIGNATURE', scf_framework_pack_identity($srcPack));
 $frameworkSourceDir = scf_framework_source_dir();
 
 spl_autoload_register(static function (string $class) use ($srcPack, $frameworkSourceDir): void {
@@ -71,15 +71,27 @@ function scf_define_runtime_constants(array $argv): void {
     defined('FRAMEWORK_IS_PHAR') || define('FRAMEWORK_IS_PHAR', scf_bool_constant('IS_PACK') || (!scf_bool_constant('IS_DEV') && !scf_bool_constant('NO_PACK') && !scf_bool_constant('RUNNING_BUILD') && !scf_bool_constant('RUNNING_INSTALL') && !scf_bool_constant('RUNNING_BUILD_FRAMEWORK')));
 }
 
-function scf_try_upgrade(bool $boot = false): string {
+/**
+ * 统一在 boot 入口协调 framework 运行包。
+ *
+ * gateway pack 模式固定读取 `gateway.pack`，upstream/普通 CLI pack 模式
+ * 固定读取 `src.pack`。这里会在启动前把 `update.pack`、`src.pack`、
+ * `gateway.pack` 整理到一个可预测的状态，避免 gateway 在运行时直接命中
+ * 正在被更新的 `src.pack`。
+ *
+ * @param array $argv 原始启动参数
+ * @param bool $boot 是否处于 boot 早期；失败时会直接退出
+ * @return string 当前进程应该加载的 framework 包路径
+ */
+function scf_try_upgrade(array $argv, bool $boot = false): string {
     clearstatcache();
-
-    $updatePack = SCF_ROOT . '/build/update.pack';
     $lockFile = SCF_ROOT . '/build/update.lock';
-    $srcPack = scf_current_framework_pack_path();
+    $command = scf_runtime_boot_command($argv);
+    $srcPack = SCF_ROOT . '/build/src.pack';
+    $gatewayPack = SCF_ROOT . '/build/gateway.pack';
 
     if (!scf_bool_constant('FRAMEWORK_IS_PHAR')) {
-        return $srcPack;
+        return $command === 'gateway' ? $gatewayPack : $srcPack;
     }
 
     $lock = scf_open_lock_file($lockFile);
@@ -87,74 +99,231 @@ function scf_try_upgrade(bool $boot = false): string {
         scf_safe_call(static fn() => flock($lock, LOCK_EX));
     }
 
-    if (file_exists($updatePack)) {
-        $error = null;
-        $targetPack = scf_pending_framework_pack_path();
-        if (!scf_atomic_replace($updatePack, $targetPack, $error)) {
-            scf_stderr('写入更新文件失败!' . ($error ? ' ' . $error : ''));
-            scf_release_lock($lock);
-            if ($boot) {
-                exit(2);
-            }
-        } else {
-            scf_stdout('框架源码包已更新');
-            clearstatcache();
-            $srcPack = scf_current_framework_pack_path();
+    $error = null;
+    if ($command === 'gateway') {
+        $activePack = scf_prepare_gateway_framework_pack($error);
+    } else {
+        $activePack = scf_prepare_standard_framework_pack($error);
+    }
+    scf_release_lock($lock);
+
+    if ($activePack === '' || !file_exists($activePack)) {
+        if ($error) {
+            scf_stderr($error);
+        }
+        scf_stderr('内核文件不存在');
+        exit(3);
+    }
+
+    return $activePack;
+}
+
+/**
+ * 返回当前 boot 的命令类型。
+ *
+ * `gateway` 需要固定读 `gateway.pack`；`gateway_upstream` 和其它 pack CLI
+ * 统一固定读 `src.pack`。
+ *
+ * @param array $argv 原始 CLI 参数
+ * @return string
+ */
+function scf_runtime_boot_command(array $argv): string {
+    $command = trim((string)($argv[1] ?? ''));
+    if ($command === 'gateway') {
+        return 'gateway';
+    }
+    if ($command === 'gateway_upstream') {
+        return 'gateway_upstream';
+    }
+    return 'default';
+}
+
+/**
+ * gateway 运行包协调逻辑。
+ *
+ * gateway 永远固定读 `gateway.pack`。当 `update.pack` 存在时，gateway
+ * 启动会把这份新包同时发布到 `src.pack` 和 `gateway.pack`，确保随后拉起的
+ * upstream 直接看到最新 `src.pack`，而 gateway 自己则固定使用独立的
+ * `gateway.pack`。只有在没有 `update.pack` 时，才会在 `src.pack` 与
+ * `gateway.pack` 之间比较新旧并补齐较旧的一份。
+ *
+ * @param string|null $error 错误信息输出参数
+ * @return string
+ */
+function scf_prepare_gateway_framework_pack(?string &$error = null): string {
+    $updatePack = SCF_ROOT . '/build/update.pack';
+    $srcPack = SCF_ROOT . '/build/src.pack';
+    $gatewayPack = SCF_ROOT . '/build/gateway.pack';
+
+    // gateway 启动命中 update.pack 时，要把这次更新同时发布给 src/gateway 两个固定包名。
+    // 这样新 upstream 读取 src.pack 时就是最新包，而 gateway 仍然使用自己的独立副本。
+    if (is_file($updatePack)) {
+        if (!scf_atomic_copy($updatePack, $gatewayPack, $error)) {
+            return '';
+        }
+        if (!scf_atomic_replace($updatePack, $srcPack, $error)) {
+            return '';
+        }
+    } elseif (is_file($srcPack) && !is_file($gatewayPack)) {
+        // 没有 update 时若 gateway.pack 缺失，则从当前 src.pack 补一份出来，
+        // 保证 gateway 继续使用独立包而不是直接引用 src.pack。
+        if (!scf_atomic_copy($srcPack, $gatewayPack, $error)) {
+            return '';
         }
     }
 
-    scf_release_lock($lock);
+    if (!is_file($updatePack)) {
+        $latestPack = scf_pick_latest_framework_pack($srcPack, $gatewayPack);
+        if ($latestPack === '') {
+            $error = 'framework 包不存在';
+            return '';
+        }
 
-    if (!file_exists($srcPack)) {
-        scf_stderr('内核文件不存在');
-        exit(3);
+        // 当 upstream 先更新了 src.pack 而 gateway 还留在旧包时，等下一次
+        // gateway 重启再用“谁更新就复制谁”的规则把两边收敛到同一版本。
+        if ($latestPack !== $srcPack && !scf_atomic_copy($latestPack, $srcPack, $error)) {
+            return '';
+        }
+        if ($latestPack !== $gatewayPack && !scf_atomic_copy($latestPack, $gatewayPack, $error)) {
+            return '';
+        }
+    }
+
+    clearstatcache();
+    if (is_file($srcPack) && is_file($gatewayPack)) {
+        scf_stdout('Gateway framework pack 已同步');
+    } elseif (file_exists($updatePack) === false && is_file($gatewayPack)) {
+        scf_stdout('Gateway framework pack 已就绪');
+    }
+
+    return $gatewayPack;
+}
+
+/**
+ * upstream/普通 pack CLI 运行包协调逻辑。
+ *
+ * upstream 固定读 `src.pack`。它会优先把 `update.pack` 原子替换成 `src.pack`，
+ * 但绝不会去改 `gateway.pack`，避免正在运行中的 gateway 被新的 framework 包
+ * 直接顶掉。若没有 update，再在 `src.pack` 与 `gateway.pack` 之间选择较新的一份
+ * 同步回 `src.pack`。
+ *
+ * @param string|null $error 错误信息输出参数
+ * @return string
+ */
+function scf_prepare_standard_framework_pack(?string &$error = null): string {
+    $updatePack = SCF_ROOT . '/build/update.pack';
+    $srcPack = SCF_ROOT . '/build/src.pack';
+    $gatewayPack = SCF_ROOT . '/build/gateway.pack';
+
+    if (file_exists($updatePack) && !scf_atomic_replace($updatePack, $srcPack, $error)) {
+        return '';
+    }
+
+    $latestPack = scf_pick_latest_framework_pack($srcPack, $gatewayPack);
+    if ($latestPack === '') {
+        $error = 'framework 包不存在';
+        return '';
+    }
+
+    if ($latestPack !== $srcPack && !scf_atomic_copy($latestPack, $srcPack, $error)) {
+        return '';
     }
 
     return $srcPack;
 }
 
 /**
- * 读取 framework 的本地版本记录。
+ * 在 `src.pack` 和 `gateway.pack` 中选出较新的一份。
  *
- * 应用 phar 模式是通过本地版本信息决定“当前应该挂载哪个版本包”；
- * framework 这里也沿用同样思路，让 boot 不再依赖固定 `src.pack` 文件名。
+ * @param string $srcPack `src.pack` 路径
+ * @param string $gatewayPack `gateway.pack` 路径
+ * @return string
+ */
+function scf_pick_latest_framework_pack(string $srcPack, string $gatewayPack): string {
+    $srcExists = is_file($srcPack);
+    $gatewayExists = is_file($gatewayPack);
+    if ($srcExists && !$gatewayExists) {
+        return $srcPack;
+    }
+    if (!$srcExists && $gatewayExists) {
+        return $gatewayPack;
+    }
+    if (!$srcExists && !$gatewayExists) {
+        return '';
+    }
+
+    return scf_compare_framework_pack($srcPack, $gatewayPack) >= 0 ? $srcPack : $gatewayPack;
+}
+
+/**
+ * 比较两个 framework 包的新旧。
  *
+ * 优先比较包内 `version.php` 的版本号；版本相同则比较 build 时间，
+ * 最后再回退到文件修改时间。
+ *
+ * @param string $left 左侧包路径
+ * @param string $right 右侧包路径
+ * @return int
+ */
+function scf_compare_framework_pack(string $left, string $right): int {
+    $leftInfo = scf_read_framework_pack_version($left);
+    $rightInfo = scf_read_framework_pack_version($right);
+
+    $leftVersion = trim((string)($leftInfo['version'] ?? ''));
+    $rightVersion = trim((string)($rightInfo['version'] ?? ''));
+    if ($leftVersion !== '' && $rightVersion !== '') {
+        $versionCompare = version_compare($leftVersion, $rightVersion);
+        if ($versionCompare !== 0) {
+            return $versionCompare;
+        }
+    }
+
+    $leftBuild = trim((string)($leftInfo['build'] ?? ''));
+    $rightBuild = trim((string)($rightInfo['build'] ?? ''));
+    if ($leftBuild !== '' && $rightBuild !== '' && $leftBuild !== $rightBuild) {
+        return strcmp($leftBuild, $rightBuild);
+    }
+
+    return (filemtime($left) ?: 0) <=> (filemtime($right) ?: 0);
+}
+
+/**
+ * 读取 framework 包内的版本元数据。
+ *
+ * @param string $pack framework 包路径
  * @return array<string, mixed>|null
  */
-function scf_read_framework_version_info(): ?array {
-    return \Scf\Util\FrameworkPackLocator::readVersionInfo(SCF_ROOT);
+function scf_read_framework_pack_version(string $pack): ?array {
+    if (!is_file($pack)) {
+        return null;
+    }
+
+    $versionFile = 'phar://' . $pack . '/version.php';
+    if (!@file_exists($versionFile)) {
+        return null;
+    }
+
+    $data = @require $versionFile;
+    return is_array($data) ? $data : null;
 }
 
 /**
- * 根据 framework 版本号解析目标包路径。
+ * 计算 framework 包身份签名。
  *
- * 线上升级后的 framework 包按版本号落在 `build/framework/<version>.update`，
- * boot 启动时只需要根据本地版本记录选中对应包即可。若版本记录缺失，
- * 再回退到历史兼容用的 `build/src.pack`。
- *
- * @param string|null $version framework 版本号
+ * @param string $pack framework 包路径
  * @return string
  */
-function scf_framework_pack_path(?string $version = null): string {
-    return \Scf\Util\FrameworkPackLocator::packPath(SCF_ROOT, $version);
-}
+function scf_framework_pack_identity(string $pack): string {
+    if (!is_file($pack)) {
+        return '';
+    }
 
-/**
- * 返回当前 boot 应该加载的 framework 包路径。
- *
- * @return string
- */
-function scf_current_framework_pack_path(): string {
-    return \Scf\Util\FrameworkPackLocator::currentPackPath(SCF_ROOT);
-}
+    $version = scf_read_framework_pack_version($pack);
+    if (is_array($version) && $version) {
+        return trim((string)($version['version'] ?? '')) . '@' . trim((string)($version['build'] ?? ''));
+    }
 
-/**
- * 返回待生效 framework 更新包的落地路径。
- *
- * @return string
- */
-function scf_pending_framework_pack_path(): string {
-    return \Scf\Util\FrameworkPackLocator::pendingPackPath(SCF_ROOT);
+    return (string)(filesize($pack) ?: 0) . '@' . (string)(filemtime($pack) ?: 0);
 }
 
 function scf_run(array $argv): void {
@@ -193,9 +362,9 @@ function scf_run_server_process_loop(array $argv): void {
         if (!scf_bool_constant('IS_SERVER_PROCESS_START')) {
             break;
         }
-        $nextPack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : scf_current_framework_pack_path();
+        $nextPack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : scf_try_upgrade($argv);
         try {
-            $nextPack = scf_try_upgrade();
+            $nextPack = scf_try_upgrade($argv);
         } catch (\Throwable $e) {
             scf_stderr("[manager] update failed: {$e->getMessage()}");
         }
@@ -214,8 +383,9 @@ function scf_run_server_process_loop(array $argv): void {
 /**
  * 判断 server loop 是否需要整体重启 boot 进程。
  *
- * 只要当前运行中的 framework 包路径与本地版本记录选中的目标包不同，
- * 就说明“仅重启 child”还不够，需要把常驻 manager 自身也切到新包。
+ * 固定文件名方案下，`gateway.pack/src.pack` 可能在原路径上被换新内容。
+ * 这时即便路径不变，常驻 boot 进程也必须整体 re-exec，避免继续 fork 出
+ * 带着旧类定义的 child。
  *
  * @param string $targetPack 升级检查后应当生效的 framework 包路径
  * @return bool
@@ -232,7 +402,19 @@ function scf_should_reexec_server_process_loop(string $targetPack): bool {
 
     $currentRealPath = realpath($currentPack) ?: $currentPack;
     $targetRealPath = realpath($targetPack) ?: $targetPack;
-    return $currentRealPath !== $targetRealPath;
+    if ($currentRealPath !== $targetRealPath) {
+        return true;
+    }
+
+    $currentIdentity = defined('FRAMEWORK_ACTIVE_PACK_SIGNATURE')
+        ? (string)FRAMEWORK_ACTIVE_PACK_SIGNATURE
+        : scf_framework_pack_identity($currentPack);
+    $targetIdentity = scf_framework_pack_identity($targetPack);
+    if ($currentIdentity === '' || $targetIdentity === '') {
+        return false;
+    }
+
+    return $currentIdentity !== $targetIdentity;
 }
 
 /**
@@ -393,6 +575,47 @@ function scf_atomic_replace(string $from, string $to, ?string &$error = null): b
     }
 
     scf_safe_call(static fn() => unlink($from));
+    return true;
+}
+
+/**
+ * 通过临时文件原子复制 framework 包。
+ *
+ * @param string $from 源文件
+ * @param string $to 目标文件
+ * @param string|null $error 错误信息输出参数
+ * @return bool
+ */
+function scf_atomic_copy(string $from, string $to, ?string &$error = null): bool {
+    $error = null;
+    if (!is_file($from)) {
+        $error = '源文件不存在:' . $from;
+        return false;
+    }
+
+    $fromReal = realpath($from) ?: $from;
+    $toReal = realpath($to) ?: $to;
+    if ($fromReal === $toReal) {
+        return true;
+    }
+
+    $dir = dirname($to);
+    if (!is_dir($dir)) {
+        $error = '目标目录不存在:' . $dir;
+        return false;
+    }
+
+    $tmp = $dir . '/.' . basename($to) . '.tmp.' . getmypid();
+    if (!scf_safe_call(static fn() => copy($from, $tmp), $error)) {
+        return false;
+    }
+
+    scf_safe_call(static fn() => chmod($tmp, 0644));
+    if (!scf_safe_call(static fn() => rename($tmp, $to), $error)) {
+        scf_safe_call(static fn() => unlink($tmp));
+        return false;
+    }
+
     return true;
 }
 

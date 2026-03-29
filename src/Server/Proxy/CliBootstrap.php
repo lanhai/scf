@@ -504,18 +504,12 @@ class CliBootstrap {
         }
         $buildVersion = ['build' => 'development', 'version' => SCF_COMPOSER_VERSION];
         $versionFile = SCF_ROOT . '/src/version.php';
-        $localVersionFile = SCF_ROOT . '/build/framework/version.json';
         $activePack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : (SCF_ROOT . '/build/src.pack');
         $packVersionFile = 'phar://' . $activePack . '/version.php';
         if (defined('IS_DEV') && IS_DEV && is_file($versionFile)) {
             $buildVersion = require $versionFile;
         } elseif (@file_exists($packVersionFile)) {
             $buildVersion = require $packVersionFile;
-        } elseif (is_file($localVersionFile)) {
-            $data = json_decode((string)file_get_contents($localVersionFile), true);
-            if (is_array($data) && $data) {
-                $buildVersion = $data;
-            }
         } elseif (is_file($versionFile)) {
             $buildVersion = require $versionFile;
         }

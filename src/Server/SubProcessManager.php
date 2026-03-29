@@ -302,7 +302,17 @@ class SubProcessManager {
                     return false;
                 }
                 $this->bumpProcessGenerations($targets);
-                $this->sendCommand('upgrade', [], $targets);
+                $this->sendCommandToProcesses('upgrade', [], $targets);
+                return false;
+            case 'forward_process_command':
+                $forwardCommand = (string)($params['command'] ?? '');
+                if ($forwardCommand === '') {
+                    return false;
+                }
+                $forwardParams = (array)($params['payload'] ?? []);
+                $targets = array_values(array_filter((array)($params['targets'] ?? []), 'is_string'));
+                $targets = $targets ? array_values(array_filter($targets, fn(string $target): bool => $this->hasProcess($target))) : null;
+                $this->sendCommandToProcesses($forwardCommand, $forwardParams, $targets);
                 return false;
             case 'shutdown_processes':
                 $this->shutdownManagedProcessesDirect((bool)($params['graceful_business'] ?? false));
@@ -1269,19 +1279,55 @@ class SubProcessManager {
         $this->iterateProcesses(['CrontabManager', 'RedisQueue']);
     }
 
-    public function sendCommand($cmd, array $params = [], ?array $targets = null): void {
+    /**
+     * 向受管子进程发送控制命令。
+     *
+     * worker 持有的子进程对象不会随着 manager 内部重拉自动更新，因此这里默认先把
+     * 命令投递给 manager 进程，再由 manager 用“当前活着的”进程句柄转发。只有在
+     * manager 不可用时，才回退到当前进程内保存的本地句柄。
+     *
+     * @param string $cmd 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @param array<int, string>|null $targets 目标子进程名列表，null 表示广播
+     * @return bool 至少有一条命令成功投递时返回 true
+     */
+    public function sendCommand($cmd, array $params = [], ?array $targets = null): bool {
+        if ($this->dispatchManagerProcessCommand('forward_process_command', [
+            'command' => (string)$cmd,
+            'payload' => $params,
+            'targets' => $targets ?? [],
+        ])) {
+            return true;
+        }
+        return $this->sendCommandToProcesses((string)$cmd, $params, $targets);
+    }
+
+    /**
+     * 使用当前进程里保存的子进程句柄直接发送命令。
+     *
+     * 这条路径只作为 manager IPC 不可用时的降级兜底。真正的稳定路径由
+     * `sendCommand()` 先交给 manager 转发，避免 worker 拿着旧句柄投递到失效 pipe。
+     *
+     * @param string $cmd 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @param array<int, string>|null $targets 目标子进程名列表
+     * @return bool 至少有一条命令成功投递时返回 true
+     */
+    protected function sendCommandToProcesses(string $cmd, array $params = [], ?array $targets = null): bool {
         $targetLookup = $targets ? array_fill_keys($targets, true) : null;
+        $sent = false;
         foreach ($this->processList as $name => $process) {
             if ($targetLookup !== null && !isset($targetLookup[$name])) {
                 continue;
             }
             /** @var Process $process */
             $socket = $process->exportSocket();
-            $socket->send(JsonHelper::toJson([
+            $sent = $socket->send(JsonHelper::toJson([
                 'command' => $cmd,
                 'params' => $params,
-            ]));
+            ])) || $sent;
         }
+        return $sent;
     }
 
     public function iterateBusinessProcesses(): void {
@@ -1305,7 +1351,7 @@ class SubProcessManager {
             return;
         }
         $this->bumpProcessGenerations($targets);
-        $this->sendCommand('upgrade', [], $targets);
+        $this->sendCommandToProcesses('upgrade', [], $targets);
     }
 
     /**

@@ -65,6 +65,11 @@ class UpstreamSupervisor {
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_PID, getmypid());
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_STARTED_AT, time());
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT, time());
+        // gateway restart / shutdown 时，监督器既要继续收口托管 upstream，又不能
+        // 被阻塞式 Process::read() 卡住。这里改成与 Crontab/RedisQueue manager
+        // 一致的非阻塞 pipe 读取，并在 pipe 已关闭时把它当作监督器的终止信号。
+        $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
+        is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
         foreach ($this->plans as $plan) {
             try {
                 $this->launchPlan($plan);
@@ -75,8 +80,15 @@ class UpstreamSupervisor {
 
         while ($this->running) {
             Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT, time());
-            $data = $process->read();
-            if ($data === '' || $data === false) {
+            $data = is_resource($commandPipe) ? fread($commandPipe, 65535) : false;
+            if ($data === false || $data === '') {
+                // 父进程退出或 pipe 已被内核回收后，继续 read 只会反复抛出
+                // "Bad file descriptor"。这里把 EOF 视作监督器生命周期结束，交给
+                // run() 尾部统一执行 shutdownAll()/detach 收口。
+                if (!is_resource($commandPipe) || feof($commandPipe)) {
+                    Console::warning('【Gateway】UpstreamSupervisor 控制 pipe 已关闭，结束运行');
+                    break;
+                }
                 usleep(100000);
                 continue;
             }
@@ -94,6 +106,7 @@ class UpstreamSupervisor {
         if ($this->shutdownManagedInstancesOnExit) {
             $this->shutdownAll();
         }
+        is_resource($commandPipe) and fclose($commandPipe);
         Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT, time());
     }
 
