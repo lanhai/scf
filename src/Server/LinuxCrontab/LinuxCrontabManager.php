@@ -1309,7 +1309,11 @@ class LinuxCrontabManager {
      */
     protected function buildCommand(array $entry): string {
         $binDir = SCF_ROOT . '/bin';
-        $command = 'SCF_PHP_BIN=' . escapeshellarg(PHP_BINARY)
+        // flock 直接执行后续 command argv，而不会像 shell 那样解释前置的环境变量赋值。
+        // 这里统一改成显式走 `/usr/bin/env`，让“设置 SCF_PHP_BIN + 执行 bash 脚本”
+        // 在有无 flock 两种路径下都保持同样语义。
+        $command = escapeshellarg('/usr/bin/env')
+            . ' SCF_PHP_BIN=' . escapeshellarg(PHP_BINARY)
             . ' /bin/bash ./crontab'
             . ' -app=' . escapeshellarg(APP_DIR_NAME)
             . ' -env=' . escapeshellarg((string)$entry['env'])

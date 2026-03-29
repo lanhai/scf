@@ -23,6 +23,9 @@ use Throwable;
 use function Swoole\Coroutine\run;
 
 class App {
+    protected const LATEST_VERSION_CACHE_TTL_SECONDS = 30;
+    protected const LATEST_VERSION_REQUEST_TIMEOUT_SECONDS = 3;
+
     /**
      * @var array 模块
      */
@@ -37,6 +40,7 @@ class App {
     protected static string $path;
     protected static bool $_ready = false;
     protected static ?string $_lastUpdateError = null;
+    protected static array $_latestVersionCache = ['expires_at' => 0, 'value' => null];
 
     protected static function runSynchronously(callable $callable) {
         if (Coroutine::getCid() > 0) {
@@ -495,30 +499,49 @@ class App {
 
     /**
      * 最新版本
+     *
+     * dashboard / gateway 首页会频繁读取这组字段；这里必须把外部更新源访问
+     * 收口到短超时和进程内缓存，避免云端版本服务抖动时把本地控制面一起拖死。
+     *
      * @return array
      */
     public static function latestVersion(): array {
-        $app = null;
-        $public = null;
+        $cached = self::$_latestVersionCache['value'] ?? null;
+        if (is_array($cached) && (int)(self::$_latestVersionCache['expires_at'] ?? 0) > time()) {
+            return $cached;
+        }
+
+        $versions = [
+            'app' => null,
+            'public' => null,
+        ];
         $server = self::info()->update_server;
         if ($server) {
             $client = Http::create($server . '?time=' . time());
-            $result = $client->get();
-            if (!$result->hasError()) {
-                $remote = $result->getData();
-                if ($remote['app']) {
-                    foreach ($remote['app'] as $version) {
-                        if (($version['build_type'] == 1 || $version['build_type'] == 3) && is_null($app)) {
-                            $app = $version['version'];
-                        }
-                        if (($version['build_type'] == 2 || $version['build_type'] == 3) && is_null($public)) {
-                            $public = $version['version'];
+            try {
+                $result = $client->get(self::LATEST_VERSION_REQUEST_TIMEOUT_SECONDS);
+                if (!$result->hasError()) {
+                    $remote = $result->getData();
+                    if (!empty($remote['app']) && is_array($remote['app'])) {
+                        foreach ($remote['app'] as $version) {
+                            if (($version['build_type'] == 1 || $version['build_type'] == 3) && is_null($versions['app'])) {
+                                $versions['app'] = $version['version'];
+                            }
+                            if (($version['build_type'] == 2 || $version['build_type'] == 3) && is_null($versions['public'])) {
+                                $versions['public'] = $version['version'];
+                            }
                         }
                     }
                 }
+            } finally {
+                $client->close();
             }
         }
-        return compact('app', 'public');
+        self::$_latestVersionCache = [
+            'expires_at' => time() + self::LATEST_VERSION_CACHE_TTL_SECONDS,
+            'value' => $versions,
+        ];
+        return $versions;
     }
 
     /**

@@ -85,6 +85,7 @@ class GatewayServer {
     protected const UPSTREAM_SUPERVISOR_SYNC_INTERVAL_SECONDS = 15;
     protected const DASHBOARD_VERSION_CACHE_TTL_SECONDS = 30;
     protected const FRAMEWORK_VERSION_CACHE_TTL_SECONDS = 30;
+    protected const REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS = 3;
 
     protected Server $server;
     protected array $dashboardClients = [];
@@ -3873,9 +3874,15 @@ class GatewayServer {
 
         $dashboardVersion = ['version' => '--'];
         $client = \Scf\Client\Http::create(str_replace('version.json', 'dashboard-version.json', ENV_VARIABLES['scf_update_server']));
-        $response = $client->get();
-        if (!$response->hasError()) {
-            $dashboardVersion = $response->getData();
+        try {
+            // dashboard 首页的版本状态只是展示信息，不能因为外部版本源抖动
+            // 把 gateway 控制面 `/server` 卡成“像挂了一样”。
+            $response = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
+            if (!$response->hasError()) {
+                $dashboardVersion = $response->getData();
+            }
+        } finally {
+            $client->close();
         }
 
         $result = [
@@ -3921,9 +3928,13 @@ class GatewayServer {
         ];
 
         $client = \Scf\Client\Http::create(ENV_VARIABLES['scf_update_server']);
-        $response = $client->get();
-        if (!$response->hasError()) {
-            $remoteVersion = $response->getData();
+        try {
+            $response = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
+            if (!$response->hasError()) {
+                $remoteVersion = $response->getData();
+            }
+        } finally {
+            $client->close();
         }
 
         $this->frameworkRemoteVersionCache = [

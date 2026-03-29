@@ -37,6 +37,7 @@ use Swoole\Coroutine;
 use Throwable;
 
 class DashboardController extends Controller {
+    protected const REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS = 3;
 
     public static array $protectedActions = [
         '/nodes', '/memory'
@@ -521,10 +522,13 @@ class DashboardController extends Controller {
             $status['latest_version'] = App::latestVersion();
         }
         $client = Http::create(ENV_VARIABLES['scf_update_server']);
-        $remoteVersionResponse = $client->get();
-        $client->close();
-        if (!$remoteVersionResponse->hasError()) {
-            $remoteVersion = $remoteVersionResponse->getData();
+        try {
+            $remoteVersionResponse = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
+            if (!$remoteVersionResponse->hasError()) {
+                $remoteVersion = $remoteVersionResponse->getData();
+            }
+        } finally {
+            $client->close();
         }
         //控制面板
         $dashboardDir = SCF_ROOT . '/build/public/dashboard';
@@ -536,10 +540,15 @@ class DashboardController extends Controller {
         } else {
             $currentDashboardVersion = JsonHelper::recover(File::read($versionJson));
         }
+        $dashboardVersion = ['version' => '--'];
         $client = Http::create(str_replace('version.json', 'dashboard-version.json', ENV_VARIABLES['scf_update_server']));
-        $dashboardVersionResponse = $client->get();
-        if (!$dashboardVersionResponse->hasError()) {
-            $dashboardVersion = $dashboardVersionResponse->getData();
+        try {
+            $dashboardVersionResponse = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
+            if (!$dashboardVersionResponse->hasError()) {
+                $dashboardVersion = $dashboardVersionResponse->getData();
+            }
+        } finally {
+            $client->close();
         }
         $status['dashboard'] = [
             'version' => $currentDashboardVersion['version'],
