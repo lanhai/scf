@@ -38,6 +38,7 @@ class Framework implements CommandInterface {
 
     public function push(): void {
         $latestVersion = $this->version();
+        Dir::clear(SCF_ROOT . '/build/framework');
         Console::info('最新版本:' . $latestVersion);
         Console::line();
         Console::info('正在推送代码到github...');
