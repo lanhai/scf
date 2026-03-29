@@ -865,14 +865,14 @@ class SubProcessManager {
                         }
                     }
                     $reply = $socket->recv(1.0);
-                    if ($reply === false) {
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                        break;
-                    }
-                    if (!$reply || $reply->data === '' || $reply->data === '::pong') {
+                    // Saber websocket 在“这一秒内没有收到任何帧”时也可能返回 false，
+                    // 这不等于连接已断开。之前这里把 timeout 直接当成断线，slave
+                    // 会每隔几秒就主动 close 并重新握手，所以日志里不断出现新的
+                    // “已与master gateway建立连接,客户端ID:xx”。
+                    //
+                    // 这里改成与 Heartbeat 子进程同样的处理：timeout 只代表当前
+                    // 没有上行消息，本轮继续主动上送一次 node_heart_beat 保活。
+                    if ($reply === false || !$reply || $reply->data === '' || $reply->data === '::pong') {
                         $socket->push(JsonHelper::toJson([
                             'event' => 'node_heart_beat',
                             'data' => [

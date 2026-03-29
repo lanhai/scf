@@ -332,6 +332,12 @@ class GatewayNginxProxyHandler {
             'server {',
             '    listen ' . $listenPort . ';',
             '    server_name ' . $serverName . ';',
+            // gateway 往往监听在 9580 这类内部端口，外层再由公网域名反代接管。
+            // 一旦 nginx 在这个 server 块里自己生成绝对重定向（目录补斜杠、规范化等），
+            // 浏览器就会被带到 `host:9580`。这里统一关闭绝对跳转和端口拼接，让任何
+            // 内部重定向都保持相对路径，不暴露内部监听端口。
+            '    absolute_redirect off;',
+            '    port_in_redirect off;',
             '',
         ], $realIpLines, [
             // `/dashboard.socket` 和 `/_gateway` 都属于控制面，必须绕过业务 upstream。
@@ -442,6 +448,14 @@ class GatewayNginxProxyHandler {
     /**
      * 为静态资源路由生成额外的 location block。
      *
+     * 这里不仅要让 gateway 入口把 `/cp` 这类前端目录直接交给 nginx 本地文件系统，
+     * 还要避免 nginx 在“目录缺少尾随斜杠”时按监听端口生成绝对重定向。
+     *
+     * 业务入口通常监听在 9580 等内部端口，外层再由域名 nginx/SLB 接管。如果让
+     * nginx 自己为目录补斜杠，浏览器会收到类似 `https://host:9580/cp/` 的绝对
+     * Location，导致用户被错误地带到内部端口。因此目录型静态入口要由我们显式
+     * 返回相对跳转，只补路径，不暴露内部端口。
+     *
      * @return array nginx location block 行数组。
      */
     protected function renderStaticLocationBlocks(): array {
@@ -467,6 +481,11 @@ class GatewayNginxProxyHandler {
                 $blocks[] = '        root ' . $publicRoot . ';';
                 $blocks[] = '        access_log off;';
                 $blocks[] = '        log_not_found off;';
+                $blocks[] = '        etag off;';
+                $blocks[] = '        if_modified_since off;';
+                $blocks[] = '        expires -1;';
+                $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
+                $blocks[] = '        add_header Pragma "no-cache" always;';
                 $blocks[] = '        try_files $uri =404;';
                 $blocks[] = '    }';
                 continue;
@@ -480,13 +499,41 @@ class GatewayNginxProxyHandler {
             $blocks[] = '        root ' . $publicRoot . ';';
             $blocks[] = '        access_log off;';
             $blocks[] = '        log_not_found off;';
-            $blocks[] = '        try_files $uri $uri/ =404;';
+            $blocks[] = '        etag off;';
+            $blocks[] = '        if_modified_since off;';
+            $blocks[] = '        expires -1;';
+            $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
+            $blocks[] = '        add_header Pragma "no-cache" always;';
+            // 静态目录入口直接命中目录下 index.html，不再让 nginx 走“补尾斜杠”
+            // 的默认目录规范化流程。那条流程会按当前监听端口生成绝对 Location，
+            // 从而把 9580 之类的内部端口暴露给浏览器。
+            $blocks[] = '        try_files $uri/index.html =404;';
+            $blocks[] = '    }';
+            $blocks[] = '';
+            $blocks[] = '    location = ' . $normalized . '/ {';
+            $blocks[] = '        root ' . $publicRoot . ';';
+            $blocks[] = '        access_log off;';
+            $blocks[] = '        log_not_found off;';
+            $blocks[] = '        etag off;';
+            $blocks[] = '        if_modified_since off;';
+            $blocks[] = '        expires -1;';
+            $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
+            $blocks[] = '        add_header Pragma "no-cache" always;';
+            // `/cp/` 这种带尾斜杠的目录首页必须显式命中 index.html。
+            // 如果把它交给下面的前缀 location，再依赖 nginx 的目录/index 推断，
+            // 不同环境下可能落成 404 或命中其它规则，表现就是“有时能开有时 404”。
+            $blocks[] = '        try_files $uri/index.html =404;';
             $blocks[] = '    }';
             $blocks[] = '';
             $blocks[] = '    location ^~ ' . $normalized . '/ {';
             $blocks[] = '        root ' . $publicRoot . ';';
             $blocks[] = '        access_log off;';
             $blocks[] = '        log_not_found off;';
+            $blocks[] = '        etag off;';
+            $blocks[] = '        if_modified_since off;';
+            $blocks[] = '        expires -1;';
+            $blocks[] = '        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0" always;';
+            $blocks[] = '        add_header Pragma "no-cache" always;';
             $blocks[] = '        try_files $uri $uri/ =404;';
             $blocks[] = '    }';
         }

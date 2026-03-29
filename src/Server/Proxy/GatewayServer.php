@@ -32,7 +32,6 @@ use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Coroutine\Client as TcpClient;
-use Swoole\Event;
 use Swoole\ExitException;
 use Swoole\Http\Request;
 use Swoole\Http\Response;
@@ -1482,24 +1481,22 @@ class GatewayServer {
     }
 
     /**
-     * 将 gateway 关停动作 defer 到当前事件循环尾部。
+     * 统一调度 gateway 关闭。
      *
-     * dashboard HTTP / 本地命令接口需要先把响应写回调用方，再开始真正的控制面关闭。
-     * 这里直接用 Event::defer() 把 shutdown 推到当前事件循环尾部，避免：
-     * 1. 用 Timer 再挂一个 shutdown 期残留 timer；
-     * 2. 单 worker gateway 对自己 sendMessage() 时触发 "can't send messages to self"。
+     * 之前这里使用 `Event::defer()` 把 shutdown 推到事件循环尾部，目的是等 HTTP
+     * 响应先写回客户端。但在 gateway full restart / file watcher 重启链里，这会让
+     * 主进程在 shutdown 尾声仍然挂着一个 Event 回调，最终落到 Swoole 5.1 的
+     * rshutdown `Event::wait()` deprecated warning。
+     *
+     * 现在真正需要“响应先写回”的场景都已经通过 `__after_write` 钩子在响应完成后
+     * 才调用这里，因此无需再额外 defer。socket/本地命令路径也不会因为这里同步调用
+     * 而阻塞发送结果，直接进入 shutdown 才是最干净的收口方式。
      *
      * @param bool $preserveManagedUpstreams 是否保留业务实例，仅重启控制面
      * @return void
      */
     protected function scheduleGatewayShutdown(bool $preserveManagedUpstreams = false): void {
-        try {
-            Event::defer(function () use ($preserveManagedUpstreams): void {
-                $this->shutdownGateway($preserveManagedUpstreams);
-            });
-        } catch (Throwable) {
-            $this->shutdownGateway($preserveManagedUpstreams);
-        }
+        $this->shutdownGateway($preserveManagedUpstreams);
     }
 
     protected function waitForGatewayPortsReleased(int $timeoutSeconds = 15, int $intervalMs = 200): void {
