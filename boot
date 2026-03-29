@@ -9,11 +9,13 @@ if (version_compare(PHP_VERSION, '8.1.0', '<')) {
 }
 
 const SCF_ROOT = __DIR__;
+require_once SCF_ROOT . '/src/Util/FrameworkPackLocator.php';
 defined('BUILD_PATH') || define('BUILD_PATH', dirname(SCF_ROOT) . '/build/');
 defined('SCF_APPS_ROOT') || define('SCF_APPS_ROOT', dirname(SCF_ROOT) . '/apps');
 scf_define_runtime_constants($argv);
 
 $srcPack = scf_try_upgrade(true);
+defined('FRAMEWORK_ACTIVE_PACK') || define('FRAMEWORK_ACTIVE_PACK', $srcPack);
 $frameworkSourceDir = scf_framework_source_dir();
 
 spl_autoload_register(static function (string $class) use ($srcPack, $frameworkSourceDir): void {
@@ -72,9 +74,9 @@ function scf_define_runtime_constants(array $argv): void {
 function scf_try_upgrade(bool $boot = false): string {
     clearstatcache();
 
-    $srcPack = SCF_ROOT . '/build/src.pack';
     $updatePack = SCF_ROOT . '/build/update.pack';
     $lockFile = SCF_ROOT . '/build/update.lock';
+    $srcPack = scf_current_framework_pack_path();
 
     if (!scf_bool_constant('FRAMEWORK_IS_PHAR')) {
         return $srcPack;
@@ -87,7 +89,8 @@ function scf_try_upgrade(bool $boot = false): string {
 
     if (file_exists($updatePack)) {
         $error = null;
-        if (!scf_atomic_replace($updatePack, $srcPack, $error)) {
+        $targetPack = scf_pending_framework_pack_path();
+        if (!scf_atomic_replace($updatePack, $targetPack, $error)) {
             scf_stderr('写入更新文件失败!' . ($error ? ' ' . $error : ''));
             scf_release_lock($lock);
             if ($boot) {
@@ -96,6 +99,7 @@ function scf_try_upgrade(bool $boot = false): string {
         } else {
             scf_stdout('框架源码包已更新');
             clearstatcache();
+            $srcPack = scf_current_framework_pack_path();
         }
     }
 
@@ -107,6 +111,50 @@ function scf_try_upgrade(bool $boot = false): string {
     }
 
     return $srcPack;
+}
+
+/**
+ * 读取 framework 的本地版本记录。
+ *
+ * 应用 phar 模式是通过本地版本信息决定“当前应该挂载哪个版本包”；
+ * framework 这里也沿用同样思路，让 boot 不再依赖固定 `src.pack` 文件名。
+ *
+ * @return array<string, mixed>|null
+ */
+function scf_read_framework_version_info(): ?array {
+    return \Scf\Util\FrameworkPackLocator::readVersionInfo(SCF_ROOT);
+}
+
+/**
+ * 根据 framework 版本号解析目标包路径。
+ *
+ * 线上升级后的 framework 包按版本号落在 `build/framework/<version>.update`，
+ * boot 启动时只需要根据本地版本记录选中对应包即可。若版本记录缺失，
+ * 再回退到历史兼容用的 `build/src.pack`。
+ *
+ * @param string|null $version framework 版本号
+ * @return string
+ */
+function scf_framework_pack_path(?string $version = null): string {
+    return \Scf\Util\FrameworkPackLocator::packPath(SCF_ROOT, $version);
+}
+
+/**
+ * 返回当前 boot 应该加载的 framework 包路径。
+ *
+ * @return string
+ */
+function scf_current_framework_pack_path(): string {
+    return \Scf\Util\FrameworkPackLocator::currentPackPath(SCF_ROOT);
+}
+
+/**
+ * 返回待生效 framework 更新包的落地路径。
+ *
+ * @return string
+ */
+function scf_pending_framework_pack_path(): string {
+    return \Scf\Util\FrameworkPackLocator::pendingPackPath(SCF_ROOT);
 }
 
 function scf_run(array $argv): void {
@@ -145,14 +193,66 @@ function scf_run_server_process_loop(array $argv): void {
         if (!scf_bool_constant('IS_SERVER_PROCESS_START')) {
             break;
         }
+        $nextPack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : scf_current_framework_pack_path();
         try {
-            scf_try_upgrade();
+            $nextPack = scf_try_upgrade();
         } catch (\Throwable $e) {
             scf_stderr("[manager] update failed: {$e->getMessage()}");
         }
         scf_wait_command_ports_released($argv);
+        // server loop 本身是在当前 boot 进程里常驻的；如果 framework 包发生切换，
+        // 继续在这个旧进程里 fork 新 child，会把旧 autoload/Root::dir() 一起继承下去。
+        // 这里必须整体 re-exec boot，让下一轮 manager 从最新包重新启动。
+        if (scf_should_reexec_server_process_loop($nextPack)) {
+            scf_reexec_current_boot($argv);
+            return;
+        }
         sleep(2);
     }
+}
+
+/**
+ * 判断 server loop 是否需要整体重启 boot 进程。
+ *
+ * 只要当前运行中的 framework 包路径与本地版本记录选中的目标包不同，
+ * 就说明“仅重启 child”还不够，需要把常驻 manager 自身也切到新包。
+ *
+ * @param string $targetPack 升级检查后应当生效的 framework 包路径
+ * @return bool
+ */
+function scf_should_reexec_server_process_loop(string $targetPack): bool {
+    if (!scf_bool_constant('FRAMEWORK_IS_PHAR') || !defined('FRAMEWORK_ACTIVE_PACK')) {
+        return false;
+    }
+
+    $currentPack = (string)FRAMEWORK_ACTIVE_PACK;
+    if ($currentPack === '' || $targetPack === '') {
+        return false;
+    }
+
+    $currentRealPath = realpath($currentPack) ?: $currentPack;
+    $targetRealPath = realpath($targetPack) ?: $targetPack;
+    return $currentRealPath !== $targetRealPath;
+}
+
+/**
+ * 用当前 CLI 参数整体替换 boot 进程。
+ *
+ * @param array $argv 原始启动参数
+ * @return never
+ */
+function scf_reexec_current_boot(array $argv): never {
+    scf_stdout('[manager] framework pack changed, re-exec boot process');
+    if (!function_exists('pcntl_exec')) {
+        scf_stderr('[manager] pcntl_exec unavailable, cannot reload framework pack in-process');
+        exit(4);
+    }
+
+    pcntl_exec(PHP_BINARY, $argv);
+
+    $error = function_exists('pcntl_get_last_error') ? pcntl_strerror(pcntl_get_last_error()) : 'unknown';
+    scf_stderr('[manager] re-exec failed: ' . $error);
+    exit(5);
 }
 
 function scf_should_stop_server_process_loop(array $argv): bool {

@@ -295,6 +295,12 @@ class Updater {
                 Console::warning('【updater】创建更新目录失败');
                 return false;
             }
+            $frameworkDir = $saveDir . '/framework';
+            if (!is_dir($frameworkDir) && !mkdir($frameworkDir, 0775, true) && !is_dir($frameworkDir)) {
+                $this->setLastError('创建框架版本目录失败');
+                Console::warning('【updater】创建框架版本目录失败');
+                return false;
+            }
             $client = Http::create(ENV_VARIABLES['scf_update_server']);
             $remoteVersionResponse = $client->get();
             if ($remoteVersionResponse->hasError()) {
@@ -320,6 +326,14 @@ class Updater {
             if ($downloadResult->hasError()) {
                 $this->setLastError('引导文件下载失败:' . $downloadResult->getMessage());
                 Console::warning('【updater】引导文件下载失败:' . $downloadResult->getMessage());
+                return false;
+            }
+            // framework 选包逻辑改为和应用 phar 一样依赖本地版本信息，
+            // boot 启动时会按该版本记录去挂载 `build/framework/<version>.update`。
+            $versionFile = $frameworkDir . '/version.json';
+            if (!File::write($versionFile, JsonHelper::toJson($remoteVersion))) {
+                $this->setLastError('框架版本配置写入失败');
+                Console::warning('【updater】框架版本配置写入失败');
                 return false;
             }
             return true;

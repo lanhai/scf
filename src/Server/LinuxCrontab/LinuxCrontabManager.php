@@ -54,6 +54,16 @@ class LinuxCrontabManager {
     private const SCHEDULE_TYPES = ['interval', 'daily', 'weekly'];
 
     /**
+     * `flock` 命令解析结果缓存。
+     *
+     * Linux 排程页会频繁生成预览命令和摘要说明；这里缓存一次系统探测结果，
+     * 避免同一轮请求里反复执行 `command -v flock`。
+     *
+     * @var string|null
+     */
+    protected ?string $flockPath = null;
+
+    /**
      * 返回 dashboard 页面初始化所需的全部数据。
      *
      * @return array
@@ -62,6 +72,7 @@ class LinuxCrontabManager {
     public function overview(): array {
         $config = $this->readConfig();
         $systemCrontab = $this->readSystemCrontab();
+        $flockAvailable = $this->isFlockAvailable();
         if (empty($config['items']) && $systemCrontab !== '') {
             $recoveredItems = $this->recoverEntriesFromSystemCrontab($systemCrontab);
             if ($recoveredItems) {
@@ -78,6 +89,7 @@ class LinuxCrontabManager {
         foreach (($config['items'] ?? []) as $item) {
             $normalized = $this->normalizeEntry($item, false);
             $localApplicable = $this->shouldInstallOnCurrentNode($normalized);
+            $lockRequested = $this->isLockRequested($normalized);
             $expectedLineCount = $localApplicable && (int)($normalized['enabled'] ?? 0) === 1
                 ? count($this->buildCronLines($normalized))
                 : 0;
@@ -85,6 +97,10 @@ class LinuxCrontabManager {
             $normalized['cron_expression'] = $this->buildCronExpressionPreview($normalized);
             $normalized['command_preview'] = $this->buildCommand($normalized);
             $normalized['local_applicable'] = $localApplicable;
+            $normalized['lock_requested'] = $lockRequested;
+            $normalized['lock_runtime_available'] = $localApplicable ? $flockAvailable : null;
+            $normalized['lock_effective'] = $lockRequested && (!$localApplicable || $flockAvailable);
+            $normalized['lock_warning'] = $this->lockWarningMessage($normalized, $localApplicable, $flockAvailable);
             $normalized['expected_line_count'] = $expectedLineCount;
             $normalized['actual_line_count'] = $actualLineCount;
             $normalized['system_installed'] = $localApplicable && $expectedLineCount > 0 && $actualLineCount === $expectedLineCount;
@@ -105,6 +121,8 @@ class LinuxCrontabManager {
             'src_type' => APP_SRC_TYPE,
             'config_file' => $this->configFile(),
             'system_available' => $this->isSystemCrontabAvailable(),
+            'flock_available' => $flockAvailable,
+            'flock_path' => $this->resolveFlockPath(),
             'items' => $items,
             'available_tasks' => $this->availableTasks(),
             'env_options' => $this->envOptions(),
@@ -324,6 +342,10 @@ class LinuxCrontabManager {
             $items[] = $entry;
         }
 
+        if ($syncCurrentNode) {
+            $this->assertEntryCanSyncWithLock($entry);
+        }
+
         $this->writeConfig(['items' => array_values($items)]);
         if ($syncCurrentNode && $this->entryAffectsCurrentNode($entry, $previousEntry)) {
             $this->sync();
@@ -538,8 +560,13 @@ class LinuxCrontabManager {
             throw new Exception('未找到目标排程配置');
         }
 
+        $normalizedUpdated = $this->normalizeEntry((array)$updated, false);
+        if ($enabled) {
+            $this->assertEntryCanSyncWithLock($normalizedUpdated);
+        }
+
         $this->writeConfig(['items' => array_values($items)]);
-        if ($updated && $this->entryAffectsCurrentNode($this->normalizeEntry((array)$updated, false), $previousEntry)) {
+        if ($updated && $this->entryAffectsCurrentNode($normalizedUpdated, $previousEntry)) {
             $this->sync();
         }
         return $updated;
@@ -555,6 +582,7 @@ class LinuxCrontabManager {
      */
     public function sync(): array {
         $config = $this->readConfig();
+        $this->assertEntriesCanSyncWithLock((array)($config['items'] ?? []));
         $enabledCount = count(array_filter(
             $config['items'] ?? [],
             static fn(array $item): bool => (int)($item['enabled'] ?? 0) === 1
@@ -866,6 +894,7 @@ class LinuxCrontabManager {
      */
     protected function buildNodeTasks(): array {
         $systemAvailable = $this->isSystemCrontabAvailable();
+        $flockAvailable = $this->isFlockAvailable();
         $installedLineCount = $systemAvailable
             ? $this->extractInstalledLineCount($this->readSystemCrontab())
             : [];
@@ -875,6 +904,7 @@ class LinuxCrontabManager {
             if (!$this->shouldInstallOnCurrentNode($entry)) {
                 continue;
             }
+            $lockRequested = $this->isLockRequested($entry);
             $expectedLineCount = (int)($entry['enabled'] ?? 0) === 1
                 ? count($this->buildCronLines($entry))
                 : 0;
@@ -906,6 +936,10 @@ class LinuxCrontabManager {
                 'env' => $entry['env'],
                 'role' => $entry['role'],
                 'lock_enabled' => (int)($entry['lock_enabled'] ?? 1),
+                'lock_requested' => $lockRequested,
+                'lock_runtime_available' => $flockAvailable,
+                'lock_effective' => $lockRequested && $flockAvailable,
+                'lock_warning' => $this->lockWarningMessage($entry, true, $flockAvailable),
                 'schedule_type' => $entry['schedule_type'],
                 'schedule_summary' => $this->buildScheduleSummary($entry),
                 'remark' => $entry['remark'],
@@ -1092,8 +1126,14 @@ class LinuxCrontabManager {
             $summary .= '（仅限 ' . implode('、', $this->weekdayLabels($entry['weekdays'])) . '）';
         }
 
-        if ((int)($entry['lock_enabled'] ?? 1) === 1) {
-            $summary .= '，重入时跳过';
+        if ($this->isLockRequested($entry)) {
+            if (!$this->shouldInstallOnCurrentNode($entry)) {
+                $summary .= '，已开启互斥锁';
+            } elseif ($this->isFlockAvailable()) {
+                $summary .= '，重入时跳过';
+            } else {
+                $summary .= '，已开启互斥锁（当前节点未安装 flock，同步时会失败）';
+            }
         }
 
         return $summary;
@@ -1284,7 +1324,7 @@ class LinuxCrontabManager {
         $command .= ' -namespace=' . escapeshellarg((string)$entry['namespace']);
         $command .= ' -entry_id=' . escapeshellarg((string)$entry['id']);
 
-        $flockPath = trim((string)@shell_exec('command -v flock 2>/dev/null'));
+        $flockPath = $this->resolveFlockPath();
         $lockFile = '/tmp/' . APP_DIR_NAME . '_' . preg_replace('/[^a-z0-9_]+/i', '_', (string)$entry['id']) . '.lock';
         if ((int)($entry['lock_enabled'] ?? 1) === 1 && $flockPath !== '') {
             $command = escapeshellarg($flockPath)
@@ -1306,7 +1346,7 @@ class LinuxCrontabManager {
      * @return string
      */
     protected function readSystemCrontab(): string {
-        $command = trim((string)@shell_exec('command -v crontab 2>/dev/null'));
+        $command = $this->resolveSystemCrontabCommand();
         if ($command === '') {
             return '';
         }
@@ -1329,7 +1369,7 @@ class LinuxCrontabManager {
      * @throws Exception
      */
     protected function writeSystemCrontab(string $content): void {
-        $command = trim((string)@shell_exec('command -v crontab 2>/dev/null'));
+        $command = $this->resolveSystemCrontabCommand();
         if ($command === '') {
             throw new Exception('系统未安装 crontab 命令');
         }
@@ -1429,7 +1469,7 @@ class LinuxCrontabManager {
      * @return bool
      */
     protected function isSystemCrontabAvailable(): bool {
-        return trim((string)@shell_exec('command -v crontab 2>/dev/null')) !== '';
+        return $this->resolveSystemCrontabCommand() !== '';
     }
 
     /**
@@ -1480,6 +1520,18 @@ class LinuxCrontabManager {
         }
 
         $json = File::readJson($file);
+        if (!is_array($json)) {
+            $raw = File::read($file);
+            if (is_string($raw) && $raw !== '') {
+                // 兼容 BOM 和异常中断后残留的空字节，避免“文件看起来有内容，但 items 直接读空”。
+                $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw) ?? $raw;
+                $raw = str_replace("\0", '', $raw);
+                $decoded = json_decode(trim($raw), true);
+                if (is_array($decoded)) {
+                    $json = $decoded;
+                }
+            }
+        }
         if (!is_array($json)) {
             return null;
         }
@@ -1549,6 +1601,141 @@ class LinuxCrontabManager {
         return str_contains($line, "-app='" . APP_DIR_NAME . "'")
             && str_contains($line, "-env='" . $this->scopeEnv() . "'")
             && str_contains($line, "-role='" . SERVER_ROLE . "'");
+    }
+
+    /**
+     * 判断条目是否请求了 Linux 层互斥锁。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @return bool
+     */
+    protected function isLockRequested(array $entry): bool {
+        return (int)($entry['lock_enabled'] ?? 1) === 1;
+    }
+
+    /**
+     * 返回当前节点是否可用 `flock`。
+     *
+     * @return bool
+     */
+    protected function isFlockAvailable(): bool {
+        return $this->resolveFlockPath() !== '';
+    }
+
+    /**
+     * 解析当前节点上的 `flock` 命令路径。
+     *
+     * @return string
+     */
+    protected function resolveFlockPath(): string {
+        if (!is_null($this->flockPath)) {
+            return $this->flockPath;
+        }
+
+        $resolved = trim((string)@shell_exec('command -v flock 2>/dev/null'));
+        if ($resolved !== '' && is_executable($resolved)) {
+            $this->flockPath = $resolved;
+            return $this->flockPath;
+        }
+
+        $candidates = [];
+        $pathEnv = (string)(getenv('PATH') ?: '');
+        if ($pathEnv !== '') {
+            foreach (explode(PATH_SEPARATOR, $pathEnv) as $directory) {
+                $directory = trim($directory);
+                if ($directory === '') {
+                    continue;
+                }
+                $candidates[] = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'flock';
+            }
+        }
+
+        // 兼容 GUI/守护进程环境没有加载 shell PATH 时的常见安装位置。
+        $candidates = array_merge($candidates, [
+            '/opt/homebrew/opt/util-linux/bin/flock',
+            '/opt/homebrew/bin/flock',
+            '/usr/local/opt/util-linux/bin/flock',
+            '/usr/local/bin/flock',
+            '/usr/bin/flock',
+            '/bin/flock',
+        ]);
+
+        foreach (array_unique($candidates) as $candidate) {
+            if (is_executable($candidate)) {
+                $this->flockPath = $candidate;
+                return $this->flockPath;
+            }
+        }
+
+        $this->flockPath = '';
+        return $this->flockPath;
+    }
+
+    /**
+     * 返回条目在当前节点上的互斥锁提示。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @param bool $localApplicable 是否作用于当前节点
+     * @param bool $flockAvailable 当前节点是否可用 flock
+     * @return string
+     */
+    protected function lockWarningMessage(array $entry, bool $localApplicable, bool $flockAvailable): string {
+        if (!$this->isLockRequested($entry) || !$localApplicable || $flockAvailable) {
+            return '';
+        }
+
+        return '当前节点未安装 flock，互斥锁不会生效；写入或同步到本机系统排程时会失败。';
+    }
+
+    /**
+     * 校验单条排程在当前节点同步时所需的互斥锁能力。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @return void
+     * @throws Exception 当前节点缺少 flock 且条目要求互斥锁时抛错
+     */
+    protected function assertEntryCanSyncWithLock(array $entry): void {
+        if (!$this->shouldInstallOnCurrentNode($entry)) {
+            return;
+        }
+        if ((int)($entry['enabled'] ?? 0) !== 1) {
+            return;
+        }
+        if (!$this->isLockRequested($entry)) {
+            return;
+        }
+        if ($this->isFlockAvailable()) {
+            return;
+        }
+
+        throw new Exception('当前节点未安装 flock，无法把启用了互斥锁的排程写入系统 crontab: '
+            . ($entry['name'] ?? $this->shortClassName((string)($entry['namespace'] ?? '')))
+            . '（' . ($entry['namespace'] ?? '--') . '）');
+    }
+
+    /**
+     * 校验当前节点即将同步的排程集合是否都满足互斥锁前置条件。
+     *
+     * @param array<int, array<string, mixed>> $items 排程配置列表
+     * @return void
+     * @throws Exception 只要有一条启用互斥锁的本机排程缺少 flock 就抛错
+     */
+    protected function assertEntriesCanSyncWithLock(array $items): void {
+        $blocked = [];
+        foreach ($items as $item) {
+            $entry = $this->normalizeEntry((array)$item, false);
+            try {
+                $this->assertEntryCanSyncWithLock($entry);
+            } catch (Exception) {
+                $blocked[] = ($entry['name'] ?? $this->shortClassName((string)($entry['namespace'] ?? '')))
+                    . '（' . ($entry['namespace'] ?? '--') . '）';
+            }
+        }
+
+        if ($blocked) {
+            throw new Exception('当前节点未安装 flock，以下启用了互斥锁的排程无法写入系统 crontab: '
+                . implode('、', $blocked));
+        }
     }
 
     /**
@@ -1658,7 +1845,17 @@ class LinuxCrontabManager {
         }
 
         $encoded = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-        if ($encoded === false || !File::write($file, $encoded . PHP_EOL)) {
+        if ($encoded === false) {
+            return false;
+        }
+
+        $tempFile = $file . '.tmp.' . getmypid() . '.' . mt_rand(1000, 9999);
+        // 先写临时文件再 rename，避免 dashboard 正在读配置时拿到半写 JSON。
+        if (!File::write($tempFile, $encoded . PHP_EOL)) {
+            return false;
+        }
+        if (!@rename($tempFile, $file)) {
+            @unlink($tempFile);
             return false;
         }
 
@@ -1669,5 +1866,35 @@ class LinuxCrontabManager {
         }
 
         return true;
+    }
+
+    /**
+     * 解析当前节点可用的 crontab 命令绝对路径。
+     *
+     * 常驻 dashboard/gateway 进程的 PATH 经常比交互 shell 更短，
+     * 只依赖 `command -v crontab` 很容易把“系统里明明有 crontab”误判成不可用，
+     * 进而导致从系统排程恢复 items 失败。这里先试 PATH，再兜底常见安装路径。
+     *
+     * @return string
+     */
+    protected function resolveSystemCrontabCommand(): string {
+        $command = trim((string)@shell_exec('command -v crontab 2>/dev/null'));
+        if ($command !== '' && is_executable($command)) {
+            return $command;
+        }
+
+        foreach ([
+            '/usr/bin/crontab',
+            '/bin/crontab',
+            '/usr/sbin/crontab',
+            '/opt/homebrew/bin/crontab',
+            '/usr/local/bin/crontab',
+        ] as $candidate) {
+            if (is_executable($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return '';
     }
 }
