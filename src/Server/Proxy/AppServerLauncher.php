@@ -425,11 +425,7 @@ class AppServerLauncher {
         if ($port <= 0) {
             return false;
         }
-        $ipcAction = $this->mapUpstreamControlPathToIpcAction($path);
-        if ($ipcAction === '') {
-            return false;
-        }
-        $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $timeoutSeconds);
+        $ipcResponse = $this->requestUpstreamIpc($port, $path, $timeoutSeconds);
         return is_array($ipcResponse) && (int)($ipcResponse['status'] ?? 0) === 200;
     }
 
@@ -604,12 +600,8 @@ class AppServerLauncher {
         if ($port <= 0) {
             return null;
         }
-        $ipcAction = $this->mapUpstreamStatusPathToIpcAction($path);
-        if ($ipcAction === '') {
-            return null;
-        }
         $effectiveTimeout = $path === self::STATUS_PATH ? max($timeoutSeconds, 5.0) : $timeoutSeconds;
-        $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $effectiveTimeout);
+        $ipcResponse = $this->requestUpstreamIpc($port, $path, $effectiveTimeout);
         if (!is_array($ipcResponse) || (int)($ipcResponse['status'] ?? 0) !== 200) {
             return null;
         }
@@ -618,31 +610,40 @@ class AppServerLauncher {
     }
 
     /**
-     * 把 upstream 状态接口路径映射为本地 IPC 动作名。
+     * 统一把 upstream 内部 HTTP 路径映射到本地 IPC 动作。
      *
-     * @param string $path 内部状态接口路径。
+     * 控制路径和状态路径最终都会落到同一个 UDS 请求面上，区别只在调用方
+     * 如何解释返回值。这里统一做路径到 action 的映射，避免状态/控制两套
+     * `match` 再各自维护一遍。
+     *
+     * @param string $path 内部 HTTP 路径。
      * @return string 对应的 IPC action；未映射时返回空字符串。
      */
-    protected function mapUpstreamStatusPathToIpcAction(string $path): string {
+    protected function mapUpstreamPathToIpcAction(string $path): string {
         return match ($path) {
             self::STATUS_PATH => 'upstream.status',
             self::HEALTH_PATH => 'upstream.health',
+            self::GRACEFUL_SHUTDOWN_PATH => 'upstream.shutdown',
+            self::QUIESCE_BUSINESS_PATH => 'upstream.quiesce',
             default => '',
         };
     }
 
     /**
-     * 把 upstream 控制接口路径映射为本地 IPC 动作名。
+     * 通过 UDS 向 upstream 发送内部 IPC 请求。
      *
-     * @param string $path 内部控制接口路径。
-     * @return string 对应的 IPC action；未映射时返回空字符串。
+     * @param int $port upstream HTTP 端口，用于推导 UDS 路径
+     * @param string $path 目标内部 HTTP 路径
+     * @param float $timeoutSeconds 请求超时
+     * @return array<string, mixed>|null
      */
-    protected function mapUpstreamControlPathToIpcAction(string $path): string {
-        return match ($path) {
-            self::GRACEFUL_SHUTDOWN_PATH => 'upstream.shutdown',
-            self::QUIESCE_BUSINESS_PATH => 'upstream.quiesce',
-            default => '',
-        };
+    protected function requestUpstreamIpc(int $port, string $path, float $timeoutSeconds): ?array {
+        $ipcAction = $this->mapUpstreamPathToIpcAction($path);
+        if ($port <= 0 || $ipcAction === '') {
+            return null;
+        }
+        $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $timeoutSeconds);
+        return is_array($ipcResponse) ? $ipcResponse : null;
     }
 
 }

@@ -503,11 +503,12 @@ class App {
      * dashboard / gateway 首页会频繁读取这组字段；这里必须把外部更新源访问
      * 收口到短超时和进程内缓存，避免云端版本服务抖动时把本地控制面一起拖死。
      *
+     * @param bool $forceRefresh 是否跳过进程内缓存直接请求远端版本源
      * @return array
      */
-    public static function latestVersion(): array {
+    public static function latestVersion(bool $forceRefresh = false): array {
         $cached = self::$_latestVersionCache['value'] ?? null;
-        if (is_array($cached) && (int)(self::$_latestVersionCache['expires_at'] ?? 0) > time()) {
+        if (!$forceRefresh && is_array($cached) && (int)(self::$_latestVersionCache['expires_at'] ?? 0) > time()) {
             return $cached;
         }
 

@@ -21,14 +21,31 @@ class DirectAppServerBootstrap {
      * 这里仅完成运行时常量、自动加载和参数初始化，然后交给 Http 启动。
      */
     public static function run(array $argv): void {
-        self::defineBaseConstants($argv);
-        self::registerFrameworkAutoload();
+        self::ensureBootstrapToolchain();
+        scf_define_bootstrap_root_constants(dirname(__DIR__, 3));
+        scf_define_runtime_constants($argv, [
+            'IS_PACK' => false,
+            'NO_PACK' => true,
+            'IS_HTTP_SERVER' => true,
+            'IS_HTTP_SERVER_START' => true,
+            'IS_GATEWAY_SERVER' => false,
+            'IS_GATEWAY_SERVER_START' => false,
+            'IS_SERVER_PROCESS_LOOP' => true,
+            'IS_SERVER_PROCESS_START' => true,
+            'RUNNING_BUILD' => false,
+            'RUNNING_INSTALL' => false,
+            'RUNNING_TOOLBOX' => false,
+            'RUNNING_BUILD_FRAMEWORK' => false,
+            'RUNNING_CREATE_AR' => false,
+            'FRAMEWORK_IS_PHAR' => false,
+        ]);
+        scf_register_source_framework_autoload();
         require_once SCF_ROOT . '/src/Const.php';
         require_once SCF_ROOT . '/vendor/autoload.php';
 
         date_default_timezone_set(getenv('TZ') ?: 'Asia/Shanghai');
 
-        [$args, $opts] = self::parseArgs($argv);
+        [$args, $opts] = scf_parse_cli_args($argv);
         Manager::instance()->setArgs($args);
         Manager::instance()->setOpts($opts);
         defined('PROXY_UPSTREAM_MODE') || define('PROXY_UPSTREAM_MODE', true);
@@ -38,88 +55,29 @@ class DirectAppServerBootstrap {
     }
 
     /**
-     * 定义独立 upstream 所需的基础常量和运行模式。
+     * 确保 direct upstream 的源码入口也能拿到 boot 共用的 bootstrap 工具链。
+     *
+     * @return void
      */
-    protected static function defineBaseConstants(array $argv): void {
-        defined('SCF_ROOT') || define('SCF_ROOT', dirname(__DIR__, 3));
-        defined('BUILD_PATH') || define('BUILD_PATH', dirname(SCF_ROOT) . '/build/');
-        defined('SCF_APPS_ROOT') || define('SCF_APPS_ROOT', dirname(SCF_ROOT) . '/apps');
+    protected static function ensureBootstrapToolchain(): void {
+        if (function_exists('scf_define_runtime_constants')) {
+            return;
+        }
 
-        $envVariables = [
-            'app_env' => getenv('APP_ENV') ?: '',
-            'app_dir' => getenv('APP_DIR') ?: '',
-            'app_src' => getenv('APP_SRC') ?: '',
-            'server_role' => getenv('SERVER_ROLE') ?: '',
-            'static_handler' => getenv('STATIC_HANDLER') ?: '',
-            'host_ip' => getenv('HOST_IP') ?: '',
-            'os_name' => getenv('OS_NAME') ?: '',
-            'network_mode' => getenv('NETWORK_MODE') ?: '',
-            'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',
+        $root = dirname(__DIR__, 3);
+        $candidates = [
+            $root . '/src/Command/Bootstrap/bootstrap.php',
+            $root . '/vendor/lhai/scf/src/Command/Bootstrap/bootstrap.php',
         ];
-
-        defined('ENV_VARIABLES') || define('ENV_VARIABLES', $envVariables);
-        defined('IS_DEV') || define('IS_DEV', in_array('-dev', $argv, true) || ($envVariables['app_env'] === 'dev'));
-        defined('IS_PACK') || define('IS_PACK', false);
-        defined('NO_PACK') || define('NO_PACK', true);
-        defined('IS_HTTP_SERVER') || define('IS_HTTP_SERVER', true);
-        defined('IS_HTTP_SERVER_START') || define('IS_HTTP_SERVER_START', true);
-        defined('RUNNING_BUILD') || define('RUNNING_BUILD', false);
-        defined('RUNNING_INSTALL') || define('RUNNING_INSTALL', false);
-        defined('RUNNING_TOOLBOX') || define('RUNNING_TOOLBOX', false);
-        defined('RUNNING_BUILD_FRAMEWORK') || define('RUNNING_BUILD_FRAMEWORK', false);
-        defined('RUNNING_CREATE_AR') || define('RUNNING_CREATE_AR', false);
-        defined('FRAMEWORK_IS_PHAR') || define('FRAMEWORK_IS_PHAR', false);
-    }
-
-    /**
-     * 注册框架类自动加载，确保 direct upstream 只加载源码树。
-     */
-    protected static function registerFrameworkAutoload(): void {
-        spl_autoload_register(static function (string $class): void {
-            if (!str_starts_with($class, 'Scf\\')) {
+        foreach ($candidates as $candidate) {
+            if (is_file($candidate)) {
+                require_once $candidate;
                 return;
             }
-            $relative = str_replace('\\', '/', substr($class, 4)) . '.php';
-            $path = SCF_ROOT . '/src/' . $relative;
-            if (is_file($path)) {
-                require_once $path;
-            }
-        });
-    }
-
-    /**
-     * 解析命令行参数与选项。
-     *
-     * 返回值结构与 CliBootstrap 保持一致，便于复用同一套参数约定。
-     */
-    protected static function parseArgs(array $argv): array {
-        $args = [];
-        $opts = [];
-        $params = $argv;
-        array_shift($params);
-        while (($param = current($params)) !== false) {
-            next($params);
-            if (str_starts_with($param, '-')) {
-                $option = ltrim($param, '-');
-                $value = null;
-                if (str_contains($option, '=')) {
-                    [$option, $value] = explode('=', $option, 2);
-                } elseif (($peek = current($params)) !== false && !str_starts_with((string)$peek, '-')) {
-                    $value = (string)$peek;
-                    next($params);
-                }
-                if ($option !== '') {
-                    $opts[$option] = $value;
-                }
-                continue;
-            }
-            if (str_contains($param, '=')) {
-                [$key, $value] = explode('=', $param, 2);
-                $args[$key] = $value;
-                continue;
-            }
-            $args[] = $param;
         }
-        return [$args, $opts];
+
+        throw new \RuntimeException(
+            'SCF bootstrap 工具链不存在, 已检查: ' . implode(', ', $candidates)
+        );
     }
 }

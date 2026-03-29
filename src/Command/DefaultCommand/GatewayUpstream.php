@@ -2,8 +2,6 @@
 
 namespace Scf\Command\DefaultCommand;
 
-require_once dirname(__DIR__, 2) . '/Server/Proxy/CliBootstrap.php';
-
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;

@@ -331,7 +331,7 @@ class DashboardController extends Controller {
         if ($type == 'framework' && !FRAMEWORK_IS_PHAR) {
             return Result::error('当前为源码模式,框架在线升级不可用');
         }
-        if ($type == 'framework' && file_exists(SCF_ROOT . '/build/update.pack')) {
+        if ($type == 'framework' && function_exists('scf_framework_update_ready') && scf_framework_update_ready()) {
             return Result::error('正在等待升级,请重启服务器');
         }
         $manager = new NodeManager();
@@ -499,6 +499,10 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionServer(): Result {
+        Request::get([
+            'refresh_versions',
+        ])->assign($refreshVersions);
+        $forceRefreshVersions = in_array(strtolower(trim((string)$refreshVersions)), ['1', 'true', 'yes'], true);
         $host = Request::header('host') ?: null;
         $referer = Request::header('referer');
         $protocol = (!empty($referer) && str_starts_with($referer, 'https')) ? 'wss://' : 'ws://';
@@ -506,8 +510,9 @@ class DashboardController extends Controller {
             return Result::error('访问域名获取失败');
         }
         $prefix = $this->dashboardRefererPathPrefix((string)$referer);
-        if (!str_contains($host, 'localhost') || Env::inDocker()) {
-            $socketHost = $protocol . Request::header('host') . $prefix . '/dashboard.socket';
+        $socketAuthority = $this->preferDashboardRefererAuthorityPort((string)$host, (string)$referer);
+        if (!str_contains($socketAuthority, 'localhost') || Env::inDocker()) {
+            $socketHost = $protocol . $socketAuthority . $prefix . '/dashboard.socket';
         } else {
             $socketHost = $protocol . 'localhost:' . Runtime::instance()->httpPort();
         }
@@ -519,9 +524,9 @@ class DashboardController extends Controller {
         ];
         $status['latest_version'] = [];
         if (APP_SRC_TYPE == 'phar') {
-            $status['latest_version'] = App::latestVersion();
+            $status['latest_version'] = App::latestVersion($forceRefreshVersions);
         }
-        $client = Http::create(ENV_VARIABLES['scf_update_server']);
+        $client = Http::create($this->appendRemoteVersionCacheBust((string)ENV_VARIABLES['scf_update_server']));
         try {
             $remoteVersionResponse = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
             if (!$remoteVersionResponse->hasError()) {
@@ -541,7 +546,7 @@ class DashboardController extends Controller {
             $currentDashboardVersion = JsonHelper::recover(File::read($versionJson));
         }
         $dashboardVersion = ['version' => '--'];
-        $client = Http::create(str_replace('version.json', 'dashboard-version.json', ENV_VARIABLES['scf_update_server']));
+        $client = Http::create($this->appendRemoteVersionCacheBust(str_replace('version.json', 'dashboard-version.json', (string)ENV_VARIABLES['scf_update_server'])));
         try {
             $dashboardVersionResponse = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
             if (!$dashboardVersionResponse->hasError()) {
@@ -590,6 +595,60 @@ class DashboardController extends Controller {
         }
         $path = '/' . trim($path, '/');
         return $path === '/' ? '' : rtrim($path, '/');
+    }
+
+    /**
+     * 为远端版本文件请求补充时间戳，绕过对象存储或 CDN 的共享缓存。
+     *
+     * dashboard 首页展示的“云端最新版本”依赖这些元数据文件。如果这里直接请求
+     * 固定 URL，发布已经完成时也可能继续命中旧缓存，导致控制面长时间看不到新版本。
+     *
+     * @param string $url 远端版本文件地址。
+     * @return string 带 cache-busting 参数的地址。
+     */
+    protected function appendRemoteVersionCacheBust(string $url): string {
+        if ($url === '') {
+            return $url;
+        }
+        $separator = str_contains($url, '?') ? '&' : '?';
+        return $url . $separator . 'time=' . time();
+    }
+
+    /**
+     * 在 Host 丢失非默认端口时，优先回填 Referer 里的同主机端口。
+     *
+     * 某些反向代理或静态资源入口会把 `Host` 规整成裸 IP/域名，但浏览器地址栏
+     * 仍然是 `ip:port`。若这里不把端口补回来，dashboard socket 会连到错误端口。
+     *
+     * @param string $authority 当前请求头里的 Host
+     * @param string $referer 当前页面 Referer
+     * @return string
+     */
+    protected function preferDashboardRefererAuthorityPort(string $authority, string $referer): string {
+        $authority = trim($authority);
+        if ($authority === '' || $referer === '') {
+            return $authority;
+        }
+
+        $authorityParts = parse_url(str_contains($authority, '://') ? $authority : ('tcp://' . $authority));
+        $refererParts = parse_url($referer);
+        if (!is_array($authorityParts) || !is_array($refererParts)) {
+            return $authority;
+        }
+
+        $authorityHost = strtolower(trim((string)($authorityParts['host'] ?? $authorityParts['path'] ?? '')));
+        $refererHost = strtolower(trim((string)($refererParts['host'] ?? '')));
+        if ($authorityHost === '' || $refererHost === '' || $authorityHost !== $refererHost) {
+            return $authority;
+        }
+
+        $authorityPort = (int)($authorityParts['port'] ?? 0);
+        $refererPort = (int)($refererParts['port'] ?? 0);
+        if ($authorityPort > 0 || $refererPort <= 0) {
+            return $authority;
+        }
+
+        return $authorityHost . ':' . $refererPort;
     }
 
     /**
@@ -643,7 +702,7 @@ class DashboardController extends Controller {
         } else {
             $localVersion = JsonHelper::recover(File::read($versionJson))['version'] ?? '0.0.0';
         }
-        $client = Http::create(str_replace('version.json', 'dashboard-version.json', ENV_VARIABLES['scf_update_server']));
+        $client = Http::create($this->appendRemoteVersionCacheBust(str_replace('version.json', 'dashboard-version.json', (string)ENV_VARIABLES['scf_update_server'])));
         $dashboardVersionResponse = $client->get();
         if ($dashboardVersionResponse->hasError()) {
             return Result::error('版本信息获取失败:' . $dashboardVersionResponse->getMessage());

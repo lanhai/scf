@@ -2,12 +2,6 @@
 
 namespace Scf\Command;
 
-
-require_once __DIR__ . '/Result.php';
-require_once __DIR__ . '/DefaultCommand/Gateway.php';
-require_once __DIR__ . '/DefaultCommand/GatewayUpstream.php';
-require_once __DIR__ . '/DefaultCommand/Crontab.php';
-
 use Scf\Command\DefaultCommand\Framework;
 use Scf\Command\DefaultCommand\Gateway;
 use Scf\Command\DefaultCommand\GatewayUpstream;

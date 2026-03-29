@@ -25,12 +25,10 @@ use Scf\Server\DashboardAuth;
 use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Manager;
 use Scf\Server\SubProcessManager;
-use Scf\Server\Proxy\ConsoleRelay;
 use Scf\Util\File;
 use RuntimeException;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
-use Swoole\Coroutine\Http\Client;
 use Swoole\Coroutine\Client as TcpClient;
 use Swoole\ExitException;
 use Swoole\Http\Request;
@@ -55,6 +53,8 @@ use Throwable;
  * 真正承载业务请求的仍然是 upstream。
  */
 class GatewayServer {
+    use GatewayInternalManagementTrait;
+    use GatewayManagedUpstreamLifecycleTrait;
 
     /**
      * dashboard 触发本地升级时等待业务编排子进程返回的最长时间。
@@ -166,7 +166,7 @@ class GatewayServer {
      * 与 managed upstream。
      *
      * @return void
-     * @throws RuntimeException 当监听端口或附加监听创建失败时抛出
+     * @throws RuntimeException|SwooleException 当监听端口或附加监听创建失败时抛出
      */
     public function start(): void {
         Coroutine::set(['hook_flags' => SWOOLE_HOOK_ALL]);
@@ -633,13 +633,13 @@ class GatewayServer {
      * @param string $forwardedProto 反向代理传来的协议头
      * @return array<string, mixed>
      */
-    public function dashboardServerStatus(string $token, string $host = '', string $referer = '', string $forwardedProto = ''): array {
+    public function dashboardServerStatus(string $token, string $host = '', string $referer = '', string $forwardedProto = '', bool $forceRefreshVersions = false): array {
         $upstreams = $this->dashboardUpstreams();
         $status = $this->buildDashboardRealtimeStatus($upstreams);
         $status['socket_host'] = $this->buildDashboardSocketHost($host, $referer, $forwardedProto) . '?token=' . rawurlencode($token);
-        $status['latest_version'] = App::latestVersion();
-        $status['dashboard'] = $this->buildDashboardVersionStatus();
-        $status['framework'] = $this->buildFrameworkVersionStatus($upstreams);
+        $status['latest_version'] = App::latestVersion($forceRefreshVersions);
+        $status['dashboard'] = $this->buildDashboardVersionStatus($forceRefreshVersions);
+        $status['framework'] = $this->buildFrameworkVersionStatus($upstreams, $forceRefreshVersions);
         return $status;
     }
 
@@ -777,36 +777,115 @@ class GatewayServer {
      * @return Result
      */
     protected function dispatchLocalGatewayCommand(string $command, array $params = []): Result {
+        $execution = $this->resolveGatewayControlCommandExecution($command, $params);
+        $afterWrite = $execution['after_write'] ?? null;
+        if (is_callable($afterWrite)) {
+            $afterWrite();
+        }
+        return $execution['result'];
+    }
+
+    /**
+     * 统一解析 gateway 控制命令的执行语义。
+     *
+     * dashboard、本地 IPC、gateway 内部 HTTP 命令都在做同一组控制动作：
+     * 只是在“立即执行”还是“写完响应后再执行”、以及返回体格式上存在差异。
+     * 这里先把真正的命令语义收敛成一处，再由不同入口做各自适配。
+     *
+     * @param string $command 控制命令名
+     * @param array<string, mixed> $params 附带参数
+     * @return array{
+     *     result: Result,
+     *     internal_error_status?: int,
+     *     internal_success_status?: int,
+     *     internal_message?: string,
+     *     after_write?: callable|null
+     * }
+     */
+    protected function resolveGatewayControlCommandExecution(string $command, array $params = []): array {
+        $command = trim($command);
+        if ($command === '') {
+            return [
+                'result' => Result::error('命令不能为空'),
+                'internal_error_status' => 400,
+            ];
+        }
+
         switch ($command) {
             case 'reload':
-                return $this->dispatchGatewayBusinessCommand('reload', [], false, 0, '业务实例与业务子进程已开始重启');
+                return [
+                    'result' => $this->dispatchGatewayBusinessCommand('reload', [], false, 0, '业务实例与业务子进程已开始重启'),
+                    'internal_error_status' => 409,
+                    'internal_success_status' => 200,
+                ];
             case 'reload_gateway':
                 $reservation = $this->reserveGatewayReload();
                 if (!$reservation['accepted']) {
-                    return Result::error($reservation['message']);
+                    return [
+                        'result' => Result::error($reservation['message']),
+                        'internal_error_status' => 409,
+                    ];
                 }
-                if ($reservation['scheduled']) {
-                    $this->scheduleReservedGatewayReload((bool)$reservation['restart_managed_upstreams']);
-                }
-                return Result::success($reservation['message']);
+                return [
+                    'result' => Result::success($reservation['message']),
+                    'internal_success_status' => 200,
+                    'internal_message' => $reservation['message'],
+                    'after_write' => $reservation['scheduled']
+                        ? function () use ($reservation): void {
+                            $this->scheduleReservedGatewayReload((bool)$reservation['restart_managed_upstreams']);
+                        }
+                        : null,
+                ];
             case 'restart_crontab':
-                return Result::error('Gateway 已不再托管 Crontab 子进程，请改用 Linux 排程页面管理系统 crontab');
+                return [
+                    'result' => Result::error('Gateway 已不再托管 Crontab 子进程，请改用 Linux 排程页面管理系统 crontab'),
+                    'internal_error_status' => 409,
+                ];
             case 'restart_redisqueue':
                 if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
-                    return Result::error('RedisQueue 子进程未启用');
+                    return [
+                        'result' => Result::error('RedisQueue 子进程未启用'),
+                        'internal_error_status' => 409,
+                    ];
                 }
-                $this->restartGatewayRedisQueueProcess();
-                return Result::success('RedisQueue 子进程已开始重启');
+                $restart = function (): void {
+                    $this->restartGatewayRedisQueueProcess();
+                };
+                return [
+                    'result' => Result::success('RedisQueue 子进程已开始重启'),
+                    'internal_success_status' => 200,
+                    'internal_message' => 'redisqueue process restart started',
+                    'after_write' => $restart,
+                ];
             case 'restart':
-                $this->scheduleGatewayShutdown(true);
-                return Result::success('Gateway 已开始重启');
+                return [
+                    'result' => Result::success('Gateway 已开始重启'),
+                    'internal_success_status' => 200,
+                    'internal_message' => 'gateway restart started',
+                    'after_write' => function (): void {
+                        $this->scheduleGatewayShutdown(true);
+                    },
+                ];
             case 'shutdown':
-                $this->scheduleGatewayShutdown();
-                return Result::success('Gateway 已开始关闭');
+                return [
+                    'result' => Result::success('Gateway 已开始关闭'),
+                    'internal_success_status' => 200,
+                    'internal_message' => 'gateway shutdown started',
+                    'after_write' => function (): void {
+                        $this->scheduleGatewayShutdown();
+                    },
+                ];
             case 'appoint_update':
-                return $this->dashboardUpdate((string)($params['type'] ?? ''), (string)($params['version'] ?? ''));
+                return [
+                    'result' => $this->dashboardUpdate((string)($params['type'] ?? ''), (string)($params['version'] ?? '')),
+                    'internal_error_status' => 409,
+                    'internal_success_status' => 200,
+                ];
             default:
-                return Result::error('暂不支持的命令:' . $command);
+                return [
+                    'result' => Result::error('暂不支持的命令:' . $command),
+                    'internal_error_status' => 400,
+                ];
         }
     }
 
@@ -994,8 +1073,11 @@ class GatewayServer {
         $params['request_id'] = $requestId;
         Console::info("【Gateway】异步投递业务编排命令: command={$command}, request_id={$requestId}");
         if (!$this->subProcessManager->sendCommand($command, $params, ['GatewayBusinessCoordinator'])) {
-            Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
-            return false;
+            // SubProcessManager 在“worker -> manager 转发 -> 当前真实子进程”这条链上，
+            // 可能出现即时 write() 返回值不稳定但命令随后仍被实际消费的情况。
+            // 升级入口本身就是异步状态机，真实成败以后续 request_id 结果或超时为准，
+            // 这里不能再把不可靠的布尔瞬时值直接映射成“子进程未启用”。
+            Console::warning("【Gateway】业务编排命令即时投递状态未确认，转为等待结果: command={$command}, request_id={$requestId}");
         }
         return $requestId;
     }
@@ -1086,7 +1168,7 @@ class GatewayServer {
         if ($type === 'framework' && !FRAMEWORK_IS_PHAR) {
             return Result::error('当前为源码模式,框架在线升级不可用');
         }
-        if ($type === 'framework' && file_exists(SCF_ROOT . '/build/update.pack')) {
+        if ($type === 'framework' && function_exists('scf_framework_update_ready') && scf_framework_update_ready()) {
             return Result::error('正在等待升级,请重启服务器');
         }
 
@@ -1183,9 +1265,6 @@ class GatewayServer {
 
             if ($masterState === 'pending') {
                 $this->emitLocalNodeUpdateState($taskId, $type, $version, 'pending', "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}");
-                Timer::after(200, function (): void {
-                    $this->scheduleGatewayShutdown(true);
-                });
                 return;
             }
 
@@ -1290,7 +1369,9 @@ class GatewayServer {
         if ($type !== 'public' && $restartSummary['success_count'] > 0 && !$restartSummary['failed_nodes']) {
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
         }
-        $iterateBusinessProcesses = in_array($type, ['app', 'framework'], true) && !$restartSummary['failed_nodes'];
+        // framework 升级后 gateway 控制面只进入 pending restart，
+        // 不在这一步迭代 gateway 托管子进程，避免控制面过早命中新框架包。
+        $iterateBusinessProcesses = $type === 'app' && !$restartSummary['failed_nodes'];
 
         $master = [
             'host' => SERVER_HOST,
@@ -1607,6 +1688,7 @@ class GatewayServer {
         $this->preserveManagedUpstreamsOnShutdown = $preserveManagedUpstreams;
         $this->gatewayShutdownScheduled = true;
         $this->prepareGatewayShutdown();
+        $this->waitForGatewayShutdownDrain();
         Runtime::instance()->serverIsAlive(false);
         $masterPid = (int)($this->server->master_pid ?? 0);
         if ($masterPid > 0 && $masterPid !== getmypid() && @Process::kill($masterPid, SIGTERM)) {
@@ -1679,7 +1761,7 @@ class GatewayServer {
      * @param int $timeoutSeconds 最长等待监听端口释放的秒数
      * @param int $intervalMs 每次重试的毫秒间隔
      * @return Server
-     * @throws RuntimeException 当底层 server 创建失败时抛出
+     * @throws RuntimeException|SwooleException 当底层 server 创建失败时抛出
      */
     protected function createGatewaySocketServer(int $timeoutSeconds = 10, int $intervalMs = 200): Server {
         $listenPort = $this->controlPort();
@@ -1763,12 +1845,59 @@ class GatewayServer {
         return true;
     }
 
-    protected function clearPendingManagedRecycleWatchers(): void {
-        foreach ($this->pendingManagedRecycleWatchers as $key => $timerId) {
-            Timer::clear($timerId);
-            unset($this->pendingManagedRecycleWatchers[$key]);
+    /**
+     * 在真正关闭 gateway 监听前，等待旧控制面附属进程释放继承下来的监听 FD。
+     *
+     * gateway 的 addProcess 子进程和 manager 派生树都会继承旧 server 的控制面/RPC
+     * 监听句柄。如果主进程刚发出 shutdown 就立刻退出，外层 boot 守护循环会比这些
+     * 旧子进程更早开始重拉新的 gateway，最终在 10580/9585 这类端口上撞出
+     * `Address already in use`。
+     *
+     * 因此这里要在 prepareGatewayShutdown() 之后、真正触发 server->shutdown() 之前
+     * 做一个有界等待，确认旧 FD 持有者已经退出；超时时仍继续关停，但会把剩余状态
+     * 打进日志，方便继续定位卡住的是 manager 还是 upstream supervisor。
+     *
+     * @param int $timeoutSeconds 最长等待秒数
+     * @param int $intervalMs 每次轮询间隔毫秒
+     * @return void
+     */
+    protected function waitForGatewayShutdownDrain(int $timeoutSeconds = 20, int $intervalMs = 200): void {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $logged = false;
+        $auxReleased = false;
+        $upstreamReleased = false;
+
+        while (microtime(true) < $deadline) {
+            $auxReleased = $this->gatewayAuxiliaryProcessesReleased();
+            $upstreamReleased = $this->preserveManagedUpstreamsOnShutdown || $this->managedUpstreamPortsReleased();
+            if ($auxReleased && $upstreamReleased) {
+                if ($logged) {
+                    Console::success('【Gateway】关停前附属进程与旧监听 FD 已释放');
+                }
+                return;
+            }
+
+            if (!$logged) {
+                Console::warning(
+                    '【Gateway】关停前等待附属进程释放旧监听 FD: aux=' . ($auxReleased ? 'ready' : 'waiting')
+                    . ', upstream=' . ($upstreamReleased ? 'ready' : 'waiting')
+                );
+                $logged = true;
+            }
+
+            if (Coroutine::getCid() > 0) {
+                Coroutine::sleep(max(0.05, $intervalMs / 1000));
+            } else {
+                usleep(max(50, $intervalMs) * 1000);
+            }
         }
-        $this->pendingManagedRecycleCompletions = [];
+
+        if ($logged) {
+            Console::warning(
+                '【Gateway】关停等待附属进程释放超时，继续执行 shutdown: aux=' . ($auxReleased ? 'ready' : 'waiting')
+                . ', upstream=' . ($upstreamReleased ? 'ready' : 'waiting')
+            );
+        }
     }
 
     protected function prepareGatewayShutdown(): void {
@@ -3048,7 +3177,7 @@ class GatewayServer {
             'app_version' => $appVersion,
             'public_version' => $publicVersion,
             'framework_build_version' => FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => file_exists(SCF_ROOT . '/build/update.pack'),
+            'framework_update_ready' => function_exists('scf_framework_update_ready') && scf_framework_update_ready(),
             'swoole_version' => swoole_version(),
             'scf_version' => SCF_COMPOSER_VERSION,
             'manager_pid' => $this->serverManagerPid ?: '--',
@@ -3184,7 +3313,7 @@ class GatewayServer {
             'app_version' => $appVersion,
             'public_version' => $publicVersion,
             'framework_build_version' => FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => file_exists(SCF_ROOT . '/build/update.pack'),
+            'framework_update_ready' => function_exists('scf_framework_update_ready') && scf_framework_update_ready(),
             'swoole_version' => swoole_version(),
             'scf_version' => SCF_COMPOSER_VERSION,
             'manager_pid' => (int)($metadata['pid'] ?? 0) ?: '--',
@@ -3745,6 +3874,11 @@ class GatewayServer {
             }
         }
 
+        // 反向代理有时会把 `Host` 里的非默认端口剥掉，但浏览器 Referer 仍保留了
+        // 真正对外访问的 `ip:port`。遇到“同主机但 Host 无端口”的情况，要优先把
+        // Referer 里的端口补回来，否则 dashboard socket 会错误回退到 80/443。
+        $normalizedHost = $this->preferDashboardRefererAuthorityPort($normalizedHost, $normalizedReferer);
+
         if ($normalizedHost === '') {
             $normalizedHost = $this->dashboardRefererAuthority($normalizedReferer);
         }
@@ -3760,6 +3894,43 @@ class GatewayServer {
             : 'ws://';
 
         return $protocol . $normalizedHost . $pathPrefix . '/dashboard.socket';
+    }
+
+    /**
+     * 在 Host 缺失端口但 Referer 明确带端口时，优先回填 Referer 里的端口。
+     *
+     * 只在 Host/Referer 的主机名完全一致且当前 Host 自己没有端口时才回填，
+     * 避免 dev server、反向代理或跨域入口把不相关的端口误拼到 websocket 地址。
+     *
+     * @param string $authority 当前待使用的 authority
+     * @param string $referer 当前页面 Referer
+     * @return string
+     */
+    protected function preferDashboardRefererAuthorityPort(string $authority, string $referer): string {
+        $authority = trim($authority);
+        if ($authority === '' || $referer === '') {
+            return $authority;
+        }
+
+        $authorityParts = parse_url(str_contains($authority, '://') ? $authority : ('tcp://' . $authority));
+        $refererParts = parse_url($referer);
+        if (!is_array($authorityParts) || !is_array($refererParts)) {
+            return $authority;
+        }
+
+        $authorityHost = strtolower(trim((string)($authorityParts['host'] ?? $authorityParts['path'] ?? '')));
+        $refererHost = strtolower(trim((string)($refererParts['host'] ?? '')));
+        if ($authorityHost === '' || $refererHost === '' || $authorityHost !== $refererHost) {
+            return $authority;
+        }
+
+        $authorityPort = (int)($authorityParts['port'] ?? 0);
+        $refererPort = (int)($refererParts['port'] ?? 0);
+        if ($authorityPort > 0 || $refererPort <= 0) {
+            return $authority;
+        }
+
+        return $authorityHost . ':' . $refererPort;
     }
 
     protected function normalizeDashboardSocketAuthority(string $authority): string {
@@ -3865,9 +4036,9 @@ class GatewayServer {
         return $path === '/dashboard.socket' || str_ends_with($path, '/dashboard.socket');
     }
 
-    protected function buildDashboardVersionStatus(): array {
+    protected function buildDashboardVersionStatus(bool $forceRefresh = false): array {
         $cached = $this->dashboardVersionStatusCache['value'] ?? null;
-        if (is_array($cached) && (int)($this->dashboardVersionStatusCache['expires_at'] ?? 0) > time()) {
+        if (!$forceRefresh && is_array($cached) && (int)($this->dashboardVersionStatusCache['expires_at'] ?? 0) > time()) {
             return $cached;
         }
         $dashboardDir = SCF_ROOT . '/build/public/dashboard';
@@ -3878,7 +4049,7 @@ class GatewayServer {
         }
 
         $dashboardVersion = ['version' => '--'];
-        $client = \Scf\Client\Http::create(str_replace('version.json', 'dashboard-version.json', ENV_VARIABLES['scf_update_server']));
+        $client = \Scf\Client\Http::create($this->appendRemoteVersionCacheBust(str_replace('version.json', 'dashboard-version.json', (string)ENV_VARIABLES['scf_update_server'])));
         try {
             // dashboard 首页的版本状态只是展示信息，不能因为外部版本源抖动
             // 把 gateway 控制面 `/server` 卡成“像挂了一样”。
@@ -3901,29 +4072,31 @@ class GatewayServer {
         return $result;
     }
 
-    protected function buildFrameworkVersionStatus(?array $upstreams = null): array {
-        $remoteVersion = $this->cachedFrameworkRemoteVersion();
+    protected function buildFrameworkVersionStatus(?array $upstreams = null, bool $forceRefresh = false): array {
+        $remoteVersion = $this->cachedFrameworkRemoteVersion($forceRefresh);
         $upstreams ??= $this->dashboardUpstreams();
         $selected = $this->selectGatewayBusinessUpstreams($upstreams);
-        $activeFrameworkVersion = (string)($selected[0]['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION);
-        $activeFrameworkReady = (bool)($selected[0]['framework_update_ready'] ?? file_exists(SCF_ROOT . '/build/update.pack'));
+        $activeRecord = function_exists('scf_read_framework_active_record') ? scf_read_framework_active_record() : null;
+        $activeFrameworkVersion = (string)($activeRecord['version'] ?? $selected[0]['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION);
+        $activeFrameworkBuild = (string)($activeRecord['build'] ?? FRAMEWORK_BUILD_TIME);
+        $activeFrameworkReady = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
 
         return [
             'is_phar' => FRAMEWORK_IS_PHAR,
             'version' => $activeFrameworkVersion,
             'latest_version' => $remoteVersion['version'] ?? FRAMEWORK_BUILD_VERSION,
-            'latest_build' => $remoteVersion['build'] ?? FRAMEWORK_BUILD_TIME,
+            'latest_build' => $remoteVersion['build'] ?? $activeFrameworkBuild,
             'build' => FRAMEWORK_BUILD_TIME,
             'gateway_version' => FRAMEWORK_BUILD_VERSION,
             'gateway_build' => FRAMEWORK_BUILD_TIME,
-            'gateway_pending_restart' => FRAMEWORK_BUILD_VERSION !== $activeFrameworkVersion,
+            'gateway_pending_restart' => $activeFrameworkReady,
             'update_ready' => $activeFrameworkReady,
         ];
     }
 
-    protected function cachedFrameworkRemoteVersion(): array {
+    protected function cachedFrameworkRemoteVersion(bool $forceRefresh = false): array {
         $cached = $this->frameworkRemoteVersionCache['value'] ?? null;
-        if (is_array($cached) && (int)($this->frameworkRemoteVersionCache['expires_at'] ?? 0) > time()) {
+        if (!$forceRefresh && is_array($cached) && (int)($this->frameworkRemoteVersionCache['expires_at'] ?? 0) > time()) {
             return $cached;
         }
 
@@ -3932,7 +4105,7 @@ class GatewayServer {
             'build' => FRAMEWORK_BUILD_TIME,
         ];
 
-        $client = \Scf\Client\Http::create(ENV_VARIABLES['scf_update_server']);
+        $client = \Scf\Client\Http::create($this->appendRemoteVersionCacheBust((string)ENV_VARIABLES['scf_update_server']));
         try {
             $response = $client->get(self::REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS);
             if (!$response->hasError()) {
@@ -3948,6 +4121,23 @@ class GatewayServer {
         ];
 
         return $remoteVersion;
+    }
+
+    /**
+     * 为远端版本文件补充时间戳，避免 gateway 控制面命中旧版缓存。
+     *
+     * proxy/gateway 模式下 dashboard 的最新版本信息完全依赖这里的远端元数据。
+     * 如果继续请求固定 URL，发布成功后控制面会长时间停留在旧版本提示上。
+     *
+     * @param string $url 远端版本文件地址。
+     * @return string 带 cache-busting 参数的地址。
+     */
+    protected function appendRemoteVersionCacheBust(string $url): string {
+        if ($url === '') {
+            return $url;
+        }
+        $separator = str_contains($url, '?') ? '&' : '?';
+        return $url . $separator . 'time=' . time();
     }
 
     protected function pushDashboardStatus(?int $fd = null): void {
@@ -4086,21 +4276,6 @@ class GatewayServer {
         ]));
     }
 
-    /**
-     * 判断 gateway 内部控制请求是否来自本机回环地址。
-     *
-     * `/ _gateway/internal/*` 是只服务于本机进程协作的控制平面入口，
-     * 不能再把可伪造请求头当成放行依据。远程节点协作应继续走
-     * dashboard token、node client 与本地 IPC 链路。
-     *
-     * @param Request $request 当前 HTTP 请求。
-     * @return bool 仅当来源 IP 为 loopback 时返回 true。
-     */
-    protected function isInternalGatewayRequest(Request $request): bool {
-        $clientIp = trim((string)($request->server['remote_addr'] ?? ''));
-        return in_array($clientIp, ['127.0.0.1', '::1'], true);
-    }
-
     protected function restartUpstreamsByHost(string $host): Result {
         $plans = $this->matchedPlansByHost($host);
         if (!$plans) {
@@ -4137,1212 +4312,6 @@ class GatewayServer {
         $this->pushDashboardStatus();
         Console::success("【Gateway】业务实例已关闭: host={$host}, count=" . count($plans));
         return Result::success('已关闭 ' . count($plans) . ' 个业务实例');
-    }
-
-    /**
-     * 统一入口，当前默认等价于滚动重启。
-     *
-     * @param array<int, array<string, mixed>>|null $plans 指定的业务实例计划集合
-     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
-     */
-    protected function restartManagedUpstreams(?array $plans = null): array {
-        return $this->rollingRestartManagedUpstreams($plans);
-    }
-
-    /**
-     * 对 managed upstream 做一次滚动重启。
-     *
-     * 顺序不能乱：
-     * 1. 先拉起新 generation；
-     * 2. 等待新实例 serverIsReady；
-     * 3. 切 active generation 并校验切流；
-     * 4. 再通知旧代进入 quiesce / recycle。
-     *
-     * @param array<int, array<string, mixed>>|null $plans 指定需要滚动重启的 managed plan 集合
-     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
-     */
-    protected function rollingRestartManagedUpstreams(?array $plans = null): array {
-        $this->managedUpstreamRolling = true;
-        try {
-        $basePlans = $plans ?? $this->activeManagedPlans();
-        if (!$basePlans) {
-            $basePlans = $this->managedPlansFromSnapshot();
-            if ($basePlans) {
-                foreach ($basePlans as $plan) {
-                    $this->appendManagedPlan($plan);
-                }
-                Console::warning("【Gateway】业务实例计划内存为空，已从运行态快照恢复: count=" . count($basePlans));
-            }
-        }
-        $basePlans = array_values(array_filter($basePlans, static function ($plan) {
-            return (int)($plan['port'] ?? 0) > 0;
-        }));
-
-        $failedNodes = [];
-        $successCount = 0;
-        if (!$basePlans || !$this->upstreamSupervisor || !$this->launcher) {
-            if (!$basePlans) {
-                Console::warning('【Gateway】未找到可重启的业务实例计划');
-            } elseif (!$this->upstreamSupervisor) {
-                Console::warning('【Gateway】业务实例管理器未就绪，无法执行滚动重启');
-            } elseif (!$this->launcher) {
-                Console::warning('【Gateway】业务实例启动器未就绪，无法执行滚动重启');
-            }
-            return [
-                'success_count' => 0,
-                'failed_nodes' => [],
-            ];
-        }
-
-        $generationVersion = $this->buildReloadGenerationVersion($basePlans);
-        $previousActiveVersion = (string)($this->instanceManager->state()['active_version'] ?? ($basePlans[0]['version'] ?? ''));
-        Console::info("【Gateway】开始滚动重启业务实例: generation={$generationVersion}, count=" . count($basePlans));
-        $newPlans = [];
-        $registeredPlans = [];
-        $reserved = $this->collectReservedPorts();
-
-        foreach ($basePlans as $plan) {
-            $host = (string)($plan['host'] ?? '127.0.0.1');
-            $newPort = $this->allocateManagedPort(max(1025, (int)($plan['port'] ?? 0) + 1), $reserved);
-            $reserved[] = $newPort;
-            $newRpcPort = 0;
-            if ($this->rpcPort > 0) {
-                $newRpcPort = $this->allocateManagedPort(max(1025, (int)($plan['rpc_port'] ?? $this->rpcPort) + 1), $reserved);
-                $reserved[] = $newRpcPort;
-            }
-
-            $newPlan = $plan;
-            $newPlan['version'] = $generationVersion;
-            $newPlan['port'] = $newPort;
-            $newPlan['rpc_port'] = $newRpcPort;
-            $newPlan['metadata'] = array_merge((array)($plan['metadata'] ?? []), [
-                'managed' => true,
-                'role' => (string)($plan['role'] ?? SERVER_ROLE),
-                'rpc_port' => $newRpcPort,
-                'started_at' => time(),
-                'managed_mode' => 'gateway_supervisor',
-                'rolling_from_version' => (string)($plan['version'] ?? ''),
-                'display_version' => (string)($plan['metadata']['display_version'] ?? $plan['version'] ?? ''),
-            ]);
-            $newPlans[] = $newPlan;
-            Console::info("【Gateway】启动新业务实例: " . $this->describePlan($newPlan));
-
-            $this->upstreamSupervisor->sendCommand(['action' => 'spawn', 'plan' => $newPlan]);
-            if (!$this->launcher->waitUntilServicesReady($host, $newPort, $newRpcPort, 30)) {
-                $failedNodes[] = [
-                    'host' => $host . ':' . $newPort,
-                    'error' => '新业务实例未在预期时间内完成启动',
-                ];
-                continue;
-            }
-            Console::success("【Gateway】新业务实例已就绪(serverIsReady)，等待切换流量: " . $this->describePlan($newPlan));
-
-            $this->registerManagedPlan($newPlan, false);
-            $registeredPlans[] = $newPlan;
-            $successCount++;
-        }
-
-        if ($failedNodes) {
-            Console::warning("【Gateway】滚动重启失败，开始回收新实例: generation={$generationVersion}, failed=" . count($failedNodes));
-            foreach ($registeredPlans as $plan) {
-                $this->stopManagedPlan($plan, false);
-            }
-            foreach ($newPlans as $plan) {
-                $this->removeManagedPlan($plan);
-            }
-            return [
-                'success_count' => $successCount,
-                'failed_nodes' => $failedNodes,
-            ];
-        }
-
-        // 只有在新代 ready 且即将切流时，旧代才允许进入 draining/recycle。
-        $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
-        $this->notifyManagedUpstreamGenerationIterated($generationVersion);
-        $this->syncNginxProxyTargets('rolling_restart_activate');
-        if (!$this->waitForManagedGenerationCutover($generationVersion, $registeredPlans, 'rolling_restart')) {
-            Console::warning("【Gateway】滚动重启切换校验失败，回滚旧业务实例: generation={$generationVersion}");
-            $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, 'rolling_restart');
-            return [
-                'success_count' => 0,
-                'failed_nodes' => [[
-                    'host' => $generationVersion,
-                    'error' => '新业务实例切换校验失败，已回滚，旧实例保持运行',
-                ]],
-            ];
-        }
-        foreach ($newPlans as $plan) {
-            $this->appendManagedPlan($plan);
-        }
-        foreach ($basePlans as $plan) {
-            $this->quiesceManagedPlanBusinessPlane($plan);
-        }
-        Console::success("【Gateway】滚动重启完成并切换流量: generation={$generationVersion}, success={$successCount}, drain_grace=" . self::ROLLING_DRAIN_GRACE_SECONDS . "s");
-        $this->logPreviousGenerationTransition($previousActiveVersion);
-
-        return [
-            'success_count' => $successCount,
-            'failed_nodes' => [],
-        ];
-        } finally {
-            $this->managedUpstreamRolling = false;
-            $this->lastManagedUpstreamRollingAt = time();
-            $this->managedUpstreamHealthState = [];
-        }
-    }
-
-    /**
-     * 对 managed upstream 做滚动升级。
-     *
-     * 它和 rolling restart 的差异主要在 generation 标识和升级上下文，
-     * 切流、回滚、回收的控制流程保持一致。
-     *
-     * @param string $type 升级类型
-     * @param string $version 目标版本
-     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
-     */
-    protected function rollingUpdateManagedUpstreams(string $type, string $version): array {
-        $this->managedUpstreamRolling = true;
-        try {
-        $basePlans = $this->activeManagedPlans();
-        $failedNodes = [];
-        $successCount = 0;
-        if (!$basePlans || !$this->upstreamSupervisor || !$this->launcher) {
-            return [
-                'success_count' => 0,
-                'failed_nodes' => [],
-            ];
-        }
-
-        $generationVersion = $this->buildRollingGenerationVersion($type, $version);
-        $previousActiveVersion = (string)($this->instanceManager->state()['active_version'] ?? ($basePlans[0]['version'] ?? ''));
-        Console::info("【Gateway】开始滚动升级业务实例: type={$type}, version={$version}, generation={$generationVersion}, base_count=" . count($basePlans));
-        $newPlans = [];
-        $registeredPlans = [];
-        $reserved = $this->collectReservedPorts();
-
-        foreach ($basePlans as $plan) {
-            $host = (string)($plan['host'] ?? '127.0.0.1');
-            $newPort = $this->allocateManagedPort(max(1025, (int)($plan['port'] ?? 0) + 1), $reserved);
-            $reserved[] = $newPort;
-            $newRpcPort = 0;
-            if ($this->rpcPort > 0) {
-                $newRpcPort = $this->allocateManagedPort(max(1025, (int)($plan['rpc_port'] ?? $this->rpcPort) + 1), $reserved);
-                $reserved[] = $newRpcPort;
-            }
-
-            $newPlan = $plan;
-            $newPlan['version'] = $generationVersion;
-            $newPlan['port'] = $newPort;
-            $newPlan['rpc_port'] = $newRpcPort;
-            $newPlan['metadata'] = array_merge((array)($plan['metadata'] ?? []), [
-                'managed' => true,
-                'role' => (string)($plan['role'] ?? SERVER_ROLE),
-                'rpc_port' => $newRpcPort,
-                'started_at' => time(),
-                'managed_mode' => 'gateway_supervisor',
-                'rolling_from_version' => (string)($plan['version'] ?? ''),
-            ]);
-            $newPlans[] = $newPlan;
-            Console::info("【Gateway】启动新业务实例: " . $this->describePlan($newPlan));
-
-            $this->upstreamSupervisor->sendCommand(['action' => 'spawn', 'plan' => $newPlan]);
-            if (!$this->launcher->waitUntilServicesReady($host, $newPort, $newRpcPort, 30)) {
-                $failedNodes[] = [
-                    'host' => $host . ':' . $newPort,
-                    'error' => '新业务实例未在预期时间内完成启动',
-                ];
-                continue;
-            }
-            Console::success("【Gateway】新业务实例已就绪(serverIsReady)，等待切换流量: " . $this->describePlan($newPlan));
-
-            $this->registerManagedPlan($newPlan, false);
-            $registeredPlans[] = $newPlan;
-            $successCount++;
-        }
-
-        if ($failedNodes) {
-            Console::warning("【Gateway】滚动升级失败，开始回收新实例: generation={$generationVersion}, failed=" . count($failedNodes));
-            foreach ($registeredPlans as $plan) {
-                $this->stopManagedPlan($plan, false);
-            }
-            foreach ($newPlans as $plan) {
-                $this->removeManagedPlan($plan);
-            }
-            return [
-                'success_count' => $successCount,
-                'failed_nodes' => $failedNodes,
-            ];
-        }
-
-        $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
-        $this->notifyManagedUpstreamGenerationIterated($generationVersion);
-        $this->syncNginxProxyTargets('rolling_update_activate');
-        if (!$this->waitForManagedGenerationCutover($generationVersion, $registeredPlans, 'rolling_update')) {
-            Console::warning("【Gateway】滚动升级切换校验失败，回滚旧业务实例: generation={$generationVersion}");
-            $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, 'rolling_update');
-            return [
-                'success_count' => 0,
-                'failed_nodes' => [[
-                    'host' => $generationVersion,
-                    'error' => '新业务实例切换校验失败，已回滚，旧实例保持运行',
-                ]],
-            ];
-        }
-        foreach ($newPlans as $plan) {
-            $this->appendManagedPlan($plan);
-        }
-        foreach ($basePlans as $plan) {
-            $this->quiesceManagedPlanBusinessPlane($plan);
-        }
-        Console::success("【Gateway】滚动升级完成并切换流量: generation={$generationVersion}, success={$successCount}, drain_grace=" . self::ROLLING_DRAIN_GRACE_SECONDS . "s");
-        $this->logPreviousGenerationTransition($previousActiveVersion);
-
-        return [
-            'success_count' => $successCount,
-            'failed_nodes' => [],
-        ];
-        } finally {
-            $this->managedUpstreamRolling = false;
-            $this->lastManagedUpstreamRollingAt = time();
-            $this->managedUpstreamHealthState = [];
-        }
-    }
-
-    /**
-     * 校验新 generation 是否已经真正接管流量。
-     *
-     * 不是只看 active_version 切换成功就算完成，还要连续多次确认新实例健康，
-     * 避免“刚激活就掉线”的短抖动被误判成切流成功。
-     *
-     * @param string $generationVersion 新 generation 版本号
-     * @param array<int, array<string, mixed>> $plans
-     * @param string $stage 当前校验阶段名
-     * @return bool
-     */
-    protected function waitForManagedGenerationCutover(string $generationVersion, array $plans, string $stage): bool {
-        if ($generationVersion === '' || !$plans) {
-            return false;
-        }
-        $deadline = microtime(true) + self::ROLLING_CUTOVER_VERIFY_TIMEOUT_SECONDS;
-        $stableChecks = 0;
-        $lastReason = 'unknown';
-        while (microtime(true) < $deadline) {
-            $snapshot = $this->instanceManager->snapshot();
-            if ((string)($snapshot['active_version'] ?? '') !== $generationVersion) {
-                $lastReason = 'active_version_not_switched';
-                $stableChecks = 0;
-                usleep(200000);
-                continue;
-            }
-            $allHealthy = true;
-            foreach ($plans as $plan) {
-                $probe = $this->probeManagedUpstreamHealth($plan);
-                if ($probe['healthy']) {
-                    continue;
-                }
-                $allHealthy = false;
-                $lastReason = (string)($probe['reason'] ?? 'unknown');
-                $stableChecks = 0;
-                break;
-            }
-            if (!$allHealthy) {
-                usleep(200000);
-                continue;
-            }
-            $stableChecks++;
-            if ($stableChecks >= self::ROLLING_CUTOVER_STABLE_CHECKS) {
-                Console::success("【Gateway】新业务实例切换校验通过: stage={$stage}, generation={$generationVersion}, checks={$stableChecks}");
-                return true;
-            }
-            usleep(200000);
-        }
-        Console::warning("【Gateway】新业务实例切换校验超时: stage={$stage}, generation={$generationVersion}, reason={$lastReason}");
-        return false;
-    }
-
-    /**
-     * 在新 generation 切流失败时把流量恢复到旧 generation，并清理新代。
-     *
-     * @param string $previousActiveVersion 回滚目标 generation
-     * @param string $generationVersion 本次失败的新 generation
-     * @param array<int, array<string, mixed>> $registeredPlans 已注册进 registry 的新计划
-     * @param array<int, array<string, mixed>> $newPlans 本轮启动过的新计划
-     * @param string $stage 当前切换阶段
-     * @return void
-     */
-    protected function rollbackManagedGenerationCutover(string $previousActiveVersion, string $generationVersion, array $registeredPlans, array $newPlans, string $stage): void {
-        $snapshot = $this->instanceManager->state();
-        if ($previousActiveVersion !== ''
-            && $previousActiveVersion !== $generationVersion
-            && isset(($snapshot['generations'] ?? [])[$previousActiveVersion])) {
-            $this->instanceManager->activateVersion($previousActiveVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
-            $this->notifyManagedUpstreamGenerationIterated($previousActiveVersion);
-            $this->syncNginxProxyTargets($stage . '_rollback');
-            Console::warning("【Gateway】已回滚业务流量到旧实例: generation={$previousActiveVersion}");
-        }
-        foreach ($registeredPlans as $plan) {
-            $this->stopManagedPlan($plan);
-        }
-        foreach ($newPlans as $plan) {
-            $this->removeManagedPlan($plan);
-        }
-    }
-
-    /**
-     * 记录旧 generation 进入 draining 的起止时间窗口。
-     *
-     * @param string $version 旧 generation 版本号
-     * @return void
-     */
-    protected function logDrainingGenerationSchedule(string $version): void {
-        if ($version === '') {
-            return;
-        }
-        $snapshot = $this->instanceManager->snapshot();
-        $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
-        if (($generation['status'] ?? '') !== 'draining') {
-            return;
-        }
-        Console::info(
-            "【Gateway】旧业务实例进入 draining: generation={$version}, "
-            . "started_at=" . (int)($generation['drain_started_at'] ?? 0)
-            . ", deadline_at=" . (int)($generation['drain_deadline_at'] ?? 0)
-        );
-    }
-
-    /**
-     * 记录切流后旧 generation 的状态。
-     *
-     * 旧代可能还在 draining，说明确实有尾流等待；
-     * 也可能已经 offline，说明实例已死或已无在途请求，可以直接回收。
-     *
-     * @param string $version 旧 generation 版本号
-     * @return void
-     */
-    protected function logPreviousGenerationTransition(string $version): void {
-        if ($version === '') {
-            return;
-        }
-        $snapshot = $this->instanceManager->snapshot();
-        $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
-        $status = (string)($generation['status'] ?? '');
-        if ($status === 'draining') {
-            Console::info("【Gateway】旧业务实例保持服务尾流，待 nginx 切换稳定且无在途请求后再进入 shutdown: previous={$version}");
-            $this->logDrainingGenerationSchedule($version);
-            return;
-        }
-        if ($status === 'offline') {
-            Console::info("【Gateway】旧业务实例已不可达或已无尾流，直接进入回收: previous={$version}");
-        }
-    }
-
-    /**
-     * 请求 supervisor 回收一个 managed plan。
-     *
-     * 真正的“回收完成”不是这里发完 stop 命令，而是等 checkPendingManagedRecycle()
-     * 观察到端口关闭之后，再清理 registry 和内存中的计划状态。
-     *
-     * @param array<string, mixed> $plan 目标 managed plan
-     * @param bool $removeState 回收完成后是否从 registry 中移除实例状态
-     * @param bool $removePlan 回收完成后是否从内存计划表中移除
-     * @return void
-     */
-    protected function stopManagedPlan(array $plan, bool $removeState = true, bool $removePlan = true): void {
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $plan = $this->hydrateManagedPlanRuntimeMetadata($plan);
-        $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
-        $descriptor = $this->managedPlanDescriptor($plan);
-
-        if ($this->upstreamSupervisor) {
-            if (isset($this->pendingManagedRecycles[$key])) {
-                return;
-            }
-            unset($this->managedUpstreamHealthState[$key]);
-            if (!$this->upstreamSupervisor->sendCommand([
-                'action' => 'stop_instance',
-                'instance' => [
-                    'version' => (string)($plan['version'] ?? ''),
-                    'host' => $host,
-                    'port' => $port,
-                    'rpc_port' => (int)($plan['rpc_port'] ?? 0),
-                    'metadata' => [
-                        'managed' => true,
-                        'rpc_port' => (int)($plan['rpc_port'] ?? 0),
-                        'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
-                    ],
-                ],
-            ])) {
-                Console::warning("【Gateway】旧业务实例回收命令发送失败 {$descriptor}");
-                return;
-            }
-            $this->pendingManagedRecycles[$key] = [
-                'plan' => $plan,
-                'remove_state' => $removeState,
-                'remove_plan' => $removePlan,
-                'requested_at' => time(),
-            ];
-            unset($this->pendingManagedRecycleWarnState[$key]);
-            $this->ensurePendingManagedRecycleWatcher($key);
-            Console::info("【Gateway】开始回收旧业务实例 {$descriptor}");
-            return;
-        } elseif ($this->launcher) {
-            $rpcPort = (int)($plan['rpc_port'] ?? 0);
-            $this->launcher->stop([
-                'host' => $host,
-                'port' => $port,
-                'rpc_port' => $rpcPort,
-                'metadata' => [
-                    'managed' => true,
-                    'rpc_port' => $rpcPort,
-                    'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
-                ],
-            ], AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS);
-        }
-
-        if ($removeState) {
-            $this->instanceManager->removeInstance($host, $port);
-        }
-        unset($this->bootstrappedManagedInstances[$key]);
-        if ($removePlan) {
-            $this->removeManagedPlan($plan);
-        }
-        if ($port > 0) {
-            Console::success("【Gateway】旧业务实例回收完成 {$descriptor}");
-        }
-    }
-
-    /**
-     * 根据 host 筛选当前内存里的 managed plan。
-     *
-     * @param string $host 目标 host
-     * @return array<int, array<string, mixed>>
-     */
-    protected function matchedPlansByHost(string $host): array {
-        $host = trim($host);
-        return array_values(array_filter($this->managedUpstreamPlans, function ($plan) use ($host) {
-            $planHost = (string)($plan['host'] ?? '127.0.0.1');
-            if ($host === $planHost) {
-                return true;
-            }
-            if ($host === 'localhost' && $planHost === '127.0.0.1') {
-                return true;
-            }
-            return false;
-        }));
-    }
-
-    /**
-     * 返回当前 active generation 对应的 managed plan 集合。
-     *
-     * 当 active generation 缺失时，会退回到当前内存里的全部有效计划。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function activeManagedPlans(): array {
-        $activeVersion = (string)($this->instanceManager->state()['active_version'] ?? '');
-        if ($activeVersion !== '') {
-            $plans = array_values(array_filter($this->managedUpstreamPlans, static function ($plan) use ($activeVersion) {
-                return (string)($plan['version'] ?? '') === $activeVersion;
-            }));
-            if ($plans) {
-                return $plans;
-            }
-        }
-
-        return array_values(array_filter($this->managedUpstreamPlans, static function ($plan) {
-            return (int)($plan['port'] ?? 0) > 0;
-        }));
-    }
-
-    /**
-     * 从 instance snapshot 反推 managed plan，作为内存计划丢失时的兜底恢复。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function managedPlansFromSnapshot(): array {
-        $snapshot = $this->instanceManager->snapshot();
-        $activeVersion = (string)($snapshot['active_version'] ?? '');
-        $plans = [];
-        foreach (($snapshot['generations'] ?? []) as $generation) {
-            $version = (string)($generation['version'] ?? '');
-            $status = (string)($generation['status'] ?? '');
-            if ($activeVersion !== '') {
-                if ($version !== $activeVersion) {
-                    continue;
-                }
-            } elseif ($status !== 'active') {
-                continue;
-            }
-            foreach (($generation['instances'] ?? []) as $instance) {
-                $metadata = (array)($instance['metadata'] ?? []);
-                if (($metadata['managed'] ?? false) !== true) {
-                    continue;
-                }
-                $host = (string)($instance['host'] ?? '127.0.0.1');
-                $port = (int)($instance['port'] ?? 0);
-                if ($port <= 0) {
-                    continue;
-                }
-                $plans[] = [
-                    'app' => APP_DIR_NAME,
-                    'env' => SERVER_RUN_ENV,
-                    'host' => $host,
-                    'version' => (string)($instance['version'] ?? $version),
-                    'weight' => (int)($instance['weight'] ?? 100),
-                    'role' => (string)($metadata['role'] ?? SERVER_ROLE),
-                    'port' => $port,
-                    'rpc_port' => (int)($metadata['rpc_port'] ?? 0),
-                    'src' => (string)($metadata['src'] ?? APP_SRC_TYPE),
-                    'metadata' => array_merge($metadata, [
-                        'managed' => true,
-                        'managed_mode' => (string)($metadata['managed_mode'] ?? 'gateway_supervisor'),
-                        'display_version' => (string)($metadata['display_version'] ?? ($instance['version'] ?? $version)),
-                    ]),
-                    'start_timeout' => (int)($metadata['start_timeout'] ?? 25),
-                    'extra' => $this->normalizeManagedPlanExtraFlags([
-                        'src' => (string)($metadata['src'] ?? APP_SRC_TYPE),
-                        'metadata' => $metadata,
-                    ]),
-                ];
-            }
-        }
-        return $plans;
-    }
-
-    /**
-     * 归一化计划里的额外启动参数，确保 dev/pack/src/gateway_port 语义能继承到子进程。
-     *
-     * @param array<string, mixed> $plan managed plan
-     * @return array<int, string>
-     */
-    protected function normalizeManagedPlanExtraFlags(array $plan): array {
-        $flags = [];
-        foreach ((array)($plan['extra'] ?? []) as $flag) {
-            if (is_string($flag) && $flag !== '') {
-                $flags[] = $flag;
-            }
-        }
-        foreach ((array)(($plan['metadata']['extra_flags'] ?? [])) as $flag) {
-            if (is_string($flag) && $flag !== '') {
-                $flags[] = $flag;
-            }
-        }
-
-        $hasDev = false;
-        $hasDir = false;
-        $hasPhar = false;
-        $hasPackMode = false;
-        $hasGatewayPort = false;
-        foreach ($flags as $flag) {
-            $hasDev = $hasDev || $flag === '-dev';
-            $hasDir = $hasDir || $flag === '-dir';
-            $hasPhar = $hasPhar || $flag === '-phar';
-            $hasPackMode = $hasPackMode || in_array($flag, ['-pack', '-nopack'], true);
-            $hasGatewayPort = $hasGatewayPort || str_starts_with($flag, '-gateway_port=');
-        }
-
-        if (!$hasDev && SERVER_RUN_ENV === 'dev') {
-            $flags[] = '-dev';
-        }
-        if (!$hasPackMode && !(defined('FRAMEWORK_IS_PHAR') && FRAMEWORK_IS_PHAR === true)) {
-            $flags[] = '-nopack';
-        }
-        if (!$hasDir && !$hasPhar) {
-            $src = (string)($plan['src'] ?? ($plan['metadata']['src'] ?? APP_SRC_TYPE));
-            if ($src === 'dir') {
-                $flags[] = '-dir';
-            } elseif ($src === 'phar') {
-                $flags[] = '-phar';
-            }
-        }
-        if (!$hasGatewayPort && $this->businessPort() > 0) {
-            $flags[] = '-gateway_port=' . $this->businessPort();
-        }
-
-        $normalized = [];
-        foreach ($flags as $flag) {
-            if (!is_string($flag) || $flag === '') {
-                continue;
-            }
-            $normalized[$flag] = true;
-        }
-        return array_keys($normalized);
-    }
-
-    /**
-     * 构建滚动升级使用的 generation 版本号。
-     *
-     * @param string $type 升级类型
-     * @param string $version 目标版本
-     * @return string
-     */
-    protected function buildRollingGenerationVersion(string $type, string $version): string {
-        if ($type === 'app') {
-            return $version;
-        }
-        return $type . '-' . $version . '-' . date('YmdHis');
-    }
-
-    /**
-     * 构建普通 reload 使用的 generation 标识。
-     *
-     * @param array<int, array<string, mixed>> $plans 当前 active plan 集合
-     * @return string
-     */
-    protected function buildReloadGenerationVersion(array $plans): string {
-        $displayVersion = (string)($plans[0]['metadata']['display_version'] ?? $plans[0]['version'] ?? App::version() ?? 'reload');
-        return $displayVersion . '-reload-' . date('YmdHis');
-    }
-
-    /**
-     * 收集 gateway 与 managed upstream 当前占用或保留的端口。
-     *
-     * @return array<int, int>
-     */
-    protected function collectReservedPorts(): array {
-        $ports = [$this->port];
-        if ($this->rpcPort > 0) {
-            $ports[] = $this->rpcPort;
-        }
-        foreach ($this->managedUpstreamPlans as $plan) {
-            $planPort = (int)($plan['port'] ?? 0);
-            $planRpcPort = (int)($plan['rpc_port'] ?? 0);
-            $planPort > 0 and $ports[] = $planPort;
-            $planRpcPort > 0 and $ports[] = $planRpcPort;
-        }
-        foreach (($this->instanceManager->snapshot()['generations'] ?? []) as $generation) {
-            foreach (($generation['instances'] ?? []) as $instance) {
-                $instancePort = (int)($instance['port'] ?? 0);
-                $instanceRpcPort = (int)(($instance['metadata']['rpc_port'] ?? 0));
-                $instancePort > 0 and $ports[] = $instancePort;
-                $instanceRpcPort > 0 and $ports[] = $instanceRpcPort;
-            }
-        }
-        return array_values(array_unique(array_filter($ports)));
-    }
-
-    /**
-     * 为新的 managed upstream 分配未占用端口。
-     *
-     * @param int $startPort 起始扫描端口
-     * @param array<int, int> $reserved 已保留端口列表
-     * @return int
-     */
-    protected function allocateManagedPort(int $startPort, array $reserved): int {
-        $port = max(1025, $startPort);
-        while (true) {
-            if (in_array($port, $reserved, true)) {
-                $port++;
-                continue;
-            }
-            if (!$this->launcher) {
-                return $port;
-            }
-            if ($this->launcher->isListening('127.0.0.1', $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1)) {
-                $port++;
-                continue;
-            }
-            return $port;
-        }
-    }
-
-    /**
-     * 将一个 managed plan 注册到 instance registry，并按需激活该 generation。
-     *
-     * @param array<string, mixed> $plan managed plan
-     * @param bool $activate 是否立即激活该 generation
-     * @return void
-     */
-    protected function registerManagedPlan(array $plan, bool $activate = false): void {
-        $version = (string)($plan['version'] ?? '');
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        if ($version === '' || $port <= 0) {
-            return;
-        }
-        $weight = (int)($plan['weight'] ?? 100);
-        $metadata = (array)($plan['metadata'] ?? []);
-        $metadata['managed'] = true;
-        $metadata['role'] = (string)($plan['role'] ?? ($metadata['role'] ?? SERVER_ROLE));
-        $metadata['rpc_port'] = (int)($plan['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
-        $metadata['started_at'] = (int)($metadata['started_at'] ?? time());
-        $metadata['managed_mode'] = 'gateway_supervisor';
-        $metadata['src'] = (string)($plan['src'] ?? ($metadata['src'] ?? APP_SRC_TYPE));
-        $metadata['start_timeout'] = (int)($plan['start_timeout'] ?? ($metadata['start_timeout'] ?? 25));
-        $metadata['extra_flags'] = $this->normalizeManagedPlanExtraFlags($plan);
-        $this->instanceManager->registerUpstream($version, $host, $port, $weight, $metadata);
-        if ($activate) {
-            $this->instanceManager->activateVersion($version, 0);
-            $this->notifyManagedUpstreamGenerationIterated($version);
-            $this->syncNginxProxyTargets('register_managed_plan_activate');
-        }
-        $this->bootstrappedManagedInstances[$version . '@' . $host . ':' . $port] = true;
-    }
-
-    /**
-     * 把新启动的 managed plan 追加进内存计划表。
-     *
-     * @param array<string, mixed> $plan managed plan
-     * @return void
-     */
-    protected function appendManagedPlan(array $plan): void {
-        foreach ($this->managedUpstreamPlans as $existing) {
-            if ((string)($existing['version'] ?? '') === (string)($plan['version'] ?? '')
-                && (string)($existing['host'] ?? '') === (string)($plan['host'] ?? '')
-                && (int)($existing['port'] ?? 0) === (int)($plan['port'] ?? 0)) {
-                return;
-            }
-        }
-        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
-        $this->managedUpstreamPlans[] = $plan;
-    }
-
-    /**
-     * 将运行期探测到的 metadata 合并回内存计划表。
-     *
-     * @param string $host 实例 host
-     * @param int $port 实例端口
-     * @param array<string, mixed> $metadataPatch 需要合并的元数据补丁
-     * @return void
-     */
-    protected function mergeManagedPlanMetadata(string $host, int $port, array $metadataPatch): void {
-        if ($host === '' || $port <= 0 || !$metadataPatch) {
-            return;
-        }
-        foreach ($this->managedUpstreamPlans as &$plan) {
-            if ((string)($plan['host'] ?? '') !== $host || (int)($plan['port'] ?? 0) !== $port) {
-                continue;
-            }
-            $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), $metadataPatch);
-        }
-        unset($plan);
-    }
-
-    /**
-     * 用 registry/snapshot 中的最新运行时信息补全 managed plan。
-     *
-     * @param array<string, mixed> $plan 原始 managed plan
-     * @return array<string, mixed>
-     */
-    protected function hydrateManagedPlanRuntimeMetadata(array $plan): array {
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        if ($host === '' || $port <= 0) {
-            $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
-            return $plan;
-        }
-        $snapshot = $this->instanceManager->snapshot();
-        foreach (($snapshot['generations'] ?? []) as $generation) {
-            foreach (($generation['instances'] ?? []) as $instance) {
-                if ((string)($instance['host'] ?? '') !== $host || (int)($instance['port'] ?? 0) !== $port) {
-                    continue;
-                }
-                $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), (array)($instance['metadata'] ?? []));
-                $plan['rpc_port'] = (int)($plan['rpc_port'] ?? (($instance['metadata']['rpc_port'] ?? 0)));
-                $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
-                return $plan;
-            }
-        }
-        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
-        return $plan;
-    }
-
-    /**
-     * 从内存计划表移除指定的 managed plan。
-     *
-     * @param array<string, mixed> $plan 目标 managed plan
-     * @return void
-     */
-    protected function removeManagedPlan(array $plan): void {
-        $version = (string)($plan['version'] ?? '');
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $this->managedUpstreamPlans = array_values(array_filter($this->managedUpstreamPlans, static function ($item) use ($version, $host, $port) {
-            return !(
-                (string)($item['version'] ?? '') === $version
-                && (string)($item['host'] ?? '127.0.0.1') === $host
-                && (int)($item['port'] ?? 0) === $port
-            );
-        }));
-    }
-
-    /**
-     * 生成人类可读的 plan 描述，用于日志串联整条生命周期。
-     *
-     * @param array<string, mixed> $plan managed plan
-     * @return string
-     */
-    protected function managedPlanDescriptor(array $plan): string {
-        $version = (string)($plan['version'] ?? '');
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $rpcPort = (int)($plan['rpc_port'] ?? 0);
-        $parts = [];
-        $version !== '' and $parts[] = "generation={$version}";
-        $parts[] = "http={$host}:{$port}";
-        $rpcPort > 0 and $parts[] = "rpc={$rpcPort}";
-        return implode(', ', $parts);
-    }
-
-    /**
-     * 在新代切流成功后，让旧业务实例停止接收新业务。
-     *
-     * 正常路径下先发 quiesce，让旧代自己排空；
-     * 如果旧代已经不可达，则直接标记 offline 并进入回收，避免“死实例还挂着 draining deadline”。
-     *
-     * @param array<string, mixed> $plan 旧 generation 对应的 managed plan
-     * @return void
-     */
-    protected function quiesceManagedPlanBusinessPlane(array $plan): void {
-        if (!$this->launcher) {
-            return;
-        }
-        $version = (string)($plan['version'] ?? '');
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        if ($port <= 0) {
-            return;
-        }
-        if (!$this->launcher->requestBusinessQuiesce($host, $port, 1.0)) {
-            $probe = $this->probeManagedUpstreamHealth($plan);
-            $reachability = $this->managedPlanReachability($plan);
-            $unrecoverableReasons = [
-                'http_port_down',
-                'rpc_port_down',
-                'health_status_unreachable',
-                'http_probe_failed',
-                'server_not_alive',
-                'server_not_ready',
-            ];
-            if (
-                (!$reachability['http_listening'] && !$reachability['rpc_listening'])
-                || (!$probe['healthy'] && in_array((string)($probe['reason'] ?? ''), $unrecoverableReasons, true))
-            ) {
-                Console::warning(
-                    "【Gateway】旧业务实例已不可达，直接进入回收: " . $this->managedPlanDescriptor($plan)
-                    . ", reason=" . (string)($probe['reason'] ?? 'unknown')
-                    . ", http=" . ($reachability['http_listening'] ? 'listening' : 'down')
-                    . ", rpc=" . ($reachability['rpc_port'] > 0 ? ($reachability['rpc_listening'] ? 'listening' : 'down') : 'n/a')
-                    . ", process=" . ($reachability['pid_alive'] ? 'alive' : 'down')
-                );
-                $this->instanceManager->markInstanceOffline($host, $port, $version);
-                $this->stopManagedPlan($plan, true);
-                return;
-            }
-            Console::warning("【Gateway】旧业务实例业务平面静默失败: " . $this->managedPlanDescriptor($plan));
-            return;
-        }
-        $runtimeStatus = $this->fetchUpstreamRuntimeStatus($plan);
-        $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
-        $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0);
-        $rpcProcessing = (int)($runtimeStatus['rpc_request_processing'] ?? 0);
-        Console::info(
-            "【Gateway】旧业务实例开始平滑回收: " . $this->managedPlanDescriptor($plan)
-            . ", ws=" . $gatewayWs
-            . ", http=" . $httpProcessing
-            . ", rpc=" . $rpcProcessing
-            . ", queue=" . (int)($runtimeStatus['redis_queue_processing'] ?? 0)
-            . ", crontab=" . (int)($runtimeStatus['crontab_busy'] ?? 0)
-        );
-        // 切流后旧实例已经不再承接新流量，剩余的 gateway 客户端连接如果继续保留，
-        // WebSocket 等长连接会让旧代永远停在 draining。这里主动断开所有仍绑定在
-        // 当前旧实例上的客户端 fd，让它们尽快重新连到新 active generation。
-        $disconnected = $this->disconnectManagedPlanClients($plan);
-        if ($disconnected > 0) {
-            $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
-            Console::info(
-                "【Gateway】旧业务实例客户端连接已主动断开: " . $this->managedPlanDescriptor($plan)
-                . ", disconnected={$disconnected}, remaining_ws={$gatewayWs}"
-            );
-        }
-        if ($gatewayWs === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
-            Console::info("【Gateway】旧业务实例已无在途请求，立即进入 shutdown: " . $this->managedPlanDescriptor($plan));
-            $this->stopManagedPlan($plan, true);
-        }
-    }
-
-    /**
-     * 主动断开仍绑定在旧 managed plan 上的全部客户端连接。
-     *
-     * 切流完成后，这些连接继续留在旧实例上只会拖住 draining；尤其是 WebSocket
-     * 长连接如果不主动 close，旧实例将长期无法进入 shutdown。这里按实例绑定表
-     * 找到所有客户端 fd，并统一交给 tcp relay 关闭，连接计数也会随之同步释放。
-     *
-     * @param array<string, mixed> $plan 旧 generation 对应的 managed plan。
-     * @return int 实际断开的客户端数量。
-     */
-    protected function disconnectManagedPlanClients(array $plan): int {
-        $version = (string)($plan['version'] ?? '');
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        if ($version === '' || $port <= 0) {
-            return 0;
-        }
-
-        $fds = $this->instanceManager->gatewayConnectionFdsFor($version, $host, $port);
-        if (!$fds) {
-            return 0;
-        }
-
-        $disconnected = 0;
-        foreach ($fds as $fd) {
-            try {
-                $this->tcpRelayHandler()->disconnectClient($fd);
-                $disconnected++;
-            } catch (Throwable) {
-            }
-        }
-        return $disconnected;
-    }
-
-    /**
-     * 辅助判断旧实例当前是“还能服务但在排空”，还是“已经不可达”。
-     *
-     * @param array<string, mixed> $plan 旧实例 plan
-     * @return array{http_listening: bool, rpc_listening: bool, pid_alive: bool, rpc_port: int}
-     */
-    protected function managedPlanReachability(array $plan): array {
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $rpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
-        $pid = (int)($plan['metadata']['pid'] ?? 0);
-
-        $httpListening = $port > 0 && (
-            $this->launcher->isListening($host, $port, 0.2)
-            || $this->launcher->isListening('0.0.0.0', $port, 0.2)
-        );
-        $rpcListening = $rpcPort > 0 && (
-            $this->launcher->isListening($host, $rpcPort, 0.2)
-            || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2)
-        );
-        $pidAlive = $pid > 0 && Process::kill($pid, 0);
-
-        return [
-            'http_listening' => $httpListening,
-            'rpc_listening' => $rpcListening,
-            'pid_alive' => $pidAlive,
-            'rpc_port' => $rpcPort,
-        ];
-    }
-
-    protected function cleanupOfflineManagedUpstreams(): void {
-        $snapshot = $this->instanceManager->snapshot();
-        $removedVersions = [];
-        foreach (($snapshot['generations'] ?? []) as $generation) {
-            if (($generation['status'] ?? '') !== 'offline') {
-                continue;
-            }
-            foreach (($generation['instances'] ?? []) as $instance) {
-                if ((($instance['metadata']['managed'] ?? false) !== true)) {
-                    continue;
-                }
-                $plan = [
-                    'version' => (string)($instance['version'] ?? $generation['version'] ?? ''),
-                    'host' => (string)($instance['host'] ?? '127.0.0.1'),
-                    'port' => (int)($instance['port'] ?? 0),
-                    'rpc_port' => (int)(($instance['metadata']['rpc_port'] ?? 0)),
-                ];
-                if ($this->isManagedPlanRecyclePending($plan)) {
-                    continue;
-                }
-                $this->stopManagedPlan($plan);
-            }
-            $version = (string)($generation['version'] ?? '');
-            if ($this->hasPendingRecycleForVersion($version)) {
-                continue;
-            }
-            $this->instanceManager->removeVersion($version);
-            if ($version !== '') {
-                $removedVersions[] = $version;
-            }
-        }
-        if ($removedVersions) {
-            Console::success("【Gateway】旧业务实例代际已移除: count=" . count($removedVersions) . ", generations=" . implode(' | ', $removedVersions));
-        }
-    }
-
-    protected function pollPendingManagedRecycles(): void {
-        if (!$this->launcher || !$this->pendingManagedRecycles) {
-            return;
-        }
-
-        foreach (array_keys($this->pendingManagedRecycles) as $key) {
-            $this->checkPendingManagedRecycle($key);
-        }
-    }
-
-    protected function ensurePendingManagedRecycleWatcher(string $key): void {
-        if (isset($this->pendingManagedRecycleWatchers[$key]) || !isset($this->pendingManagedRecycles[$key])) {
-            return;
-        }
-
-        $timerId = Timer::tick(1000, function () use ($key) {
-            if (!isset($this->pendingManagedRecycleWatchers[$key])) {
-                return;
-            }
-            if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
-                $this->clearPendingManagedRecycleWatcher($key);
-                return;
-            }
-            if ($this->checkPendingManagedRecycle($key)) {
-                $this->clearPendingManagedRecycleWatcher($key);
-            }
-        });
-        $this->pendingManagedRecycleWatchers[$key] = $timerId;
-    }
-
-    protected function clearPendingManagedRecycleWatcher(string $key): void {
-        if (!isset($this->pendingManagedRecycleWatchers[$key])) {
-            return;
-        }
-        Timer::clear($this->pendingManagedRecycleWatchers[$key]);
-        unset($this->pendingManagedRecycleWatchers[$key]);
-    }
-
-    /**
-     * 轮询某个 pending recycle 的最终完成态。
-     *
-     * 只要端口还在监听，就说明旧实例还没真正退出；
-     * 只有端口都关掉后，才会把 registry 与内存中的 managed plan 一并清理。
-     *
-     * @param string $key pending recycle 项唯一键
-     * @return bool true 表示 watcher 可移除；false 表示仍需继续轮询
-     */
-    protected function checkPendingManagedRecycle(string $key): bool {
-        if (!$this->launcher || !isset($this->pendingManagedRecycles[$key])) {
-            return true;
-        }
-        if (($this->pendingManagedRecycleCompletions[$key] ?? false) === true) {
-            return false;
-        }
-
-        $item = $this->pendingManagedRecycles[$key];
-        $plan = (array)($item['plan'] ?? []);
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $rpcPort = (int)($plan['rpc_port'] ?? 0);
-        $httpAlive = $port > 0 && ($this->launcher->isListening($host, $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1));
-        $rpcAlive = $rpcPort > 0 && ($this->launcher->isListening($host, $rpcPort, 0.1) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.1));
-        if ($httpAlive || $rpcAlive) {
-            $requestedAt = (int)($item['requested_at'] ?? time());
-            $elapsed = max(0, time() - $requestedAt);
-            if ($elapsed >= 60) {
-                $lastWarnAt = (int)($this->pendingManagedRecycleWarnState[$key] ?? 0);
-                if ($lastWarnAt <= 0 || (time() - $lastWarnAt) >= 60) {
-                    $this->pendingManagedRecycleWarnState[$key] = time();
-                    Console::warning(
-                        "【Gateway】旧业务实例回收等待中: " . $this->managedPlanDescriptor($plan)
-                        . ", waiting={$elapsed}s, http=" . ($httpAlive ? 'listening' : 'closed')
-                        . ", rpc=" . ($rpcAlive ? 'listening' : 'closed')
-                    );
-                }
-            }
-            return false;
-        }
-
-        $removeState = (bool)($item['remove_state'] ?? true);
-        $removePlan = (bool)($item['remove_plan'] ?? true);
-        $this->pendingManagedRecycleCompletions[$key] = true;
-        if ($removeState) {
-            $this->instanceManager->removeInstance($host, $port);
-        }
-        unset($this->bootstrappedManagedInstances[$key]);
-        if ($removePlan) {
-            $this->removeManagedPlan($plan);
-        }
-        unset($this->managedUpstreamHealthState[$key]);
-        $removedGeneration = '';
-        if ($removeState) {
-            $version = (string)($plan['version'] ?? '');
-            if ($version !== '') {
-                $snapshot = $this->instanceManager->snapshot();
-                $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
-                if ($generation && empty($generation['instances'] ?? [])) {
-                    $this->instanceManager->removeVersion($version);
-                    $removedGeneration = $version;
-                }
-            }
-        }
-        unset($this->pendingManagedRecycleWarnState[$key], $this->pendingManagedRecycles[$key], $this->pendingManagedRecycleCompletions[$key]);
-        Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
-        if ($removedGeneration !== '') {
-            Console::success("【Gateway】旧业务实例代际已移除: count=1, generations={$removedGeneration}");
-        }
-        $activeVersion = (string)($this->instanceManager->snapshot()['active_version'] ?? '');
-        if ($activeVersion !== '') {
-            $this->notifyManagedUpstreamGenerationIterated($activeVersion);
-        } else {
-            $this->lastManagedHealthActiveVersion = '';
-            $this->managedUpstreamHealthState = [];
-            $this->lastManagedUpstreamHealthCheckAt = 0;
-        }
-        return true;
-    }
-
-    protected function isManagedPlanRecyclePending(array $plan): bool {
-        $host = (string)($plan['host'] ?? '127.0.0.1');
-        $port = (int)($plan['port'] ?? 0);
-        $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
-        return isset($this->pendingManagedRecycles[$key]);
-    }
-
-    protected function hasPendingRecycleForVersion(string $version): bool {
-        if ($version === '') {
-            return false;
-        }
-        foreach ($this->pendingManagedRecycles as $item) {
-            $plan = (array)($item['plan'] ?? []);
-            if ((string)($plan['version'] ?? '') === $version) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    protected function warnStuckDrainingManagedUpstreams(): void {
-        $diagnostics = $this->instanceManager->drainingDiagnostics();
-        $activeVersions = [];
-        $now = time();
-        foreach ($diagnostics as $item) {
-            $version = (string)($item['version'] ?? '');
-            if ($version === '') {
-                continue;
-            }
-            $activeVersions[$version] = true;
-            $startedAt = (int)($item['drain_started_at'] ?? 0);
-            if ($startedAt <= 0) {
-                continue;
-            }
-            $elapsed = $now - $startedAt;
-            $warnAfter = max(
-                self::ROLLING_DRAIN_GRACE_SECONDS,
-                max(1, (int)(($item['drain_deadline_at'] ?? 0) - $startedAt))
-            );
-            if ($elapsed < $warnAfter) {
-                continue;
-            }
-            $lastWarnAt = (int)($this->drainingGenerationWarnState[$version] ?? 0);
-            if ($lastWarnAt > 0 && ($now - $lastWarnAt) < 60) {
-                continue;
-            }
-            $this->drainingGenerationWarnState[$version] = $now;
-            Console::warning(
-                "【Gateway】旧业务实例仍在 draining，尚未进入 shutdown: generation={$version}, "
-                . "draining={$elapsed}s, ws=" . (int)($item['connections'] ?? 0)
-                . ", http=" . (int)($item['http_processing'] ?? 0)
-                . ", rpc=" . (int)($item['rpc_processing'] ?? 0)
-                . ", queue=" . (int)($item['redis_queue_processing'] ?? 0)
-                . ", crontab=" . (int)($item['crontab_busy'] ?? 0)
-                . ", deadline_at=" . (int)($item['drain_deadline_at'] ?? 0)
-            );
-        }
-        foreach (array_keys($this->drainingGenerationWarnState) as $version) {
-            if (!isset($activeVersions[$version])) {
-                unset($this->drainingGenerationWarnState[$version]);
-            }
-        }
     }
 
     protected function normalizeDashboardPath(string $uri): string {
@@ -5529,220 +4498,6 @@ class GatewayServer {
         return $payload;
     }
 
-    protected function handleManagementRequest(Request $request, Response $response): void {
-        $path = $request->server['request_uri'] ?? '/';
-        $method = strtoupper($request->server['request_method'] ?? 'GET');
-        $payload = $this->decodeJsonBody($request);
-
-        try {
-            if ($method === 'GET' && $path === '/_gateway/internal/console/subscription') {
-                if (!$this->isInternalGatewayRequest($request)) {
-                    $this->json($response, 403, ['message' => 'forbidden']);
-                    return;
-                }
-                $this->json($response, 200, $this->localConsoleSubscriptionPayload());
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/internal/console/log') {
-                if (!$this->isInternalGatewayRequest($request)) {
-                    $this->json($response, 403, ['message' => 'forbidden']);
-                    return;
-                }
-                $this->json($response, 200, [
-                    'accepted' => $this->acceptConsolePayload([
-                        'time' => (string)($payload['time'] ?? ''),
-                        'message' => (string)($payload['message'] ?? ''),
-                        'source_type' => (string)($payload['source_type'] ?? 'gateway'),
-                        'node' => (string)($payload['node'] ?? SERVER_HOST),
-                    ]),
-                ]);
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/internal/command') {
-                if (!$this->isInternalGatewayRequest($request)) {
-                    $this->json($response, 403, ['message' => 'forbidden']);
-                    return;
-                }
-                $result = $this->dispatchInternalGatewayCommand((string)($payload['command'] ?? ''));
-                $afterWrite = isset($result['__after_write']) && is_callable($result['__after_write'])
-                    ? $result['__after_write']
-                    : null;
-                unset($result['__after_write']);
-                $this->json($response, (int)($result['status'] ?? 500), $result['data'] ?? ['message' => (string)($result['message'] ?? 'request failed')]);
-                $afterWrite && $afterWrite();
-                return;
-            }
-
-            if ($method === 'GET' && $path === '/_gateway/healthz') {
-                $this->json($response, 200, [
-                    'message' => 'ok',
-                    'active_version' => $this->currentGatewayStateSnapshot()['active_version'] ?? null,
-                ]);
-                return;
-            }
-
-            if ($method === 'GET' && $path === '/_gateway/upstreams') {
-                $this->json($response, 200, $this->currentGatewayStateSnapshot());
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/upstreams/register') {
-                $instance = $this->instanceManager->registerUpstream(
-                    (string)($payload['version'] ?? ''),
-                    (string)($payload['host'] ?? '127.0.0.1'),
-                    (int)($payload['port'] ?? 0),
-                    (int)($payload['weight'] ?? 100),
-                    (array)($payload['metadata'] ?? [])
-                );
-                $this->json($response, 200, [
-                    'message' => 'registered',
-                    'instance' => $instance,
-                    'state' => $this->currentGatewayStateSnapshot(),
-                ]);
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/versions/activate') {
-                $state = $this->instanceManager->activateVersion(
-                    (string)($payload['version'] ?? ''),
-                    (int)($payload['grace_seconds'] ?? 30)
-                );
-                $this->notifyManagedUpstreamGenerationIterated((string)($payload['version'] ?? ''));
-                $this->syncNginxProxyTargets('api_activate');
-                $this->json($response, 200, [
-                    'message' => 'activated',
-                    'state' => $state,
-                ]);
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/versions/drain') {
-                $state = $this->instanceManager->drainVersion(
-                    (string)($payload['version'] ?? ''),
-                    (int)($payload['grace_seconds'] ?? 30)
-                );
-                $this->syncNginxProxyTargets('api_drain');
-                $this->json($response, 200, [
-                    'message' => 'draining',
-                    'state' => $state,
-                ]);
-                return;
-            }
-
-            if ($method === 'POST' && $path === '/_gateway/versions/remove') {
-                $state = $this->instanceManager->removeVersion((string)($payload['version'] ?? ''));
-                $this->syncNginxProxyTargets('api_remove');
-                $this->json($response, 200, [
-                    'message' => 'removed',
-                    'state' => $state,
-                ]);
-                return;
-            }
-
-            $this->json($response, 404, ['message' => 'not found']);
-        } catch (Throwable $e) {
-            $this->json($response, 400, [
-                'message' => 'request failed',
-                'error' => $e->getMessage(),
-            ]);
-        }
-    }
-
-    protected function localConsoleSubscriptionPayload(): array {
-        return [
-            'enabled' => $this->dashboardEnabled() ? $this->hasConsoleSubscribers() : ConsoleRelay::remoteSubscribed(),
-        ];
-    }
-
-    protected function dispatchInternalGatewayCommand(string $command): array {
-        $command = trim($command);
-        if ($command === '') {
-            return ['ok' => false, 'status' => 400, 'message' => 'command required'];
-        }
-
-        switch ($command) {
-            case 'reload':
-                return $this->formatGatewayInternalCommandResult($this->dispatchLocalGatewayCommand('reload'));
-            case 'reload_gateway':
-                $reservation = $this->reserveGatewayReload();
-                if (!$reservation['accepted']) {
-                    return ['ok' => false, 'status' => 409, 'message' => $reservation['message']];
-                }
-                $response = [
-                    'ok' => true,
-                    'status' => 200,
-                    'data' => [
-                        'accepted' => true,
-                        'message' => $reservation['message'],
-                    ],
-                ];
-                if ($reservation['scheduled']) {
-                    $response['__after_write'] = function () use ($reservation): void {
-                        $this->scheduleReservedGatewayReload((bool)$reservation['restart_managed_upstreams']);
-                    };
-                }
-                return $response;
-            case 'restart_crontab':
-                return ['ok' => false, 'status' => 409, 'message' => 'crontab now managed by linux scheduler'];
-            case 'restart_redisqueue':
-                if (!$this->subProcessManager || !$this->subProcessManager->hasProcess('RedisQueue')) {
-                    return ['ok' => false, 'status' => 409, 'message' => 'redisqueue process unavailable'];
-                }
-                return $this->formatGatewayInternalCommandResult($this->dispatchLocalGatewayCommand('restart_redisqueue'));
-            case 'restart':
-                return [
-                    'ok' => true,
-                    'status' => 200,
-                    'data' => ['accepted' => true, 'message' => 'gateway restart started'],
-                    '__after_write' => function (): void {
-                        $this->scheduleGatewayShutdown(true);
-                    },
-                ];
-            case 'shutdown':
-                return [
-                    'ok' => true,
-                    'status' => 200,
-                    'data' => ['accepted' => true, 'message' => 'gateway shutdown started'],
-                    '__after_write' => function (): void {
-                        $this->scheduleGatewayShutdown();
-                    },
-                ];
-            default:
-                return ['ok' => false, 'status' => 400, 'message' => 'unsupported command'];
-        }
-    }
-
-    /**
-     * 将本地命令 Result 统一转成内部 HTTP 命令返回体。
-     *
-     * @param Result $result 本地命令执行结果
-     * @return array<string, mixed>
-     */
-    protected function formatGatewayInternalCommandResult(Result $result): array {
-        if ($result->hasError()) {
-            return [
-                'ok' => false,
-                'status' => 409,
-                'message' => (string)$result->getMessage(),
-                'data' => $result->getData(),
-            ];
-        }
-        $message = $result->getData();
-        if (!is_string($message) || $message === '') {
-            $message = (string)$result->getMessage();
-        }
-        return [
-            'ok' => true,
-            'status' => 200,
-            'data' => [
-                'accepted' => true,
-                'message' => $message,
-            ],
-        ];
-    }
-
     protected function proxyMaxInflightRequests(): int {
         $configured = Config::server()['gateway_proxy_max_inflight'] ?? 1024;
         $limit = (int)$configured;
@@ -5754,21 +4509,6 @@ class GatewayServer {
             return false;
         }
         return $this->tcpRelayHandler()->activeRelayConnectionCount() >= $this->proxyMaxInflightRequests();
-    }
-
-    protected function decodeJsonBody(Request $request): array {
-        $raw = $request->rawContent();
-        if ($raw === '' || $raw === false) {
-            return [];
-        }
-        $decoded = json_decode($raw, true);
-        return is_array($decoded) ? $decoded : [];
-    }
-
-    protected function json(Response $response, int $status, array $payload): void {
-        $response->status($status);
-        $response->header('Content-Type', 'application/json;charset=utf-8');
-        $response->end(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     }
 
     protected function performServerHandshake(Request $request, Response $response): void {

@@ -2,12 +2,11 @@
 
 namespace Scf\Command\DefaultCommand;
 
-require_once dirname(__DIR__, 2) . '/Server/Proxy/CliBootstrap.php';
-
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
 use Scf\Core\Config;
+use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Server\Proxy\LocalIpc;
 use Scf\Server\Proxy\CliBootstrap;
@@ -98,10 +97,51 @@ class Gateway implements CommandInterface {
             return $this->status();
         }
         if ($action === 'start') {
+            $this->prepareGatewayStart();
             CliBootstrap::bootedRun();
             return null;
         }
         return Manager::instance()->displayCommandHelp($this->commandName());
+    }
+
+    /**
+     * 启动 gateway 前先清理占用目标监听端口的旧同类实例。
+     *
+     * `./server start` 本质上是“确保该 app/role 的 gateway 进入运行态”。
+     * 如果当前端口已经被上一轮遗留的 gateway 进程占着，继续直接启动只会在
+     * `GatewayServer` 里反复等待并最终报 `Address already in use`。
+     *
+     * 这里在真正进入 bootedRun 之前，只针对“命令行可识别为同类 gateway”
+     * 且确实占着目标监听端口的旧进程做定向终止，避免误伤其它服务。
+     *
+     * @return void
+     */
+    protected function prepareGatewayStart(): void {
+        $ports = $this->resolveGatewayListenPortsForStart();
+        if (!$ports) {
+            return;
+        }
+
+        $pids = $this->discoverConflictingGatewayListenerPids($ports);
+        if (!$pids) {
+            return;
+        }
+
+        Console::warning('发现旧 Gateway 实例占用目标端口，准备回收: ports=' . implode(', ', $ports) . '; pids=' . implode(', ', $pids));
+        $this->terminateProcesses($pids, SIGTERM);
+        if ($this->waitForPortsReleased($ports, 8)) {
+            Console::success('旧 Gateway 监听端口已释放，继续启动');
+            return;
+        }
+
+        $remainingPids = $this->discoverConflictingGatewayListenerPids($ports);
+        if (!$remainingPids) {
+            return;
+        }
+
+        Console::warning('旧 Gateway 实例未在预期时间内退出，升级为强制回收: pids=' . implode(', ', $remainingPids));
+        $this->terminateProcesses($remainingPids, SIGKILL);
+        $this->waitForPortsReleased($ports, 5);
     }
 
     /**
@@ -268,5 +308,225 @@ class Gateway implements CommandInterface {
         }
         $serverConfig = Config::server();
         return (int)($serverConfig['port'] ?? 0);
+    }
+
+    /**
+     * 解析当前 start 命令会占用的 gateway 监听端口集合。
+     *
+     * @return array<int, int>
+     */
+    protected function resolveGatewayListenPortsForStart(): array {
+        $serverConfig = Config::server();
+        $bindPort = $this->resolveGatewayPort();
+        $configPort = (int)($serverConfig['port'] ?? $bindPort);
+        $ports = [];
+
+        if ($bindPort > 0) {
+            $ports[] = $bindPort;
+            $ports[] = $this->resolveGatewayControlPort($bindPort, $configPort, $serverConfig);
+        }
+
+        $rpcPort = $this->resolveGatewayRpcPort($bindPort, $configPort, $serverConfig);
+        if ($rpcPort > 0) {
+            $ports[] = $rpcPort;
+        }
+
+        return array_values(array_unique(array_filter(array_map('intval', $ports), static fn(int $port) => $port > 0)));
+    }
+
+    /**
+     * 解析当前 gateway 的控制面端口。
+     *
+     * 该逻辑与 CliBootstrap 保持一致，确保 start 前的冲突清理与真正启动时命中的端口一致。
+     *
+     * @param int $bindPort gateway 业务监听端口
+     * @param int $configPort server.php 中配置的业务端口
+     * @param array $serverConfig server 配置数组
+     * @return int
+     */
+    protected function resolveGatewayControlPort(int $bindPort, int $configPort, array $serverConfig): int {
+        $explicitPort = (int)(Manager::instance()->getOpt('control_port') ?: Manager::instance()->getOpt('gateway_control_port', 0));
+        if ($explicitPort > 0) {
+            return $explicitPort;
+        }
+
+        $configured = (int)($serverConfig['gateway_control_port'] ?? 0);
+        if ($configured > 0) {
+            $offset = max(1, $configured - $configPort);
+            return $bindPort + $offset;
+        }
+
+        return $bindPort + 1000;
+    }
+
+    /**
+     * 解析当前 gateway 的 RPC 监听端口。
+     *
+     * @param int $bindPort gateway 业务监听端口
+     * @param int $configPort server.php 中配置的业务端口
+     * @param array $serverConfig server 配置数组
+     * @return int
+     */
+    protected function resolveGatewayRpcPort(int $bindPort, int $configPort, array $serverConfig): int {
+        $explicitPort = (int)(Manager::instance()->getOpt('rpc_port') ?: Manager::instance()->getOpt('rport', 0));
+        if ($explicitPort > 0) {
+            return $explicitPort;
+        }
+
+        $configured = (int)($serverConfig['rpc_port'] ?? 0);
+        if ($configured <= 0) {
+            return 0;
+        }
+
+        if ($bindPort === $configPort) {
+            return $configured;
+        }
+
+        $offset = max(1, $configured - $configPort);
+        return max(1, $bindPort + $offset);
+    }
+
+    /**
+     * 发现当前目标端口上运行的旧 gateway 监听进程。
+     *
+     * 只回收命令行能识别为同一个 app 的 gateway 主链进程，避免把其它占同端口的
+     * 非 gateway 服务误判为可回收对象。
+     *
+     * @param array<int, int> $ports 目标端口集合
+     * @return array<int, int>
+     */
+    protected function discoverConflictingGatewayListenerPids(array $ports): array {
+        $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: APP_DIR_NAME ?: 'app');
+        $selfPid = getmypid() ?: 0;
+        $pids = [];
+
+        foreach ($ports as $port) {
+            if ($port <= 0) {
+                continue;
+            }
+            foreach ($this->discoverListeningPidsByPort($port) as $pid) {
+                if ($pid <= 0 || $pid === $selfPid) {
+                    continue;
+                }
+                $command = $this->readProcessCommand($pid);
+                if ($command === '') {
+                    continue;
+                }
+                if (!str_contains($command, 'boot gateway start')) {
+                    continue;
+                }
+                if (!str_contains($command, '-app=' . $app)) {
+                    continue;
+                }
+                $pids[$pid] = $pid;
+            }
+        }
+
+        ksort($pids);
+        return array_values($pids);
+    }
+
+    /**
+     * 读取指定监听端口上的进程 PID。
+     *
+     * @param int $port
+     * @return array<int, int>
+     */
+    protected function discoverListeningPidsByPort(int $port): array {
+        $output = @shell_exec('lsof -nP -t -iTCP:' . (int)$port . ' -sTCP:LISTEN 2>/dev/null');
+        if (!is_string($output) || trim($output) === '') {
+            return [];
+        }
+
+        $pids = [];
+        foreach (preg_split('/\r?\n/', trim($output)) as $line) {
+            $pid = (int)trim((string)$line);
+            if ($pid > 0) {
+                $pids[$pid] = $pid;
+            }
+        }
+
+        return array_values($pids);
+    }
+
+    /**
+     * 读取进程命令行，供冲突进程过滤使用。
+     *
+     * @param int $pid
+     * @return string
+     */
+    protected function readProcessCommand(int $pid): string {
+        if ($pid <= 0) {
+            return '';
+        }
+
+        $output = @shell_exec('ps -p ' . $pid . ' -o command= 2>/dev/null');
+        return trim((string)$output);
+    }
+
+    /**
+     * 向一组进程发送退出信号。
+     *
+     * @param array<int, int> $pids
+     * @param int $signal
+     * @return void
+     */
+    protected function terminateProcesses(array $pids, int $signal): void {
+        foreach ($pids as $pid) {
+            $pid = (int)$pid;
+            if ($pid <= 0 || !Process::kill($pid, 0)) {
+                continue;
+            }
+            @Process::kill($pid, $signal);
+        }
+    }
+
+    /**
+     * 等待目标端口释放。
+     *
+     * @param array<int, int> $ports
+     * @param int $timeoutSeconds
+     * @param int $intervalMs
+     * @return bool
+     */
+    protected function waitForPortsReleased(array $ports, int $timeoutSeconds = 10, int $intervalMs = 200): bool {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        while (microtime(true) < $deadline) {
+            $occupied = false;
+            foreach ($ports as $port) {
+                if ($port > 0 && $this->isPortListening($port)) {
+                    $occupied = true;
+                    break;
+                }
+            }
+            if (!$occupied) {
+                return true;
+            }
+            usleep(max(50, $intervalMs) * 1000);
+        }
+
+        return false;
+    }
+
+    /**
+     * 判断本机端口是否仍处于监听状态。
+     *
+     * @param int $port
+     * @return bool
+     */
+    protected function isPortListening(int $port): bool {
+        $socket = @stream_socket_client(
+            'tcp://127.0.0.1:' . $port,
+            $errno,
+            $errstr,
+            0.2,
+            STREAM_CLIENT_CONNECT
+        );
+        if (!is_resource($socket)) {
+            return false;
+        }
+
+        fclose($socket);
+        return true;
     }
 }

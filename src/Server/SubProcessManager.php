@@ -951,7 +951,7 @@ class SubProcessManager {
         $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
         $node->heart_beat = time();
-        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
+        $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
         $node->tables = ATable::list();
         $node->threads = count(Coroutine::list());
         $node->thread_status = Coroutine::stats();
@@ -1871,7 +1871,7 @@ class SubProcessManager {
                         $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
                         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
                         $node->heart_beat = time();
-                        $node->framework_update_ready = file_exists(SCF_ROOT . '/build/update.pack');
+                        $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
                         $node->tables = ATable::list();
                         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
                         $node->stack_useage = memory_get_usage(true);

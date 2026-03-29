@@ -385,7 +385,7 @@ class Http extends \Scf\Core\Server {
             'restart_times' => Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0,
             'heart_beat' => time(),
             'framework_build_version' => FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => file_exists(SCF_ROOT . '/build/update.pack'),
+            'framework_update_ready' => function_exists('scf_framework_update_ready') && scf_framework_update_ready(),
             'role' => SERVER_ROLE,
             'master_pid' => (int)($this->server->master_pid ?? 0),
             'manager_pid' => (int)($this->server->manager_pid ?? 0),

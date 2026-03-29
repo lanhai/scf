@@ -71,11 +71,17 @@ class GatewayDashboardController extends DashboardController {
      * @return Result 服务器状态返回结果
      */
     public function actionServer(): Result {
+        Request::get([
+            'refresh_versions',
+        ])->assign($refreshVersions);
+        $forceRefreshVersions = in_array(strtolower(trim((string)$refreshVersions)), ['1', 'true', 'yes'], true);
         return Result::success(
             $this->gateway->dashboardServerStatus(
                 $this->token,
                 (string)(Request::header('host') ?: ''),
-                (string)(Request::header('referer') ?: '')
+                (string)(Request::header('referer') ?: ''),
+                '',
+                $forceRefreshVersions
             )
         );
     }

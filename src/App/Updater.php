@@ -303,13 +303,29 @@ class Updater {
                 return false;
             }
             $remoteVersion = $remoteVersionResponse->getData();
-            $updateFile = $saveDir . '/update.pack';
-            $this->logUpdateStep("开始下载框架升级包: url=" . (string)($remoteVersion['url'] ?? ''));
-            $client = Http::create($remoteVersion['url']);
-            $downloadResult = $client->download($updateFile, 1800);
+            $requestedFrameworkVersion = $this->normalizeVersion((string)$version);
+            $downloadUrl = $this->resolveFrameworkPackageDownloadUrl($remoteVersion, $requestedFrameworkVersion);
+            if ($downloadUrl === null) {
+                $this->setLastError('未匹配到框架升级包下载地址');
+                Console::warning('【updater】未匹配到框架升级包下载地址');
+                return false;
+            }
+
+            $versionedDownloadFile = $saveDir . '/framework-' . ($requestedFrameworkVersion ?: 'latest') . '.download';
+            $this->logUpdateStep("开始下载框架升级包: url={$downloadUrl}");
+            $client = Http::create($downloadUrl);
+            $downloadResult = $client->download($versionedDownloadFile, 1800);
             if ($downloadResult->hasError()) {
                 $this->setLastError('框架升级包下载失败:' . $downloadResult->getMessage());
                 Console::warning('【updater】框架升级包下载失败:' . $downloadResult->getMessage());
+                $this->removePath($versionedDownloadFile);
+                return false;
+            }
+            if (!$this->publishFrameworkPackage($versionedDownloadFile, [
+                'version' => $requestedFrameworkVersion ?: (string)($remoteVersion['version'] ?? ''),
+                'build' => (string)($remoteVersion['build'] ?? ''),
+            ])) {
+                $this->removePath($versionedDownloadFile);
                 return false;
             }
             //下载引导文件
@@ -365,6 +381,72 @@ class Updater {
             return false;
         }
         $this->logUpdateStep("appointUpdateTo completed: type={$type}, version={$version}");
+        return true;
+    }
+
+    /**
+     * 解析 framework 指定版本的下载地址。
+     *
+     * 远端 `version.json` 默认只给出“当前最新版本”的直链，但 dashboard 升级链路
+     * 传进来的是明确的目标版本。这里优先使用远端原始 URL；如果它指向的并不是
+     * 当前请求版本，则按同目录 `{version}.update` 规则回推历史版本包地址。
+     *
+     * @param array $remoteVersion 远端版本清单中的 framework 记录
+     * @param string $requestedVersion 用户请求的目标版本
+     * @return string|null
+     */
+    protected function resolveFrameworkPackageDownloadUrl(array $remoteVersion, string $requestedVersion): ?string {
+        $downloadUrl = trim((string)($remoteVersion['url'] ?? ''));
+        if ($downloadUrl === '') {
+            return null;
+        }
+
+        $remoteVersionNumber = $this->normalizeVersion((string)($remoteVersion['version'] ?? ''));
+        if ($requestedVersion === '' || $remoteVersionNumber === '' || $requestedVersion === $remoteVersionNumber) {
+            return $downloadUrl;
+        }
+
+        $directory = rtrim((string)dirname($downloadUrl), '/');
+        if ($directory === '' || $directory === '.') {
+            return null;
+        }
+
+        return $directory . '/' . $requestedVersion . '.update';
+    }
+
+    /**
+     * 将下载完成的 framework 包发布到版本化 runtime 目录。
+     *
+     * framework 升级从这里开始不再写 `build/update.pack`，而是直接把下载文件
+     * 发布为 `build/framework/packs/<version>.pack` 并更新 active 指针。
+     * 这样当前正在运行的 gateway 不会被固定文件名热切换影响，后续新启动的
+     * gateway/upstream 则统一从 active 指向的最新版本 pack 启动。
+     *
+     * @param string $downloadFile 下载完成的临时文件
+     * @param array $versionInfo 目标版本元数据
+     * @return bool
+     */
+    protected function publishFrameworkPackage(string $downloadFile, array $versionInfo): bool {
+        if (function_exists('scf_publish_framework_pack')) {
+            $publishError = null;
+            $record = \scf_publish_framework_pack($downloadFile, $versionInfo, true, $publishError);
+            if ($record) {
+                $this->logUpdateStep('框架升级包已发布到版本化目录: version=' . (string)($record['version'] ?? ''));
+                return true;
+            }
+            $this->setLastError('框架升级包发布失败:' . (string)$publishError);
+            Console::warning('【updater】框架升级包发布失败:' . (string)$publishError);
+            return false;
+        }
+
+        $fallbackTarget = SCF_ROOT . '/build/src.pack';
+        if (!@rename($downloadFile, $fallbackTarget) && !@copy($downloadFile, $fallbackTarget)) {
+            $this->setLastError('框架升级包发布失败: fallback src.pack 写入失败');
+            Console::warning('【updater】框架升级包发布失败: fallback src.pack 写入失败');
+            return false;
+        }
+        @unlink($downloadFile);
+        $this->logUpdateStep('框架升级包已回退发布到 src.pack');
         return true;
     }
 

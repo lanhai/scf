@@ -141,7 +141,7 @@ class Framework implements CommandInterface {
 
     public function build(): void {
         Console::log('开始构建框架:' . Root::root());
-        $buildDir = BUILD_PATH . 'framework/';
+        $buildDir = BUILD_PATH . 'framework';
         if (!is_dir($buildDir)) {
             mkdir($buildDir, 0775);
         }
@@ -170,6 +170,7 @@ class Framework implements CommandInterface {
         $phar->buildFromDirectory(Root::root() . '/src');
         $phar->setDefaultStub('version.php', 'version.php');
         $localFile = $buildDir . "/" . $version . ".update";
+        exec('cp ' . $buildFilePath . ' ' . SCF_ROOT . '/build/src.pack');
         exec('mv ' . $buildFilePath . ' ' . $localFile);
         Console::log(Color::green('打包完成'));
         if (!File::write($buildDir . '/version.json', JsonHelper::toJson([
