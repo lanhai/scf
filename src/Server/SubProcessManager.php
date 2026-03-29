@@ -39,6 +39,7 @@ class SubProcessManager {
     protected const PROCESS_EXIT_GRACE_SECONDS = 8;
     protected const PROCESS_EXIT_WARN_AFTER_SECONDS = 60;
     protected const PROCESS_EXIT_WARN_INTERVAL_SECONDS = 60;
+    protected const REMOTE_APPOINT_UPDATE_TIMEOUT_SECONDS = 300;
 
     /**
      * Server 托管的总控子进程。
@@ -510,48 +511,157 @@ class SubProcessManager {
                 }
                 return true;
             case 'appoint_update':
-                $taskId = $params['task_id'] ?? '';
+                $taskId = (string)($params['task_id'] ?? '');
+                $type = (string)($params['type'] ?? '');
+                $version = (string)($params['version'] ?? '');
                 $statePayload = [
                     'event' => 'node_update_state',
                     'data' => [
                         'task_id' => $taskId,
-                        'host' => SERVER_HOST,
-                        'type' => $params['type'],
-                        'version' => $params['version'],
+                        // 升级状态回报必须和 slave_node_report / heartbeat 使用同一 host 标识，
+                        // 否则 master 汇总 task 状态时会把这个 slave 误判成一直 pending。
+                        'host' => APP_NODE_ID,
+                        'type' => $type,
+                        'version' => $version,
                         'updated_at' => time(),
                     ]
                 ];
                 $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                     'data' => [
                         'state' => 'running',
-                        'message' => "【" . SERVER_HOST . "】开始更新 {$params['type']} => {$params['version']}",
+                        'message' => "【" . SERVER_HOST . "】开始更新 {$type} => {$version}",
                     ]
                 ])));
-                if (App::appointUpdateTo($params['type'], $params['version'])) {
+                $result = $this->executeRemoteAppointUpdate($type, $version, $taskId);
+                $reportedState = (string)(($result['data'] ?? [])['master']['state'] ?? '');
+                if (!empty($result['ok']) && $reportedState !== 'failed') {
+                    $finalState = $reportedState === 'pending' ? 'pending' : 'success';
+                    $finalMessage = $finalState === 'pending'
+                        ? "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}"
+                        : "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}";
                     $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                         'data' => [
-                            'state' => 'success',
-                            'message' => "【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}",
+                            'state' => $finalState,
+                            'message' => $finalMessage,
                             'updated_at' => time(),
                         ]
                     ])));
-                    $socket->push("【" . SERVER_HOST . "】版本更新成功:{$params['type']} => {$params['version']}");
+                    $socket->push($finalMessage);
                 } else {
-                    $error = App::getLastUpdateError() ?: '未知原因';
+                    $error = (string)($result['message'] ?? '') ?: App::getLastUpdateError() ?: '未知原因';
                     $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                         'data' => [
                             'state' => 'failed',
                             'error' => $error,
-                            'message' => "【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}",
+                            'message' => "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}",
                             'updated_at' => time(),
                         ]
                     ])));
-                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$params['type']} => {$params['version']},原因:{$error}");
+                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}");
                 }
                 return true;
             default:
                 return false;
         }
+    }
+
+    /**
+     * 在 slave 节点上执行远端下发的指定版本升级。
+     *
+     * slave 不能再直接在 cluster 协调进程里调用 `App::appointUpdateTo()`，否则会绕开
+     * gateway 业务编排子进程那层统一升级链，导致本地包替换、rolling upstream、
+     * 业务子进程迭代与 master 行为不一致。这里改为与 master 复用同一条业务编排命令，
+     * 只在完成后额外把结果回报给 master。
+     *
+     * @param string $type 升级类型
+     * @param string $version 目标版本
+     * @param string $taskId 集群升级任务 id
+     * @return array<string, mixed>
+     */
+    protected function executeRemoteAppointUpdate(string $type, string $version, string $taskId): array {
+        if (
+            $this->isProxyGatewayMode()
+            && $this->hasProcess('GatewayBusinessCoordinator')
+            && is_callable($this->gatewayBusinessCommandHandler)
+        ) {
+            $requestId = uniqid('gateway_business_', true);
+            $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+            Runtime::instance()->delete($resultKey);
+            Console::info("【GatewayCluster】转交业务编排执行升级: task={$taskId}, type={$type}, version={$version}, request_id={$requestId}", false);
+            if (!$this->sendCommand('appoint_update', [
+                'task_id' => $taskId,
+                'type' => $type,
+                'version' => $version,
+                'request_id' => $requestId,
+            ], ['GatewayBusinessCoordinator'])) {
+                Runtime::instance()->delete($resultKey);
+                return [
+                    'ok' => false,
+                    'message' => 'Gateway 业务编排命令投递失败',
+                    'data' => [],
+                    'updated_at' => time(),
+                ];
+            }
+            $result = $this->waitForGatewayBusinessCommandResult($requestId, self::REMOTE_APPOINT_UPDATE_TIMEOUT_SECONDS);
+            if (!empty(($result['data'] ?? [])['iterate_business_processes']) && !empty($result['ok'])) {
+                // 这一轮升级已经完成包替换和 upstream 切换，随后再补齐 gateway 业务子进程迭代，
+                // 保持 slave 与 master 在 app 升级后的行为一致。
+                $this->iterateBusinessProcesses();
+            }
+            return $result;
+        }
+
+        if (App::appointUpdateTo($type, $version)) {
+            return [
+                'ok' => true,
+                'message' => 'success',
+                'data' => [],
+                'updated_at' => time(),
+            ];
+        }
+
+        return [
+            'ok' => false,
+            'message' => App::getLastUpdateError() ?: '未知原因',
+            'data' => [],
+            'updated_at' => time(),
+        ];
+    }
+
+    /**
+     * 等待 gateway 业务编排命令把执行结果写回 Runtime。
+     *
+     * cluster 协调进程和 worker 都不直接执行升级重活，只负责等待
+     * `GatewayBusinessCoordinator` 的统一结果；这里复用相同的 request_id 回写协议，
+     * 让 slave 也能和 master 走同一套升级收口。
+     *
+     * @param string $requestId 业务编排请求 id
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return array<string, mixed>
+     */
+    protected function waitForGatewayBusinessCommandResult(string $requestId, int $timeoutSeconds): array {
+        $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        do {
+            $result = Runtime::instance()->get($resultKey);
+            if (is_array($result) && $result) {
+                Runtime::instance()->delete($resultKey);
+                $result['ok'] = (bool)($result['ok'] ?? false);
+                $result['message'] = (string)($result['message'] ?? ($result['ok'] ? 'success' : 'failed'));
+                $result['data'] = (array)($result['data'] ?? []);
+                $result['updated_at'] = (int)($result['updated_at'] ?? time());
+                return $result;
+            }
+            Coroutine::sleep(0.2);
+        } while (microtime(true) < $deadline);
+
+        Runtime::instance()->delete($resultKey);
+        return [
+            'ok' => false,
+            'message' => "Gateway 业务编排执行超时: request_id={$requestId}",
+            'data' => [],
+            'updated_at' => time(),
+        ];
     }
 
     /**
