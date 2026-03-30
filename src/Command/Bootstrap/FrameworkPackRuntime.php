@@ -32,9 +32,9 @@ function scf_try_upgrade(array $argv, bool $boot = false): string {
 
     if ($activePack === '' || !file_exists($activePack)) {
         if ($error) {
-            scf_stderr($error);
+            scf_stderr((str_starts_with($error, '【Boot】') ? $error : ('【Boot】' . $error)));
         }
-        scf_stderr('内核文件不存在');
+        scf_stderr('【Boot】内核文件不存在');
         exit(3);
     }
 
@@ -142,6 +142,6 @@ function scf_import_legacy_update_pack(?string &$error = null): bool {
         return false;
     }
 
-    scf_stdout('legacy update.pack 已迁移到版本化 framework pack');
+    scf_stdout('【Boot】旧版 update.pack 已迁移为版本化 framework 包');
     return true;
 }

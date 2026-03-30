@@ -16,7 +16,7 @@ use Scf\Util\Random;
 class DashboardAuth {
 
     private const DASHBOARD_SESSION_PREFIX = 'dashboard:s:';
-    private const DASHBOARD_TOKEN_TTL = 3600 * 12;
+    private const DASHBOARD_TOKEN_TTL = 3600 * 24 * 7;
     private const INTERNAL_SOCKET_TOKEN_TTL = 60;
 
     /**
@@ -30,7 +30,7 @@ class DashboardAuth {
     }
 
     /**
-     * 创建 dashboard 登录 token，并把 session 记录在 Runtime 表里。
+     * 创建 dashboard 登录 token，并把 session 写入 Runtime + 持久化存储。
      *
      * 该方法会同时写入 Runtime session 记录，因此属于带副作用的签发流程。
      *
@@ -48,12 +48,16 @@ class DashboardAuth {
         $now = time();
         $expired = $now + $ttl;
         $sessionId = $sessionId ?: Random::character(32);
-        Runtime::instance()->set(self::dashboardSessionKey($sessionId), [
+        $sessionKey = self::dashboardSessionKey($sessionId);
+        $existing = self::readDashboardSessionByKey($sessionKey);
+        $session = [
             'type' => 'dashboard',
             'user' => $user,
-            'issued_at' => $now,
+            'issued_at' => (int)($existing['issued_at'] ?? $now),
+            'last_active_at' => $now,
             'expired_at' => $expired,
-        ]);
+        ];
+        self::writeDashboardSessionByKey($sessionKey, $session);
         self::cleanupExpiredDashboardSessions();
         return self::encodeToken([
             'typ' => 'dashboard',
@@ -65,13 +69,13 @@ class DashboardAuth {
     }
 
     /**
-     * 校验 dashboard 登录 token，并映射回 Runtime 中的 session。
+     * 校验 dashboard 登录 token，并执行“7天无活跃请求过期”的滑动续期。
      *
      * @param string $token 待校验的 dashboard token
      * @return array<string, int|string>|false 校验成功返回 session 信息，失败返回 false
      */
     public static function validateDashboardToken(string $token): array|false {
-        $payload = self::decodeToken($token, self::dashboardSigningKey());
+        $payload = self::decodeToken($token, self::dashboardSigningKey(), false);
         if (!$payload || ($payload['typ'] ?? null) !== 'dashboard') {
             return false;
         }
@@ -79,20 +83,26 @@ class DashboardAuth {
         if (!$sessionId) {
             return false;
         }
-        $session = Runtime::instance()->get(self::dashboardSessionKey($sessionId));
+        $sessionKey = self::dashboardSessionKey($sessionId);
+        $session = self::readDashboardSessionByKey($sessionKey);
         if (!$session || ($session['type'] ?? null) !== 'dashboard') {
             return false;
         }
+        $now = time();
         $expired = (int)($session['expired_at'] ?? 0);
-        if ($expired < time()) {
-            Runtime::instance()->delete(self::dashboardSessionKey($sessionId));
+        if ($expired < $now) {
+            self::deleteDashboardSessionByKey($sessionKey);
             return false;
         }
+        $session['last_active_at'] = $now;
+        $session['expired_at'] = $now + self::DASHBOARD_TOKEN_TTL;
+        self::writeDashboardSessionByKey($sessionKey, $session);
+
         return [
             'session_id' => $sessionId,
             'user' => $session['user'] ?? ($payload['sub'] ?? 'system'),
             'issued_at' => (int)($session['issued_at'] ?? ($payload['iat'] ?? 0)),
-            'expired_at' => $expired,
+            'expired_at' => (int)($session['expired_at'] ?? 0),
         ];
     }
 
@@ -117,13 +127,13 @@ class DashboardAuth {
      * @return void
      */
     public static function expireDashboardToken(string $token): void {
-        $payload = self::decodeToken($token, self::dashboardSigningKey());
+        $payload = self::decodeToken($token, self::dashboardSigningKey(), false);
         if (!$payload) {
             return;
         }
         $sessionId = $payload['sid'] ?? '';
         if ($sessionId) {
-            Runtime::instance()->delete(self::dashboardSessionKey($sessionId));
+            self::deleteDashboardSessionByKey(self::dashboardSessionKey($sessionId));
         }
     }
 
@@ -172,7 +182,7 @@ class DashboardAuth {
     }
 
     /**
-     * 清理 Runtime 表里的过期 dashboard session。
+     * 清理 Runtime 与持久化存储里的过期 dashboard session。
      *
      * @return void
      */
@@ -188,6 +198,15 @@ class DashboardAuth {
                 $runtime->delete($key);
             }
         }
+        self::rewriteDashboardSessionStore(static function (array $sessions) use ($now): array {
+            foreach ($sessions as $key => $session) {
+                $expired = is_array($session) ? (int)($session['expired_at'] ?? 0) : 0;
+                if ($expired > 0 && $expired < $now) {
+                    unset($sessions[$key]);
+                }
+            }
+            return $sessions;
+        });
     }
 
     /**
@@ -198,6 +217,156 @@ class DashboardAuth {
      */
     private static function dashboardSessionKey(string $sessionId): string {
         return self::DASHBOARD_SESSION_PREFIX . substr(hash('sha256', $sessionId), 0, 32);
+    }
+
+    /**
+     * 按 key 读取 dashboard session。
+     *
+     * 读取顺序：Runtime -> 持久化文件。命中持久化时会回填 Runtime，保证热点请求走内存。
+     *
+     * @param string $sessionKey 归一化 session key
+     * @return array<string, mixed>|false
+     */
+    private static function readDashboardSessionByKey(string $sessionKey): array|false {
+        $session = Runtime::instance()->get($sessionKey);
+        if (is_array($session) && ($session['type'] ?? null) === 'dashboard') {
+            return $session;
+        }
+        $stored = self::readDashboardSessionStore();
+        $session = $stored[$sessionKey] ?? null;
+        if (!is_array($session) || ($session['type'] ?? null) !== 'dashboard') {
+            return false;
+        }
+        Runtime::instance()->set($sessionKey, $session);
+        return $session;
+    }
+
+    /**
+     * 写入一个 dashboard session 到 Runtime 与持久化文件。
+     *
+     * @param string $sessionKey 归一化 session key
+     * @param array<string, mixed> $session session 数据
+     * @return void
+     */
+    private static function writeDashboardSessionByKey(string $sessionKey, array $session): void {
+        Runtime::instance()->set($sessionKey, $session);
+        self::rewriteDashboardSessionStore(static function (array $sessions) use ($sessionKey, $session): array {
+            $sessions[$sessionKey] = $session;
+            return $sessions;
+        });
+    }
+
+    /**
+     * 删除一个 dashboard session。
+     *
+     * @param string $sessionKey 归一化 session key
+     * @return void
+     */
+    private static function deleteDashboardSessionByKey(string $sessionKey): void {
+        Runtime::instance()->delete($sessionKey);
+        self::rewriteDashboardSessionStore(static function (array $sessions) use ($sessionKey): array {
+            unset($sessions[$sessionKey]);
+            return $sessions;
+        });
+    }
+
+    /**
+     * 返回 dashboard session 持久化文件路径。
+     *
+     * @return string
+     */
+    private static function dashboardSessionStoreFile(): string {
+        $baseDir = defined('APP_UPDATE_DIR')
+            ? (string)APP_UPDATE_DIR
+            : (defined('APP_PATH') ? rtrim((string)APP_PATH, '/') . '/update' : sys_get_temp_dir());
+        $app = defined('APP_DIR_NAME') ? (string)APP_DIR_NAME : 'app';
+        $env = defined('SERVER_RUN_ENV') ? (string)SERVER_RUN_ENV : 'dev';
+        $role = defined('SERVER_ROLE') ? (string)SERVER_ROLE : 'node';
+        $port = (int)(Runtime::instance()->httpPort() ?: 0);
+        $safeApp = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $app) ?: 'app';
+        $safeEnv = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $env) ?: 'env';
+        $safeRole = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $role) ?: 'role';
+        return rtrim($baseDir, '/\\') . "/dashboard_sessions_{$safeApp}_{$safeEnv}_{$safeRole}_{$port}.json";
+    }
+
+    /**
+     * 读取持久化 session 文件。
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private static function readDashboardSessionStore(): array {
+        $path = self::dashboardSessionStoreFile();
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $fp = @fopen($path, 'rb');
+        if (!$fp) {
+            return [];
+        }
+        try {
+            @flock($fp, LOCK_SH);
+            $raw = stream_get_contents($fp);
+        } finally {
+            @flock($fp, LOCK_UN);
+            fclose($fp);
+        }
+        if (!is_string($raw) || $raw === '') {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+        $sessions = $decoded['sessions'] ?? [];
+        return is_array($sessions) ? $sessions : [];
+    }
+
+    /**
+     * 以排它锁方式重写 session 文件，避免并发写入互相覆盖。
+     *
+     * @param callable $mutator 输入旧 sessions，返回新 sessions
+     * @return void
+     */
+    private static function rewriteDashboardSessionStore(callable $mutator): void {
+        $path = self::dashboardSessionStoreFile();
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            return;
+        }
+        $fp = @fopen($path, 'c+');
+        if (!$fp) {
+            return;
+        }
+        try {
+            if (!@flock($fp, LOCK_EX)) {
+                return;
+            }
+            rewind($fp);
+            $raw = stream_get_contents($fp);
+            $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
+            $sessions = is_array($decoded) && is_array($decoded['sessions'] ?? null)
+                ? $decoded['sessions']
+                : [];
+            $sessions = $mutator($sessions);
+            if (!is_array($sessions)) {
+                $sessions = [];
+            }
+            $payload = json_encode([
+                'sessions' => $sessions,
+                'updated_at' => time(),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            if (!is_string($payload)) {
+                return;
+            }
+            rewind($fp);
+            ftruncate($fp, 0);
+            fwrite($fp, $payload);
+            fflush($fp);
+        } finally {
+            @flock($fp, LOCK_UN);
+            fclose($fp);
+        }
     }
 
     /**
@@ -238,7 +407,7 @@ class DashboardAuth {
      * @param string $signingKey HMAC 签名密钥
      * @return array<string, mixed>|false 校验成功返回 payload，失败返回 false
      */
-    private static function decodeToken(string $token, string $signingKey): array|false {
+    private static function decodeToken(string $token, string $signingKey, bool $enforceExpiration = true): array|false {
         $parts = explode('.', $token, 2);
         if (count($parts) !== 2) {
             return false;
@@ -264,7 +433,10 @@ class DashboardAuth {
             return false;
         }
         $expired = (int)($payload['exp'] ?? 0);
-        if ($expired <= 0 || time() > $expired) {
+        if ($expired <= 0) {
+            return false;
+        }
+        if ($enforceExpiration && time() > $expired) {
             return false;
         }
         return $payload;

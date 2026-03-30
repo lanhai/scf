@@ -171,7 +171,9 @@ class Updater {
         $preserveAppBackup = false;
         try {
             if ($versionInfo['public_object']) {
-                $publicFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.public.zip';
+                // master/slave 同机并发升级时不能写同一个下载目标，否则会互相覆盖，
+                // 导致“文件为空/解压失败/解析失败”等伪随机故障。
+                $publicFilePath = $this->createTemporaryPath(APP_UPDATE_DIR . '/app-v' . $version . '.public.zip');
                 $publicStageDir = $this->createTemporaryPath(APP_UPDATE_DIR . '/public-stage-' . $version);
                 $this->prepareDirectory($publicStageDir);
                 $this->logUpdateStep("准备下载资源包: target={$publicFilePath}");
@@ -184,7 +186,8 @@ class Updater {
                 $this->logUpdateStep("资源包解压完成: target={$publicStageDir}");
             }
             if ($versionInfo['app_object']) {
-                $updateFilePath = APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate';
+                // 与资源包同理，源码包下载也必须使用独立临时目标，避免并发节点互踩。
+                $updateFilePath = $this->createTemporaryPath(APP_UPDATE_DIR . '/app-v' . $version . '.scfupdate');
                 $appStageFile = $this->createTemporaryPath(APP_UPDATE_DIR . '/app-v' . $version . '.app');
                 $this->logUpdateStep("准备下载源码包: target={$updateFilePath}");
                 $this->downloadPackage($versionInfo, $versionInfo['app_object'], $updateFilePath, '源码包');

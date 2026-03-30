@@ -11,14 +11,19 @@ use Scf\Core\Key;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Util\Auth;
+use Swoole\Coroutine;
 use Swoole\Process;
 use Throwable;
+use function Swoole\Coroutine\run;
 
 /**
  * gateway 进程内的 upstream 监督器。
  *
  * 负责在单独的子进程里接收启动/停止/sync 指令，
  * 并把 managed upstream 的生命周期与 gateway 的 registry 同步起来。
+ *
+ * 所有命令都必须携带 owner epoch，监督器会拒绝 epoch 不匹配的请求，
+ * 防止旧控制面在新 lease 已接管后继续误控业务实例。
  */
 class UpstreamSupervisor {
 
@@ -30,9 +35,14 @@ class UpstreamSupervisor {
     public function __construct(
         protected AppServerLauncher $launcher,
         protected array $plans = [],
-        protected int $defaultStartTimeout = 25
+        protected int $defaultStartTimeout = 25,
+        protected int $ownerEpoch = 0,
+        protected int $gatewayPort = 0,
+        protected int $gatewayLeaseGraceSeconds = 20,
+        protected int $defaultRecycleGraceSeconds = 30
     ) {
         $this->process = new Process([$this, 'run'], false, SOCK_DGRAM, false);
+        $this->defaultRecycleGraceSeconds = max(3, $this->defaultRecycleGraceSeconds);
     }
 
     /**
@@ -117,6 +127,23 @@ class UpstreamSupervisor {
         $action = (string)($command['action'] ?? '');
         $requestId = (string)($command['request_id'] ?? '');
         $result = null;
+        $commandOwnerEpoch = (int)($command['owner_epoch'] ?? 0);
+        if (!$this->commandOwnerEpochAccepted($commandOwnerEpoch)) {
+            $result = [
+                'ok' => false,
+                'message' => "owner epoch mismatch, expected={$this->ownerEpoch}, got={$commandOwnerEpoch}",
+                'data' => [
+                    'expected_owner_epoch' => $this->ownerEpoch,
+                    'received_owner_epoch' => $commandOwnerEpoch,
+                ],
+            ];
+            Console::warning("【Gateway】UpstreamSupervisor 拒绝命令: action={$action}, " . (string)$result['message']);
+            if ($requestId !== '') {
+                Runtime::instance()->delete($this->commandResultKey($requestId));
+                Runtime::instance()->set($this->commandResultKey($requestId), $result);
+            }
+            return;
+        }
         if ($action === 'spawn') {
             $plan = (array)($command['plan'] ?? []);
             $this->launchPlan($plan);
@@ -128,7 +155,10 @@ class UpstreamSupervisor {
             $this->stopPort((int)($command['port'] ?? 0));
             $result = ['ok' => true, 'message' => 'stop_port accepted', 'data' => []];
         } elseif ($action === 'stop_instance') {
-            $this->stopManagedInstance((array)($command['instance'] ?? []));
+            $this->stopManagedInstance(
+                (array)($command['instance'] ?? []),
+                $this->resolveRecycleGraceSeconds($command['grace_seconds'] ?? null)
+            );
             $result = ['ok' => true, 'message' => 'stop_instance accepted', 'data' => []];
         } elseif ($action === 'sync_instances') {
             $this->syncInstances((array)($command['instances'] ?? []));
@@ -154,6 +184,19 @@ class UpstreamSupervisor {
     }
 
     /**
+     * 校验命令携带的 owner epoch 是否与监督器当前租约一致。
+     *
+     * @param int $commandOwnerEpoch 命令侧透传的 owner epoch。
+     * @return bool
+     */
+    protected function commandOwnerEpochAccepted(int $commandOwnerEpoch): bool {
+        if ($this->ownerEpoch <= 0) {
+            return false;
+        }
+        return $commandOwnerEpoch === $this->ownerEpoch;
+    }
+
+    /**
      * 判断监督器子进程是否仍然存活。
      *
      * Gateway restart 需要等待监督器退出自身，否则它会继续持有旧控制面的监听 FD。
@@ -169,6 +212,7 @@ class UpstreamSupervisor {
      * 按启动计划拉起一个托管 upstream，并等待它进入 ready 状态。
      */
     protected function launchPlan(array $plan): void {
+        $plan = $this->bindPlanOwnership($plan);
         $version = trim((string)($plan['version'] ?? ''));
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
@@ -234,22 +278,70 @@ class UpstreamSupervisor {
                 'command' => (string)($instance['command'] ?? ''),
                 'started_at' => time(),
                 'managed_mode' => 'gateway_supervisor',
+                'owner_epoch' => $this->ownerEpoch,
+                'gateway_port' => $this->gatewayPort,
             ],
         ];
 
     }
 
     /**
+     * 为启动计划注入 owner 租约绑定参数。
+     *
+     * @param array<string, mixed> $plan 原始计划。
+     * @return array<string, mixed>
+     */
+    protected function bindPlanOwnership(array $plan): array {
+        $metadata = (array)($plan['metadata'] ?? []);
+        $metadata['owner_epoch'] = $this->ownerEpoch;
+        if ($this->gatewayPort > 0) {
+            $metadata['gateway_port'] = $this->gatewayPort;
+        }
+        $plan['metadata'] = $metadata;
+
+        $flags = [];
+        foreach ((array)($plan['extra'] ?? []) as $flag) {
+            if (is_string($flag) && $flag !== '') {
+                $flags[] = $flag;
+            }
+        }
+        $hasGatewayPort = false;
+        $hasGatewayEpoch = false;
+        $hasGatewayLeaseGrace = false;
+        foreach ($flags as $flag) {
+            $hasGatewayPort = $hasGatewayPort || str_starts_with($flag, '-gateway_port=');
+            $hasGatewayEpoch = $hasGatewayEpoch || str_starts_with($flag, '-gateway_epoch=');
+            $hasGatewayLeaseGrace = $hasGatewayLeaseGrace || str_starts_with($flag, '-gateway_lease_grace=');
+        }
+        if (!$hasGatewayPort && $this->gatewayPort > 0) {
+            $flags[] = '-gateway_port=' . $this->gatewayPort;
+        }
+        if (!$hasGatewayEpoch && $this->ownerEpoch > 0) {
+            $flags[] = '-gateway_epoch=' . $this->ownerEpoch;
+        }
+        if (!$hasGatewayLeaseGrace && $this->gatewayLeaseGraceSeconds > 0) {
+            $flags[] = '-gateway_lease_grace=' . $this->gatewayLeaseGraceSeconds;
+        }
+        $plan['extra'] = array_values(array_unique($flags));
+
+        return $plan;
+    }
+
+    /**
      * 在 UpstreamSupervisor 中执行安装流程。
      *
-     * 该流程包含三步：
+     * 该流程只负责：
      * 1. 解析并落盘安装秘钥；
-     * 2. 下载业务更新包并等待应用进入 ready；
-     * 3. 直接在监督器中拉起业务实例，后续由 gateway 编排侧完成注册和 nginx 切流。
+     * 2. 下载业务更新包并等待应用进入 ready。
+     *
+     * 安装完成后的业务实例拉起，统一交给 gateway business coordinator 的
+     * `bootstrapManagedUpstreams()` 推进。这样可以避免 install 命令链与
+     * 周期编排链各自再拉一次同端口 upstream，造成新实例刚 ready 就被重复启动
+     * 的第二个实例当成“占端口旧进程”回收。
      *
      * @param string $key 安装秘钥
      * @param string $role 安装角色
-     * @param array<int, array<string, mixed>> $plans 安装完成后需要拉起的业务实例计划
+     * @param array<int, array<string, mixed>> $plans 安装完成后待 gateway 编排侧接管的业务实例计划
      * @return array<string, mixed>
      */
     protected function executeInstall(string $key, string $role = 'master', array $plans = []): array {
@@ -274,78 +366,85 @@ class UpstreamSupervisor {
         Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_UPDATING, true);
 
         try {
-            $installer = App::installer();
-            $installer->public_path = 'public';
-            $installer->app_path = APP_DIR_NAME;
+            // slave 节点通过 `/~/install` 接收 master 的 HTTP 安装指令时，最终会在
+            // UpstreamSupervisor 子进程里同步执行整个安装链路。这里必须确保版本查询、
+            // 包下载与更新都落在协程上下文，否则协程版 HTTP client 会直接抛 fatal。
+            $installResult = $this->runSynchronouslyInCoroutine(function () use ($key, $role): array {
+                $installer = App::installer();
+                $installer->public_path = 'public';
+                $installer->app_path = APP_DIR_NAME;
 
-            $secret = substr($key, 0, 32);
-            $installKey = substr($key, 32);
-            $decode = Auth::decode($installKey, $secret);
-            if (!$decode) {
-                return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
-            }
-            $config = JsonHelper::recover($decode);
-            if (empty($config['key']) || empty($config['server']) || empty($config['dashboard_password']) || empty($config['expired'])) {
-                return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
-            }
-            if (time() > (int)$config['expired']) {
-                return ['ok' => false, 'message' => '安装秘钥已过期', 'data' => []];
+                $secret = substr($key, 0, 32);
+                $installKey = substr($key, 32);
+                $decode = Auth::decode($installKey, $secret);
+                if (!$decode) {
+                    return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
+                }
+                $config = JsonHelper::recover($decode);
+                if (empty($config['key']) || empty($config['server']) || empty($config['dashboard_password']) || empty($config['expired'])) {
+                    return ['ok' => false, 'message' => '安装秘钥错误', 'data' => []];
+                }
+                if (time() > (int)$config['expired']) {
+                    return ['ok' => false, 'message' => '安装秘钥已过期', 'data' => []];
+                }
+
+                $installer->app_auth_key = $config['key'];
+                $installer->dashboard_password = $config['dashboard_password'];
+                $installer->update_server = (string)$config['server'];
+                $installer->role = $role;
+
+                $client = Http::create($installer->update_server . '?time=' . time());
+                try {
+                    $versionResult = $client->get();
+                } finally {
+                    $client->close();
+                }
+                if ($versionResult->hasError()) {
+                    return ['ok' => false, 'message' => '获取云端版本号失败:' . $versionResult->getMessage(), 'data' => []];
+                }
+                $remote = $versionResult->getData();
+                $appVersion = $remote['app'] ?? '';
+                if (!$appVersion) {
+                    return ['ok' => false, 'message' => '获取云端版本号失败', 'data' => []];
+                }
+
+                $installer->version = $appVersion[0]['version'];
+                $installer->appid = $appVersion[0]['appid'];
+                $installer->updated = date('Y-m-d H:i:s');
+                if (!$installer->add()) {
+                    return ['ok' => false, 'message' => '安装失败', 'data' => []];
+                }
+
+                $updater = Updater::instance();
+                $targetVersion = (string)($updater->getVersion()['remote']['app']['version'] ?? '');
+                if ($targetVersion !== '') {
+                    Console::info('【Gateway】开始执行安装更新:' . $targetVersion);
+                }
+                if (!$updater->updateApp(true)) {
+                    $message = $updater->getLastError() ?: ($targetVersion !== '' ? "更新失败:{$targetVersion}" : '更新失败');
+                    return ['ok' => false, 'message' => $message, 'data' => []];
+                }
+
+                return [
+                    'ok' => true,
+                    'message' => '安装完成',
+                    'data' => [
+                        'password' => (string)$installer->dashboard_password,
+                    ],
+                ];
+            });
+            if (!($installResult['ok'] ?? false)) {
+                return $installResult;
             }
 
-            $installer->app_auth_key = $config['key'];
-            $installer->dashboard_password = $config['dashboard_password'];
-            $installer->update_server = (string)$config['server'];
-            $installer->role = $role;
-
-            $client = Http::create($installer->update_server . '?time=' . time());
-            $versionResult = $client->get();
-            if ($versionResult->hasError()) {
-                return ['ok' => false, 'message' => '获取云端版本号失败:' . $versionResult->getMessage(), 'data' => []];
-            }
-            $remote = $versionResult->getData();
-            $appVersion = $remote['app'] ?? '';
-            if (!$appVersion) {
-                return ['ok' => false, 'message' => '获取云端版本号失败', 'data' => []];
-            }
-
-            $installer->version = $appVersion[0]['version'];
-            $installer->appid = $appVersion[0]['appid'];
-            $installer->updated = date('Y-m-d H:i:s');
-            if (!$installer->add()) {
-                return ['ok' => false, 'message' => '安装失败', 'data' => []];
-            }
-
-            $updater = Updater::instance();
-            $targetVersion = (string)($updater->getVersion()['remote']['app']['version'] ?? '');
-            if ($targetVersion !== '') {
-                Console::info('【Gateway】开始执行安装更新:' . $targetVersion);
-            }
-            if (!$updater->updateApp(true)) {
-                $message = $updater->getLastError() ?: ($targetVersion !== '' ? "更新失败:{$targetVersion}" : '更新失败');
-                return ['ok' => false, 'message' => $message, 'data' => []];
-            }
-
+            // install 命令链只等待“应用已完成安装”这一状态，不再在这里直接拉起
+            // managed upstream。真正的实例启动由 GatewayBusinessCoordinator 在
+            // App::isReady() 后统一推进，避免与 bootstrapManagedUpstreams() 重复。
             while (!App::isReady()) {
                 usleep(500000);
             }
-
-            $launched = [];
-            foreach ($plans as $plan) {
-                if (!is_array($plan)) {
-                    continue;
-                }
-                $this->launchPlan($plan);
-                $launched[] = $this->describePlan($plan);
-            }
-
-            return [
-                'ok' => true,
-                'message' => '安装完成',
-                'data' => [
-                    'password' => (string)$installer->dashboard_password,
-                    'launched' => $launched,
-                ],
-            ];
+            $installResult['data']['pending_launch_plans'] = count(array_filter($plans, 'is_array'));
+            return $installResult;
         } catch (Throwable $throwable) {
             return [
                 'ok' => false,
@@ -365,11 +464,23 @@ class UpstreamSupervisor {
             return;
         }
 
+        $stoppedEndpoints = [];
         foreach ($this->managedInstances as $key => $instance) {
             if (($instance['version'] ?? '') !== $version) {
                 continue;
             }
-            $this->stopInstance($instance);
+            $host = (string)($instance['host'] ?? '127.0.0.1');
+            $port = (int)($instance['port'] ?? 0);
+            $endpoint = $host . ':' . $port;
+            // 同一 endpoint 在异常代际残留下可能被记录为多个 version key。
+            // stopVersion 收口时只允许真正执行一次停机，避免重复 shutdown 请求
+            // 把 upstream 推入“正在关闭又被重复信号打断”的不稳定状态。
+            if (isset($stoppedEndpoints[$endpoint])) {
+                unset($this->managedInstances[$key]);
+                continue;
+            }
+            $stoppedEndpoints[$endpoint] = true;
+            $this->stopInstance($instance, $this->defaultRecycleGraceSeconds);
             unset($this->managedInstances[$key]);
         }
     }
@@ -382,11 +493,19 @@ class UpstreamSupervisor {
             return;
         }
 
+        $stoppedEndpoints = [];
         foreach ($this->managedInstances as $key => $instance) {
             if ((int)($instance['port'] ?? 0) !== $port) {
                 continue;
             }
-            $this->stopInstance($instance);
+            $host = (string)($instance['host'] ?? '127.0.0.1');
+            $endpoint = $host . ':' . $port;
+            if (isset($stoppedEndpoints[$endpoint])) {
+                unset($this->managedInstances[$key]);
+                continue;
+            }
+            $stoppedEndpoints[$endpoint] = true;
+            $this->stopInstance($instance, $this->defaultRecycleGraceSeconds);
             unset($this->managedInstances[$key]);
         }
     }
@@ -394,7 +513,7 @@ class UpstreamSupervisor {
     /**
      * 停止单个 upstream 实例，支持携带更完整的实例元数据。
      */
-    protected function stopManagedInstance(array $instance): void {
+    protected function stopManagedInstance(array $instance, ?int $graceSeconds = null): void {
         $host = (string)($instance['host'] ?? '127.0.0.1');
         $port = (int)($instance['port'] ?? 0);
         if ($port <= 0) {
@@ -421,15 +540,28 @@ class UpstreamSupervisor {
         $metadata['managed'] = true;
         $metadata['rpc_port'] = (int)($metadata['rpc_port'] ?? ($instance['rpc_port'] ?? 0));
         $instance['metadata'] = $metadata;
-        $this->stopInstance($instance);
+        $this->stopInstance($instance, $this->resolveRecycleGraceSeconds($graceSeconds));
     }
 
     /**
      * 退出时回收所有仍在监督中的 upstream。
      */
     protected function shutdownAll(): void {
+        $stoppedEndpoints = [];
         foreach ($this->managedInstances as $key => $instance) {
-            $this->stopInstance($instance);
+            $host = (string)($instance['host'] ?? '127.0.0.1');
+            $port = (int)($instance['port'] ?? 0);
+            $endpoint = $host . ':' . $port;
+            // shutdown 收口必须按 endpoint 去重：
+            // 代际状态异常时可能出现多个 version 共享同端口的脏条目。
+            // 如果重复调用 stop，会对同一 upstream 发送多次 shutdown/TERM，
+            // 放大 manager/worker 被误打断后“关闭又拉起”的链式问题。
+            if (isset($stoppedEndpoints[$endpoint])) {
+                unset($this->managedInstances[$key]);
+                continue;
+            }
+            $stoppedEndpoints[$endpoint] = true;
+            $this->stopInstance($instance, $this->defaultRecycleGraceSeconds);
             unset($this->managedInstances[$key]);
         }
     }
@@ -489,8 +621,21 @@ class UpstreamSupervisor {
     /**
      * 调用 launcher 执行单个实例的优雅停机/强制回收。
      */
-    protected function stopInstance(array $instance, int $graceSeconds = AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS): void {
+    protected function stopInstance(array $instance, int $graceSeconds): void {
         $this->launcher->stop($instance, $graceSeconds);
+    }
+
+    /**
+     * 归一化回收宽限时间，避免命令链路回落到 1800s 的默认回收窗口。
+     *
+     * @param mixed $graceSeconds
+     * @return int
+     */
+    protected function resolveRecycleGraceSeconds(mixed $graceSeconds): int {
+        if (is_numeric($graceSeconds)) {
+            return max(3, (int)$graceSeconds);
+        }
+        return $this->defaultRecycleGraceSeconds;
     }
 
     /**
@@ -508,6 +653,39 @@ class UpstreamSupervisor {
      */
     protected function commandResultKey(string $requestId): string {
         return 'upstream_supervisor:' . md5($requestId);
+    }
+
+    /**
+     * 在保持同步返回语义的前提下，把安装链路包进协程上下文。
+     *
+     * UpstreamSupervisor 自己的控制循环是普通 `Swoole\Process` 回调，
+     * 但安装流程里的版本查询、包下载和更新都依赖协程 HTTP client。
+     * 因此这里统一负责“已在协程内直接执行，否则临时起一个协程容器再同步返回”。
+     *
+     * @param callable $callable 需要在协程上下文执行的安装逻辑
+     * @return mixed
+     * @throws Throwable
+     */
+    protected function runSynchronouslyInCoroutine(callable $callable): mixed {
+        if (Coroutine::getCid() > 0) {
+            return $callable();
+        }
+
+        $result = null;
+        $throwable = null;
+        run(function () use ($callable, &$result, &$throwable): void {
+            try {
+                $result = $callable();
+            } catch (Throwable $error) {
+                $throwable = $error;
+            }
+        });
+
+        if ($throwable instanceof Throwable) {
+            throw $throwable;
+        }
+
+        return $result;
     }
 
     /**

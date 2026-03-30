@@ -26,9 +26,44 @@ if [ -z "$PHP_BIN" ] || [ ! -x "$PHP_BIN" ]; then
   exit 127
 fi
 
+# 解析是否由调用方显式指定了 pack 行为（-pack / -nopack），
+# 以及当前命令的首个位置 action。
+HAS_PACK_FLAG=0
+ACTION=""
+for arg in "$@"; do
+  case "$arg" in
+    -pack|-nopack)
+      HAS_PACK_FLAG=1
+      ;;
+  esac
+  case "$arg" in
+    -*)
+      ;;
+    *)
+      if [ -z "$ACTION" ]; then
+        ACTION="$arg"
+      fi
+      ;;
+  esac
+done
+
 if [ $# -eq 0 ]; then
-  "$PHP_BIN" "$BOOT_FILE" crontab -h
+  # 无参数时优先走源码命令实现，避免 pack 落后导致帮助信息缺失新 action。
+  "$PHP_BIN" "$BOOT_FILE" crontab -nopack -h
   exit $?
 fi
 
-"$PHP_BIN" "$BOOT_FILE" crontab "$@"
+# `log` 只用于本地排查，默认走源码命令实现，确保能及时看到新增能力。
+# 若调用方已显式传入 -pack/-nopack，则尊重其选择，不做注入。
+INJECT_NO_PACK=0
+if [ "$HAS_PACK_FLAG" -eq 0 ]; then
+  if [ "$ACTION" = "log" ]; then
+    INJECT_NO_PACK=1
+  fi
+fi
+
+if [ "$INJECT_NO_PACK" -eq 1 ]; then
+  "$PHP_BIN" "$BOOT_FILE" crontab -nopack "$@"
+else
+  "$PHP_BIN" "$BOOT_FILE" crontab "$@"
+fi

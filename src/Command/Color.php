@@ -24,6 +24,7 @@ namespace Scf\Command;
  * @method static string warning(string $text)
  * @method static string error(string $text)
  * @method static string danger(string $text)
+ * @method static string gray(string $text)
  */
 class Color {
     public const STYLES = [
@@ -47,6 +48,7 @@ class Color {
         'warning' => '0;30;43',
         'danger' => '0;31',
         'error' => '97;41',
+        'gray' => '0;90',
     ];
 
     public const COLOR_TPL = "\033[%sm%s\e[0m";

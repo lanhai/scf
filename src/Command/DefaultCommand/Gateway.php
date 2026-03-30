@@ -153,17 +153,63 @@ class Gateway implements CommandInterface {
         $this->markLoopStop();
         $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: 'app');
         $role = (string)(Manager::instance()->getOpt('role') ?: getenv('SERVER_ROLE') ?: 'master');
+        $gatewayPort = $this->resolveGatewayPort();
         $pidFile = dirname(SCF_ROOT) . '/var/' . $app . '_gateway_' . $role . '.pid';
-        if (!is_file($pidFile)) {
-            return 'Gateway 进程不存在';
+        $pidFromFile = 0;
+        if (is_file($pidFile)) {
+            $pidFromFile = (int)file_get_contents($pidFile);
         }
-        $pid = (int)file_get_contents($pidFile);
-        if ($pid <= 0 || !Process::kill($pid, 0)) {
+        $gatewayPids = $this->discoverGatewayRuntimePids($app, $role, $gatewayPort);
+        if ($pidFromFile > 0) {
+            $gatewayPids[$pidFromFile] = $pidFromFile;
+        }
+        $gatewayPids = array_values($gatewayPids);
+        $upstreamPids = $gatewayPort > 0
+            ? $this->discoverGatewayUpstreamRuntimePids($app, $gatewayPort)
+            : [];
+
+        if (!$gatewayPids && !$upstreamPids) {
             @unlink($pidFile);
             return 'Gateway 进程不存在';
         }
-        Process::kill($pid, SIGTERM);
-        return '已发送 Gateway 停止信号:' . $pid;
+
+        if ($gatewayPids) {
+            $this->terminateProcesses($gatewayPids, SIGTERM);
+            if (!$this->waitForProcessesExited($gatewayPids, 8)) {
+                $remainingGatewayPids = $this->filterAlivePids($gatewayPids);
+                if ($remainingGatewayPids) {
+                    Console::warning('Gateway 进程未在预期时间内退出，升级为强制回收: pids=' . implode(', ', $remainingGatewayPids));
+                    $this->terminateProcesses($remainingGatewayPids, SIGKILL);
+                    $this->waitForProcessesExited($remainingGatewayPids, 3);
+                }
+            }
+        }
+
+        if ($upstreamPids) {
+            $this->terminateProcesses($upstreamPids, SIGTERM);
+            if (!$this->waitForProcessesExited($upstreamPids, 5)) {
+                $remainingUpstreamPids = $this->filterAlivePids($upstreamPids);
+                if ($remainingUpstreamPids) {
+                    Console::warning('关联 upstream 进程未在预期时间内退出，升级为强制回收: pids=' . implode(', ', $remainingUpstreamPids));
+                    $this->terminateProcesses($remainingUpstreamPids, SIGKILL);
+                    $this->waitForProcessesExited($remainingUpstreamPids, 2);
+                }
+            }
+        }
+
+        if ($pidFromFile <= 0 || !Process::kill($pidFromFile, 0)) {
+            @unlink($pidFile);
+        }
+        $remainingGatewayPids = $this->filterAlivePids($gatewayPids);
+        $remainingUpstreamPids = $this->filterAlivePids($upstreamPids);
+        if ($remainingGatewayPids || $remainingUpstreamPids) {
+            return 'Gateway 停止未完全收敛'
+                . ($remainingGatewayPids ? '; gateway=' . implode(',', $remainingGatewayPids) : '')
+                . ($remainingUpstreamPids ? '; upstream=' . implode(',', $remainingUpstreamPids) : '');
+        }
+        return 'Gateway 已停止'
+            . ($gatewayPids ? ': gateway_pids=' . implode(',', $gatewayPids) : '')
+            . ($upstreamPids ? ', upstream_pids=' . implode(',', $upstreamPids) : '');
     }
 
     /**
@@ -302,12 +348,114 @@ class Gateway implements CommandInterface {
      * @return int gateway 业务监听端口
      */
     protected function resolveGatewayPort(): int {
-        $port = (int)(Manager::instance()->getOpt('port') ?: SERVER_PORT);
-        if ($port > 0) {
-            return $port;
+        $explicitPort = (int)(Manager::instance()->getOpt('port') ?: 0);
+        if ($explicitPort > 0) {
+            return $explicitPort;
         }
+
+        $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: APP_DIR_NAME ?: 'app');
+        $role = (string)(Manager::instance()->getOpt('role') ?: getenv('SERVER_ROLE') ?: 'master');
+        $runtimePort = $this->resolveGatewayPortFromRuntime($app, $role);
+        if ($runtimePort > 0) {
+            return $runtimePort;
+        }
+
         $serverConfig = Config::server();
-        return (int)($serverConfig['port'] ?? 0);
+        $configuredPort = (int)($serverConfig['port'] ?? 0);
+        if ($configuredPort > 0) {
+            if ($role === 'slave') {
+                // 在未显式传 -port 且没有运行态线索时，保持与 gateway/slave 的默认
+                // 端口偏移约定一致，避免 stop/status 误命中 master 端口。
+                return $configuredPort + 100;
+            }
+            return $configuredPort;
+        }
+
+        $defaultPort = (int)(defined('SERVER_PORT') ? SERVER_PORT : 0);
+        if ($defaultPort > 0 && $role === 'slave') {
+            return $defaultPort + 100;
+        }
+        return $defaultPort;
+    }
+
+    /**
+     * 依据运行态线索推断目标 role 的 gateway 端口。
+     *
+     * 优先级：
+     * 1. var pid file 对应进程命令行；
+     * 2. update 目录 lease（running/restarting）；
+     * 3. update 目录 registry 文件名。
+     *
+     * @param string $app 应用目录名
+     * @param string $role 节点角色
+     * @return int
+     */
+    protected function resolveGatewayPortFromRuntime(string $app, string $role): int {
+        $pidFile = dirname(SCF_ROOT) . '/var/' . $app . '_gateway_' . $role . '.pid';
+        if (is_file($pidFile)) {
+            $pid = (int)file_get_contents($pidFile);
+            if ($pid > 0 && @Process::kill($pid, 0)) {
+                $command = $this->readProcessCommand($pid);
+                if ($command !== '' && preg_match('/-port=(\d+)/', $command, $matches)) {
+                    $port = (int)($matches[1] ?? 0);
+                    if ($port > 0) {
+                        return $port;
+                    }
+                }
+            }
+        }
+
+        $updateDir = dirname(SCF_ROOT) . '/apps/' . $app . '/update';
+        if (!is_dir($updateDir)) {
+            return 0;
+        }
+
+        $bestPort = 0;
+        $bestScore = 0;
+        $leaseFiles = glob($updateDir . '/gateway_lease_' . $app . '_*_' . $role . '_*.json') ?: [];
+        foreach ($leaseFiles as $leaseFile) {
+            if (!is_file($leaseFile)) {
+                continue;
+            }
+            $payload = json_decode((string)@file_get_contents($leaseFile), true);
+            if (!is_array($payload)) {
+                continue;
+            }
+            $state = (string)($payload['state'] ?? '');
+            if (!in_array($state, ['running', 'restarting'], true)) {
+                continue;
+            }
+            $port = (int)($payload['gateway_port'] ?? 0);
+            if ($port <= 0 && preg_match('/_(\d+)\.json$/', basename($leaseFile), $matches)) {
+                $port = (int)($matches[1] ?? 0);
+            }
+            if ($port <= 0) {
+                continue;
+            }
+            $score = max((int)($payload['updated_at'] ?? 0), (int)@filemtime($leaseFile));
+            if ($score >= $bestScore) {
+                $bestScore = $score;
+                $bestPort = $port;
+            }
+        }
+        if ($bestPort > 0) {
+            return $bestPort;
+        }
+
+        $registryFiles = glob($updateDir . '/gateway_registry_' . $role . '_*.json') ?: [];
+        usort($registryFiles, static function (string $a, string $b): int {
+            return (@filemtime($b) ?: 0) <=> (@filemtime($a) ?: 0);
+        });
+        foreach ($registryFiles as $registryFile) {
+            if (preg_match('/gateway_registry_' . preg_quote($role, '/') . '_(\d+)\.json$/', basename($registryFile), $matches)) {
+                $port = (int)($matches[1] ?? 0);
+                if ($port > 0) {
+                    return $port;
+                }
+            }
+        }
+
+        return 0;
     }
 
     /**
@@ -397,6 +545,7 @@ class Gateway implements CommandInterface {
      */
     protected function discoverConflictingGatewayListenerPids(array $ports): array {
         $app = (string)(Manager::instance()->getOpt('app') ?: getenv('APP_DIR') ?: APP_DIR_NAME ?: 'app');
+        $role = (string)(Manager::instance()->getOpt('role') ?: getenv('SERVER_ROLE') ?: 'master');
         $selfPid = getmypid() ?: 0;
         $pids = [];
 
@@ -418,12 +567,200 @@ class Gateway implements CommandInterface {
                 if (!str_contains($command, '-app=' . $app)) {
                     continue;
                 }
+                if (!str_contains($command, '-role=' . $role)) {
+                    continue;
+                }
                 $pids[$pid] = $pid;
             }
         }
 
         ksort($pids);
         return array_values($pids);
+    }
+
+    /**
+     * 发现当前 app/role 对应的 gateway 全量运行进程。
+     *
+     * stop 场景不能再只依赖 pid_file，因为在外层 loop 重拉或异常恢复后，旧 pid
+     * 可能已经漂移。这里直接按命令行维度收敛同链进程，确保 stop 能一次性停干净。
+     *
+     * @param string $app 应用目录名
+     * @param string $role 节点角色
+     * @param int $gatewayPort gateway 业务端口（可选）
+     * @return array<int, int>
+     */
+    protected function discoverGatewayRuntimePids(string $app, string $role, int $gatewayPort = 0): array {
+        $snapshot = $this->readProcessSnapshot();
+        if (!$snapshot) {
+            return [];
+        }
+        $selfPid = getmypid() ?: 0;
+        $portFlag = $gatewayPort > 0 ? ('-port=' . $gatewayPort) : '';
+        $matched = [];
+        foreach ($snapshot as $pid => $meta) {
+            $pid = (int)$pid;
+            $command = (string)($meta['command'] ?? '');
+            if ($pid <= 0 || $pid === $selfPid) {
+                continue;
+            }
+            if (!str_contains($command, 'boot gateway start')) {
+                continue;
+            }
+            if (!str_contains($command, '-app=' . $app) || !str_contains($command, '-role=' . $role)) {
+                continue;
+            }
+            if ($portFlag !== '' && !str_contains($command, $portFlag)) {
+                continue;
+            }
+            $matched[$pid] = (int)($meta['ppid'] ?? 0);
+        }
+        return $this->reduceMatchedProcessRoots($matched);
+    }
+
+    /**
+     * 发现绑定到当前 gateway_port 的 upstream 运行进程。
+     *
+     * stop 结束后如果还残留上游进程，会持续占用动态端口并污染下一轮分配。
+     * 这里按 `app + gateway_port` 精确收敛对应 upstream 链路。
+     *
+     * @param string $app 应用目录名
+     * @param int $gatewayPort 当前 gateway 业务端口
+     * @return array<int, int>
+     */
+    protected function discoverGatewayUpstreamRuntimePids(string $app, int $gatewayPort): array {
+        if ($gatewayPort <= 0) {
+            return [];
+        }
+        $snapshot = $this->readProcessSnapshot();
+        if (!$snapshot) {
+            return [];
+        }
+        $selfPid = getmypid() ?: 0;
+        $gatewayPortFlag = '-gateway_port=' . $gatewayPort;
+        $matched = [];
+        foreach ($snapshot as $pid => $meta) {
+            $pid = (int)$pid;
+            $command = (string)($meta['command'] ?? '');
+            if ($pid <= 0 || $pid === $selfPid) {
+                continue;
+            }
+            if (!str_contains($command, 'boot gateway_upstream start')) {
+                continue;
+            }
+            if (!str_contains($command, '-app=' . $app) || !str_contains($command, $gatewayPortFlag)) {
+                continue;
+            }
+            $matched[$pid] = (int)($meta['ppid'] ?? 0);
+        }
+        return $this->reduceMatchedProcessRoots($matched);
+    }
+
+    /**
+     * 读取当前系统进程快照（pid/ppid/command）。
+     *
+     * stop 场景要避免“杀 manager 导致 master 补拉 worker”的副作用，因此需要
+     * 先拿到父子关系，再把匹配到的进程集合折叠为根 PID 列表。
+     *
+     * @return array<int, array{ppid:int,command:string}>
+     */
+    protected function readProcessSnapshot(): array {
+        $output = @shell_exec('ps -axo pid=,ppid=,command=');
+        if (!is_string($output) || trim($output) === '') {
+            return [];
+        }
+        $snapshot = [];
+        foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
+            $line = trim((string)$line);
+            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)\s+(.+)$/', $line, $matches)) {
+                continue;
+            }
+            $pid = (int)($matches[1] ?? 0);
+            $ppid = (int)($matches[2] ?? 0);
+            $command = trim((string)($matches[3] ?? ''));
+            if ($pid <= 0 || $command === '') {
+                continue;
+            }
+            $snapshot[$pid] = [
+                'ppid' => $ppid,
+                'command' => $command,
+            ];
+        }
+        return $snapshot;
+    }
+
+    /**
+     * 将命中条件的进程集合收敛成“树根 PID”列表。
+     *
+     * 同一条 gateway/upstream 进程树里的 manager/worker 与 master 命令行通常一致。
+     * stop 若按全量 PID 发信号，会误打 manager/worker 并触发 master 补拉。这里统一
+     * 只返回每棵匹配树的根 PID（通常就是 Swoole master）。
+     *
+     * @param array<int, int> $matchedPpid pid => ppid
+     * @return array<int, int>
+     */
+    protected function reduceMatchedProcessRoots(array $matchedPpid): array {
+        if (!$matchedPpid) {
+            return [];
+        }
+        $roots = [];
+        foreach (array_keys($matchedPpid) as $pid) {
+            $current = (int)$pid;
+            $depth = 0;
+            while ($current > 0 && isset($matchedPpid[$current]) && $depth < 64) {
+                $depth++;
+                $parent = (int)($matchedPpid[$current] ?? 0);
+                if ($parent <= 0 || $parent === $current || !isset($matchedPpid[$parent])) {
+                    break;
+                }
+                $current = $parent;
+            }
+            if ($current > 0) {
+                $roots[$current] = $current;
+            }
+        }
+        ksort($roots);
+        return array_values($roots);
+    }
+
+    /**
+     * 过滤掉已退出的 PID，保留仍存活的目标进程。
+     *
+     * @param array<int, int> $pids 候选 PID 列表
+     * @return array<int, int>
+     */
+    protected function filterAlivePids(array $pids): array {
+        $alive = [];
+        foreach ($pids as $pid) {
+            $pid = (int)$pid;
+            if ($pid > 0 && Process::kill($pid, 0)) {
+                $alive[$pid] = $pid;
+            }
+        }
+        ksort($alive);
+        return array_values($alive);
+    }
+
+    /**
+     * 等待一组进程退出。
+     *
+     * @param array<int, int> $pids 目标 PID 列表
+     * @param int $timeoutSeconds 最长等待秒数
+     * @param int $intervalMs 轮询间隔毫秒
+     * @return bool 全部退出返回 true
+     */
+    protected function waitForProcessesExited(array $pids, int $timeoutSeconds = 8, int $intervalMs = 200): bool {
+        $targets = array_values(array_filter(array_map('intval', $pids), static fn(int $pid): bool => $pid > 0));
+        if (!$targets) {
+            return true;
+        }
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        while (microtime(true) < $deadline) {
+            if (!$this->filterAlivePids($targets)) {
+                return true;
+            }
+            usleep(max(50, $intervalMs) * 1000);
+        }
+        return !$this->filterAlivePids($targets);
     }
 
     /**

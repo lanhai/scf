@@ -19,6 +19,8 @@ class Key {
     public const RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT = 'upstream_supervisor_heartbeat_at';
     public const RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID = 'gateway_business_coordinator_pid';
     public const RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT = 'gateway_business_coordinator_heartbeat_at';
+    public const RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE = 'gateway_business_command_queue';
+    public const RUNTIME_GATEWAY_BUSINESS_RELOAD_FALLBACK = 'gateway_business_reload_fallback';
     public const RUNTIME_GATEWAY_HEALTH_MONITOR_PID = 'gateway_health_monitor_pid';
     public const RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT = 'gateway_health_monitor_heartbeat_at';
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID = 'gateway_cluster_coordinator_pid';
@@ -36,6 +38,7 @@ class Key {
     public const RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS = 'gw_rm_gen';
     public const RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING = 'gw_sum_p';
     public const RUNTIME_GATEWAY_STARTUP_SUMMARY_READY = 'gw_sum_r';
+    public const RUNTIME_SUBPROCESS_MANAGER_PID = 'subprocess_manager_pid';
     public const RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT = 'subprocess_manager_heartbeat_at';
     public const RUNTIME_SUBPROCESS_ALIVE_COUNT = 'subprocess_alive_count';
     public const RUNTIME_SUBPROCESS_SHUTTING_DOWN = 'subprocess_shutting_down';
@@ -46,6 +49,9 @@ class Key {
     public const COUNTER_RPC_REQUEST_PROCESSING = '_RPC_REQUEST_PROCESSING_';
     public const COUNTER_REQUEST_REJECT_ = '_REQUEST_REJECT_';
     public const COUNTER_MYSQL_PROCESSING = '_MYSQL_PROCESSING_';
+    public const COUNTER_MYSQL_INFLIGHT = '_MYSQL_INFLIGHT_';
+    public const COUNTER_REDIS_INFLIGHT = '_REDIS_INFLIGHT_';
+    public const COUNTER_OUTBOUND_HTTP_INFLIGHT = '_OUTBOUND_HTTP_INFLIGHT_';
     public const COUNTER_REDIS_QUEUE_PROCESSING = '_REDIS_QUEUE_PROCESSING_';
     public const COUNTER_SERVER_RESTART = '_SERVER_RESTART_';
     public const COUNTER_SERVER_ISRUNNING = '_SERVER_IS_RUNNING_';

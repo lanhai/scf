@@ -197,17 +197,24 @@ abstract class Server {
     }
 
     /**
-     * 检查端口号是否被占用
+     * 检查指定 host:port 是否仍不可绑定。
+     *
+     * 端口可用性判断必须与真实监听目标保持一致；否则 gateway 侧若按
+     * `127.0.0.1` 选端口，而 child 侧又用 `0.0.0.0` 探测，就会出现
+     * “父进程认为可用，子进程却立即判断占用”的不一致。
+     *
      * @param int $port
+     * @param string $host
      * @return bool
      */
-    public static function isPortInUse(int $port): bool {
+    public static function isPortInUse(int $port, string $host = '0.0.0.0'): bool {
         try {
             $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
             if ($socket === false) {
                 return false;
             }
-            $result = @socket_bind($socket, '0.0.0.0', $port);
+            $bindHost = trim($host) !== '' ? trim($host) : '0.0.0.0';
+            $result = @socket_bind($socket, $bindHost, $port);
             socket_close($socket);
             if ($result === false) {
                 return true;
@@ -221,32 +228,52 @@ abstract class Server {
     public static function killProcessByPort(int $port): bool {
         $pids = self::findPidsByPort($port);
         if (!$pids) {
-            return true;
+            return !self::isPortInUse($port);
         }
         foreach ($pids as $pid) {
             Console::info("【Server】结束进程 $pid 占用端口:$port");
             // 先 TERM 再 KILL（更安全）
             @Process::kill($pid, SIGTERM);
         }
-        // 等待最多 3 秒
-        $deadline = time() + 3;
-        while (time() < $deadline) {
-            $alive = false;
-            foreach ($pids as $pid) {
-                if (@Process::kill($pid, 0)) {
-                    $alive = true;
-                    break;
-                }
-            }
-            if (!$alive) break;
-            usleep(200 * 1000);
+        // 安装切流/滚动升级会在回收旧实例后立刻拉起新监听者，因此这里不能只判断
+        // PID 是否退出，还必须确认端口本身真的已经从 LISTEN 状态释放。
+        if (self::waitUntilPortReleased($port, 3, 200)) {
+            return true;
         }
         foreach ($pids as $pid) {
             if (@Process::kill($pid, 0)) {
                 @Process::kill($pid, SIGKILL);
             }
         }
-        return true;
+        return self::waitUntilPortReleased($port, 5, 200);
+    }
+
+    /**
+     * 等待端口真正退出监听态。
+     *
+     * 仅检查 PID 是否存在还不够，因为 Swoole master/manager 在优雅关闭阶段可能已经
+     * 开始退出，但监听 FD 尚未释放。这里统一用“监听态 + bind 冲突”双重条件确认端口
+     * 已可被下一代实例复用。
+     *
+     * @param int $port 目标端口
+     * @param int $timeoutSeconds 最长等待秒数
+     * @param int $intervalMs 轮询间隔毫秒
+     * @return bool 端口在超时内可复用时返回 true
+     */
+    public static function waitUntilPortReleased(int $port, int $timeoutSeconds = 5, int $intervalMs = 200): bool {
+        if ($port <= 0) {
+            return true;
+        }
+
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        while (microtime(true) < $deadline) {
+            if (!self::isListeningPortInUse($port) && !self::isPortInUse($port)) {
+                return true;
+            }
+            usleep(max(50, $intervalMs) * 1000);
+        }
+
+        return !self::isListeningPortInUse($port) && !self::isPortInUse($port);
     }
 
 }

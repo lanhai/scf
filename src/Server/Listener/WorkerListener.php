@@ -66,6 +66,7 @@ class WorkerListener extends Listener {
             $srcPath = App::src();
             $version = App::version();
             $publicVersion = App::publicVersion();
+            $currentPort = (int)(Runtime::instance()->httpPort() ?: 0);
             //注册路由
             Router::instance()->loadRoutes();
             App::updateDatabase();
@@ -86,6 +87,7 @@ class WorkerListener extends Listener {
 ---------Workers启动完成---------
 应用版本：{$version}
 资源版本：{$publicVersion}
+当前端口：{$currentPort}
 应用源码：{$srcPath}
 ---------------------------------
 INFO;

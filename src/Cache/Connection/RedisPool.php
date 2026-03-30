@@ -49,9 +49,9 @@ class RedisPool extends Redis {
     protected function borrow(): Connection {
         if ($this->pool) {
             $driver = $this->pool->borrow();
-            $conn = new Connection($driver, $this->logger);
+            $conn = new InflightRedisConnection($driver, $this->logger);
         } else {
-            $conn = new Connection($this->driver, $this->logger);
+            $conn = new InflightRedisConnection($this->driver, $this->logger);
         }
         return $conn;
     }

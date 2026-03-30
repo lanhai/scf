@@ -30,10 +30,10 @@ function scf_prepare_command_ports_for_start(array $argv): void {
         return;
     }
 
-    scf_stdout('[bootstrap] found existing command listeners, attempting graceful reclaim: ports=' . implode(', ', $ports) . '; pids=' . implode(', ', $pids));
+    scf_stdout('【Boot】发现旧命令监听占用，开始优雅回收: ports=' . implode(', ', $ports) . '; pids=' . implode(', ', $pids));
     scf_signal_processes($pids, SIGTERM);
     if (scf_wait_ports_released($ports, 8)) {
-        scf_stdout('[bootstrap] command ports released');
+        scf_stdout('【Boot】命令监听端口已释放');
         return;
     }
 
@@ -42,7 +42,7 @@ function scf_prepare_command_ports_for_start(array $argv): void {
         return;
     }
 
-    scf_stderr('[bootstrap] listeners still active after SIGTERM, forcing reclaim: pids=' . implode(', ', $remaining));
+    scf_stderr('【Boot】SIGTERM 后仍有监听存活，开始强制回收: pids=' . implode(', ', $remaining));
     scf_signal_processes($remaining, SIGKILL);
     scf_wait_ports_released($ports, 5);
 }
@@ -53,23 +53,100 @@ function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, 
         return;
     }
 
-    $deadline = microtime(true) + max(1, $timeoutSeconds);
+    $timeoutSeconds = max(1, $timeoutSeconds);
+    $startedAt = microtime(true);
+    $deadline = $startedAt + $timeoutSeconds;
+    $nextProgressLogAt = $startedAt;
+    scf_stdout('【Boot】等待旧监听端口释放后再重拉: ports=' . implode(', ', $ports) . ", timeout={$timeoutSeconds}s");
+
     while (microtime(true) < $deadline) {
-        $occupied = false;
-        foreach ($ports as $port) {
-            if ($port <= 0) {
-                continue;
-            }
-            if (scf_is_port_listening('127.0.0.1', $port)) {
-                $occupied = true;
-                break;
-            }
-        }
+        $occupied = scf_collect_occupied_listening_ports($ports);
         if (!$occupied) {
+            $elapsed = max(0, (int)round(microtime(true) - $startedAt));
+            scf_stdout("【Boot】旧监听端口已释放，准备重拉: elapsed={$elapsed}s");
             return;
+        }
+        $conflictingPids = scf_conflicting_listener_pids($argv, $ports);
+        if (!$conflictingPids) {
+            $elapsed = max(0, (int)round(microtime(true) - $startedAt));
+            scf_stdout(
+                "【Boot】旧命令监听已释放，端口占用来自外部服务，跳过等待: elapsed={$elapsed}s, occupied="
+                . scf_format_occupied_listening_ports($occupied)
+            );
+            return;
+        }
+
+        $now = microtime(true);
+        if ($now >= $nextProgressLogAt) {
+            $elapsed = max(0, (int)floor($now - $startedAt));
+            scf_stdout(
+                "【Boot】旧监听端口仍占用，继续等待: elapsed={$elapsed}s, occupied="
+                . scf_format_occupied_listening_ports($occupied)
+                . ", conflicting_pids=" . implode('|', array_values(array_unique(array_map('intval', $conflictingPids))))
+            );
+            $nextProgressLogAt = $now + 2.0;
         }
         usleep(max(50, $intervalMs) * 1000);
     }
+
+    $occupied = scf_collect_occupied_listening_ports($ports);
+    $conflictingPids = scf_conflicting_listener_pids($argv, $ports);
+    if (!$conflictingPids) {
+        scf_stdout(
+            "【Boot】旧命令监听已释放，端口占用来自外部服务，跳过等待: occupied="
+            . scf_format_occupied_listening_ports($occupied)
+        );
+        return;
+    }
+    scf_stderr(
+        "【Boot】等待旧监听端口释放超时，继续重拉: timeout={$timeoutSeconds}s, occupied="
+        . scf_format_occupied_listening_ports($occupied)
+        . ", conflicting_pids=" . implode('|', array_values(array_unique(array_map('intval', $conflictingPids))))
+    );
+}
+
+/**
+ * 汇总当前仍处于监听态的端口和对应 PID。
+ *
+ * @param array<int, int> $ports 需要探测的端口列表
+ * @return array<int, array<int, int>> [port => [pid...]]
+ */
+function scf_collect_occupied_listening_ports(array $ports): array {
+    $occupied = [];
+    foreach ($ports as $port) {
+        $port = (int)$port;
+        if ($port <= 0) {
+            continue;
+        }
+        if (!scf_is_port_listening('127.0.0.1', $port)) {
+            continue;
+        }
+        $occupied[$port] = scf_listening_pids_by_port($port);
+    }
+
+    ksort($occupied);
+    return $occupied;
+}
+
+/**
+ * 将监听占用信息格式化为可读日志片段。
+ *
+ * @param array<int, array<int, int>> $occupied [port => [pid...]]
+ * @return string
+ */
+function scf_format_occupied_listening_ports(array $occupied): string {
+    if (!$occupied) {
+        return 'none';
+    }
+
+    $segments = [];
+    foreach ($occupied as $port => $pids) {
+        $pidList = array_slice(array_values(array_filter(array_map('intval', (array)$pids), static fn(int $pid) => $pid > 0)), 0, 8);
+        $pidText = $pidList ? implode('|', $pidList) : 'unknown';
+        $segments[] = $port . '(pids=' . $pidText . ')';
+    }
+
+    return implode(', ', $segments);
 }
 
 /**

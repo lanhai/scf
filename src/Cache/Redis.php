@@ -5,6 +5,7 @@ namespace Scf\Cache;
 use Mix\Redis\Connection;
 use Mix\Redis\Driver;
 use RedisException;
+use Scf\Cache\Connection\InflightRedisConnection;
 use Scf\Cache\Connection\RedisPool;
 use Scf\Cache\Logger\RedisLogger;
 use Scf\Core\Cache;
@@ -72,7 +73,7 @@ class Redis extends Cache {
                 $config['wait_timeout'] ?? 0.0
             );
             $logger = new RedisLogger();
-            $connection = new Connection($driver, $logger);
+            $connection = new InflightRedisConnection($driver, $logger);
         } catch (RedisException $exception) {
             die ('redis server connect failed:' . $exception->getMessage()) . PHP_EOL;
         }

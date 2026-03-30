@@ -3,6 +3,7 @@
 namespace Scf\Server\Proxy;
 
 use Scf\Core\Console;
+use Scf\Core\Config;
 use RuntimeException;
 
 /**
@@ -18,6 +19,7 @@ class AppInstanceManager {
     protected array $connectionBindings = [];
     protected array $instanceConnectionCount = [];
     protected array $instanceRuntimeState = [];
+    protected array $drainingHttpRpcStallState = [];
     protected bool $hasDrainingGeneration = false;
 
     /**
@@ -369,8 +371,38 @@ class AppInstanceManager {
             'rpc_request_processing' => max(0, (int)($runtimeStatus['rpc_request_processing'] ?? 0)),
             'redis_queue_processing' => max(0, (int)($runtimeStatus['redis_queue_processing'] ?? 0)),
             'crontab_busy' => max(0, (int)($runtimeStatus['crontab_busy'] ?? 0)),
+            'mysql_inflight' => max(0, (int)($runtimeStatus['mysql_inflight'] ?? 0)),
+            'redis_inflight' => max(0, (int)($runtimeStatus['redis_inflight'] ?? 0)),
+            'outbound_http_inflight' => max(0, (int)($runtimeStatus['outbound_http_inflight'] ?? 0)),
             'updated_at' => time(),
         ];
+    }
+
+    /**
+     * 读取实例最近一次运行态快照（可选新鲜度约束）。
+     *
+     * 当 upstream 已进入 draining/offline 且状态接口短暂不可达时，gateway 回收状态机
+     * 可以回退到这份“最近快照”继续判断是否满足回收窗口条件，避免因为短时采样空洞
+     * 让回收无谓拖到更晚窗口。
+     *
+     * @param string $host upstream 主机名或 IP。
+     * @param int $port upstream HTTP 端口。
+     * @param int $maxAgeSeconds 允许快照距离当前的最大秒数；<=0 表示不限制。
+     * @return array<string, mixed> 命中时返回快照，未命中或已过期返回空数组。
+     */
+    public function instanceRuntimeStatus(string $host, int $port, int $maxAgeSeconds = 15): array {
+        if ($host === '' || $port <= 0) {
+            return [];
+        }
+        $runtime = (array)($this->instanceRuntimeState[$this->runtimeStateKey($host, $port)] ?? []);
+        if (!$runtime) {
+            return [];
+        }
+        $updatedAt = (int)($runtime['updated_at'] ?? 0);
+        if ($maxAgeSeconds > 0 && $updatedAt > 0 && (time() - $updatedAt) > $maxAgeSeconds) {
+            return [];
+        }
+        return $runtime;
     }
 
     /**
@@ -691,18 +723,37 @@ class AppInstanceManager {
         }
         $changed = false;
         $now = time();
+        $activeDrainingVersions = [];
         foreach ($this->state['generations'] as $version => &$generation) {
             if (($generation['status'] ?? '') !== 'draining') {
                 continue;
             }
+            $activeDrainingVersions[$version] = true;
             $drainDeadlineAt = (int)($generation['drain_deadline_at'] ?? 0);
             $connections = $this->generationConnectionCount($generation);
             $httpProcessing = $this->generationHttpProcessingCount($generation);
             $rpcProcessing = $this->generationRpcProcessingCount($generation);
             if ($drainDeadlineAt > 0 && $now < $drainDeadlineAt) {
+                $this->clearDrainingHttpRpcStallState($version);
                 continue;
             }
-            if ($connections === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
+            $stalledCounters = false;
+            if ($connections === 0 && ($httpProcessing > 0 || $rpcProcessing > 0)) {
+                $stalledCounters = $this->isDrainingHttpRpcCounterStalled($version, $httpProcessing, $rpcProcessing, $now);
+            } else {
+                $this->clearDrainingHttpRpcStallState($version);
+            }
+
+            if ($connections === 0 && ($httpProcessing === 0 && $rpcProcessing === 0 || $stalledCounters)) {
+                if ($stalledCounters) {
+                    Console::warning(
+                        "【Gateway】旧业务实例HTTP/RPC计数长时间不变化且无连接，按兜底进入 recycle: "
+                        . "generation={$version}, http={$httpProcessing}, rpc={$rpcProcessing}, "
+                        . "stale_grace=" . $this->drainingHttpRpcStaleGraceSeconds() . "s, "
+                        . "drain_started_at=" . (int)($generation['drain_started_at'] ?? 0)
+                        . ", drain_deadline_at={$drainDeadlineAt}"
+                    );
+                }
                 Console::info(
                     "【Gateway】旧业务实例draining完成，准备进入 recycle: generation={$version}, "
                     . "ws={$connections}, http={$httpProcessing}, rpc={$rpcProcessing}, "
@@ -715,6 +766,7 @@ class AppInstanceManager {
                     $instance['status'] = 'offline';
                 }
                 unset($instance);
+                $this->clearDrainingHttpRpcStallState($version);
                 $changed = true;
             }
             if (($this->state['active_version'] ?? null) === $version && $generation['status'] !== 'active') {
@@ -723,9 +775,82 @@ class AppInstanceManager {
             }
         }
         unset($generation);
+        foreach (array_keys($this->drainingHttpRpcStallState) as $version) {
+            if (!isset($activeDrainingVersions[$version])) {
+                unset($this->drainingHttpRpcStallState[$version]);
+            }
+        }
         if ($changed) {
             $this->touchState();
         }
+    }
+
+    /**
+     * 判断 draining generation 的 HTTP/RPC 处理计数是否出现“无连接且长期不变化”。
+     *
+     * 这个判定专门用于兜住计数泄漏场景：旧代已经不再承接连接，但计数器卡在固定值，
+     * 会导致 generation 永远停在 draining。只有签名持续不变化超过宽限才返回 true。
+     *
+     * @param string $version generation 版本
+     * @param int $httpProcessing 当前 HTTP 处理中计数
+     * @param int $rpcProcessing 当前 RPC 处理中计数
+     * @param int $now 当前时间戳
+     * @return bool
+     */
+    protected function isDrainingHttpRpcCounterStalled(string $version, int $httpProcessing, int $rpcProcessing, int $now): bool {
+        if ($version === '') {
+            return false;
+        }
+        $signature = $httpProcessing . ':' . $rpcProcessing;
+        $state = (array)($this->drainingHttpRpcStallState[$version] ?? []);
+        $lastSignature = (string)($state['signature'] ?? '');
+        $since = (int)($state['since'] ?? 0);
+        $lastWarnAt = (int)($state['last_warn_at'] ?? 0);
+        if ($lastSignature !== $signature || $since <= 0) {
+            $this->drainingHttpRpcStallState[$version] = [
+                'signature' => $signature,
+                'since' => $now,
+                'last_warn_at' => 0,
+            ];
+            return false;
+        }
+
+        $staleGrace = $this->drainingHttpRpcStaleGraceSeconds();
+        $elapsed = max(0, $now - $since);
+        if ($elapsed >= $staleGrace) {
+            return true;
+        }
+
+        if ($lastWarnAt <= 0 || ($now - $lastWarnAt) >= 15) {
+            $this->drainingHttpRpcStallState[$version]['last_warn_at'] = $now;
+            Console::warning(
+                "【Gateway】旧业务实例draining计数未收敛，继续等待: generation={$version}, "
+                . "http={$httpProcessing}, rpc={$rpcProcessing}, stalled={$elapsed}s, stale_grace={$staleGrace}s"
+            );
+        }
+        return false;
+    }
+
+    /**
+     * 清理指定 generation 的 draining 计数兜底状态。
+     *
+     * @param string $version generation 版本
+     * @return void
+     */
+    protected function clearDrainingHttpRpcStallState(string $version): void {
+        if ($version === '') {
+            return;
+        }
+        unset($this->drainingHttpRpcStallState[$version]);
+    }
+
+    /**
+     * 读取 draining 计数不变化兜底窗口（秒）。
+     *
+     * @return int
+     */
+    protected function drainingHttpRpcStaleGraceSeconds(): int {
+        return max(3, (int)(Config::server()['gateway_drain_stale_counter_grace'] ?? 8));
     }
 
     /**
@@ -746,6 +871,9 @@ class AppInstanceManager {
                 'rpc_processing' => $this->generationRpcProcessingCount($generation),
                 'redis_queue_processing' => $this->generationRedisQueueProcessingCount($generation),
                 'crontab_busy' => $this->generationCrontabBusyCount($generation),
+                'mysql_inflight' => $this->generationMysqlInflightCount($generation),
+                'redis_inflight' => $this->generationRedisInflightCount($generation),
+                'outbound_http_inflight' => $this->generationOutboundHttpInflightCount($generation),
                 'drain_started_at' => (int)($generation['drain_started_at'] ?? 0),
                 'drain_deadline_at' => (int)($generation['drain_deadline_at'] ?? 0),
             ];
@@ -823,6 +951,51 @@ class AppInstanceManager {
         foreach ($generation['instances'] as $instance) {
             $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
             $count += (int)($runtime['crontab_busy'] ?? 0);
+        }
+        return $count;
+    }
+
+    /**
+     * 统计某个 generation 的 MySQL 在途 I/O 数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int MySQL 在途数。
+     */
+    protected function generationMysqlInflightCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['mysql_inflight'] ?? 0);
+        }
+        return $count;
+    }
+
+    /**
+     * 统计某个 generation 的 Redis 在途 I/O 数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int Redis 在途数。
+     */
+    protected function generationRedisInflightCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['redis_inflight'] ?? 0);
+        }
+        return $count;
+    }
+
+    /**
+     * 统计某个 generation 的 Outbound HTTP 在途 I/O 数。
+     *
+     * @param array<string, mixed> $generation generation 状态。
+     * @return int Outbound HTTP 在途数。
+     */
+    protected function generationOutboundHttpInflightCount(array $generation): int {
+        $count = 0;
+        foreach ($generation['instances'] as $instance) {
+            $runtime = $this->instanceRuntimeState[$this->runtimeStateKey((string)($instance['host'] ?? '127.0.0.1'), (int)($instance['port'] ?? 0))] ?? [];
+            $count += (int)($runtime['outbound_http_inflight'] ?? 0);
         }
         return $count;
     }

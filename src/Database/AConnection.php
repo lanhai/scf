@@ -8,6 +8,7 @@ use JetBrains\PhpStorm\Pure;
 use PDOException;
 use PDOStatement;
 use Scf\Core\Console;
+use Scf\Core\InflightCounter;
 use Scf\Database\Logger\PdoLogger;
 use Scf\Database\Tools\Expr;
 use Scf\Database\Tools\QueryBuilder;
@@ -229,6 +230,9 @@ abstract class AConnection implements IConnection {
         }
 
         try {
+            // MySQL 执行窗口从 prepare/execute 到结果返回都计入 inflight，
+            // 让 shutdown/recycle 能准确判断“是否仍有数据库 I/O 在途”。
+            InflightCounter::beginMysql();
             $this->prepare();
             $success = $this->statement->execute();
             if (!$success) {
@@ -243,6 +247,7 @@ abstract class AConnection implements IConnection {
             $isBeginTransactions and $transactionsManager->addError($pointId, $ex->getMessage());
             throw $ex;
         } finally {
+            InflightCounter::endMysql();
             // 只可执行一次
             // 事务除外，事务在 commit rollback __destruct 中处理
             if (!$this instanceof Transaction) {

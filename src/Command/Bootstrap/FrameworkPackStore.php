@@ -294,6 +294,6 @@ function scf_bootstrap_fetch_remote_framework_pack(?string &$error = null): stri
         return '';
     }
 
-    scf_stdout('bootstrap 已从 scf_update_server 拉取 framework 包: ' . ($record['version'] ?? basename($path)));
+    scf_stdout('【Boot】已从 scf_update_server 拉取 framework 包: ' . ($record['version'] ?? basename($path)));
     return $path;
 }

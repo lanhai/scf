@@ -25,16 +25,16 @@ use Scf\Util\MemoryMonitor;
 use Scf\Util\Sn;
 use Swoole\Event;
 use Swoole\ExitException;
-use Swoole\Timer;
 use Throwable;
 
 class CgiListener extends Listener {
 
-    protected const UPSTREAM_CONTROL_SHUTDOWN_PATH = '/_gateway/internal/upstream/shutdown';
-    protected const UPSTREAM_CONTROL_STATUS_PATH = '/_gateway/internal/upstream/status';
-    protected const UPSTREAM_CONTROL_HEALTH_PATH = '/_gateway/internal/upstream/health';
     protected const UPSTREAM_CONTROL_HTTP_PROBE_PATH = '/_gateway/internal/upstream/http_probe';
-    protected const UPSTREAM_CONTROL_QUIESCE_PATH = '/_gateway/internal/upstream/quiesce';
+    protected const UPSTREAM_CONTROL_CUTOVER_PROBE_PATH = '/_scf_internal/upstream/cutover_probe';
+    protected static int $requestCounterLastSecond = 0;
+    protected static string $requestTodayBucket = '';
+    protected static int $requestTodayBuffered = 0;
+    protected static int $requestTodayLastFlushAt = 0;
 
     /**
      * @param \Swoole\Http\Request $request
@@ -84,9 +84,10 @@ class CgiListener extends Listener {
             }
             return;
         }
-        $mysqlExecuteCount = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
-        $requestCount = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
-        if ($requestCount > MAX_REQUEST_LIMIT || $mysqlExecuteCount > MAX_MYSQL_EXECUTE_LIMIT) {
+        $requestMethod = strtoupper((string)($request->server['request_method'] ?? 'GET'));
+        $mysqlExecuteCount = (int)(Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0);
+        $requestCount = (int)(Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0);
+        if ($this->shouldRejectForOverload($requestMethod, $requestCount, $mysqlExecuteCount, $request)) {
             Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
             $response->header("Content-Type", "application/json;charset=utf-8");
             $response->status(503);
@@ -102,17 +103,10 @@ class CgiListener extends Listener {
         //等待响应
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
         //并发请求
-        $currentRequestKey = Key::COUNTER_REQUEST . time();
-        $currentRequest = Counter::instance()->incr($currentRequestKey);
-        if ($currentRequest == 1) {
-            Timer::after(3000, function () use ($currentRequestKey) {
-                Counter::instance()->delete($currentRequestKey);
-            });
-        }
+        $this->incrCurrentSecondRequestCounter();
         if (!$this->dashboradTakeover($request, $response)) {
-            //今日请求
-            $requestTodayCountKey = Key::COUNTER_REQUEST . Date::today();
-            Counter::instance()->incr($requestTodayCountKey);
+            // 今日请求计数改为 worker 本地批量汇总，降低高 QPS 下共享计数原子开销。
+            $this->bufferTodayRequestCounterIncrement();
             if (!Runtime::instance()->serverIsReady()) {
                 Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
                 $response->header("Content-Type", "application/json;charset=utf-8");
@@ -178,8 +172,9 @@ class CgiListener extends Listener {
             }
         }
         Done:
-        Event::defer(function () use ($workerId, $request) {
+        Event::defer(function () use ($workerId) {
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
+            $this->flushBufferedRequestTodayCounter(false);
             if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
                 return;
             }
@@ -192,19 +187,126 @@ class CgiListener extends Listener {
         });
     }
 
+    /**
+     * 按当前负载状态判断是否需要拒绝请求。
+     *
+     * 该策略分两级：
+     * 1. 超过硬阈值直接拒绝；
+     * 2. 进入软阈值区间后按线性概率降载，避免硬切 503。
+     *
+     * @param string $requestMethod 请求方法。
+     * @param int $requestCount 最近一秒请求量。
+     * @param int $mysqlExecuteCount 最近一秒 mysql 执行量。
+     * @param \Swoole\Http\Request $request 原始请求对象。
+     * @return bool
+     */
+    protected function shouldRejectForOverload(
+        string $requestMethod,
+        int $requestCount,
+        int $mysqlExecuteCount,
+        \Swoole\Http\Request $request
+    ): bool {
+        $requestRatio = MAX_REQUEST_LIMIT > 0 ? ($requestCount / MAX_REQUEST_LIMIT) : 0.0;
+        $mysqlRatio = MAX_MYSQL_EXECUTE_LIMIT > 0 ? ($mysqlExecuteCount / MAX_MYSQL_EXECUTE_LIMIT) : 0.0;
+        $peakRatio = max($requestRatio, $mysqlRatio);
+
+        if ($peakRatio >= (float)OVERLOAD_HARD_RATIO) {
+            return true;
+        }
+        if (!ENABLE_ADAPTIVE_OVERLOAD_SHEDDING || $peakRatio < (float)OVERLOAD_SOFT_RATIO) {
+            return false;
+        }
+
+        $window = max(0.01, (float)OVERLOAD_HARD_RATIO - (float)OVERLOAD_SOFT_RATIO);
+        $shedSlope = ($peakRatio - (float)OVERLOAD_SOFT_RATIO) / $window;
+        $shedProbability = min((float)OVERLOAD_MAX_SHED_PROBABILITY, max(0.0, $shedSlope * (float)OVERLOAD_MAX_SHED_PROBABILITY));
+        // 写请求优先保留，减轻“业务写接口在软限流区被大量拒绝”的副作用。
+        if (in_array($requestMethod, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            $shedProbability *= 0.5;
+        }
+        $seed = (string)($request->server['request_uri'] ?? '/')
+            . '|' . microtime(true)
+            . '|' . mt_rand(0, PHP_INT_MAX);
+        $sample = ((float)sprintf('%u', crc32($seed))) / 4294967295.0;
+        return $sample < $shedProbability;
+    }
+
+    /**
+     * 记录本秒请求量并执行轻量过期清理。
+     *
+     * @return int
+     */
+    protected function incrCurrentSecondRequestCounter(): int {
+        $now = time();
+        if (self::$requestCounterLastSecond !== $now) {
+            // 每秒仅清理一次 3 秒前的桶，替代每秒创建 Timer::after 的做法。
+            $expiredSecond = $now - 3;
+            if ($expiredSecond > 0) {
+                Counter::instance()->delete(Key::COUNTER_REQUEST . $expiredSecond);
+            }
+            self::$requestCounterLastSecond = $now;
+        }
+        return Counter::instance()->incr(Key::COUNTER_REQUEST . $now);
+    }
+
+    /**
+     * 在 worker 本地缓冲“今日请求量”计数。
+     *
+     * @return void
+     */
+    protected function bufferTodayRequestCounterIncrement(): void {
+        $today = Date::today();
+        if (self::$requestTodayBucket !== '' && self::$requestTodayBucket !== $today) {
+            $this->flushBufferedRequestTodayCounter(true);
+        }
+        if (self::$requestTodayBucket === '') {
+            self::$requestTodayBucket = $today;
+        }
+        self::$requestTodayBuffered++;
+        if (self::$requestTodayLastFlushAt <= 0) {
+            self::$requestTodayLastFlushAt = time();
+        }
+        $this->flushBufferedRequestTodayCounter(false);
+    }
+
+    /**
+     * 将 worker 本地缓冲的“今日请求量/总请求量”批量回写到共享计数表。
+     *
+     * @param bool $force 是否强制立即 flush。
+     * @return void
+     */
+    protected function flushBufferedRequestTodayCounter(bool $force): void {
+        if (self::$requestTodayBuffered <= 0) {
+            return;
+        }
+        $now = time();
+        $needFlush = $force
+            || self::$requestTodayBuffered >= REQUEST_TODAY_COUNTER_FLUSH_SIZE
+            || ($now - self::$requestTodayLastFlushAt) >= REQUEST_TODAY_COUNTER_FLUSH_INTERVAL;
+        if (!$needFlush) {
+            return;
+        }
+
+        $today = self::$requestTodayBucket !== '' ? self::$requestTodayBucket : Date::today();
+        $delta = self::$requestTodayBuffered;
+        Counter::instance()->incr(Key::COUNTER_REQUEST . $today, '_value', $delta);
+        Counter::instance()->incr(Key::COUNTER_REQUEST, '_value', $delta);
+        self::$requestTodayBuffered = 0;
+        self::$requestTodayLastFlushAt = $now;
+        self::$requestTodayBucket = $today;
+    }
+
     protected function handleProxyUpstreamControl(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
         if (!(defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true)) {
             return false;
         }
 
         $path = (string)($request->server['path_info'] ?? $request->server['request_uri'] ?? '/');
-        if (!in_array($path, [
-            self::UPSTREAM_CONTROL_SHUTDOWN_PATH,
-            self::UPSTREAM_CONTROL_STATUS_PATH,
-            self::UPSTREAM_CONTROL_HEALTH_PATH,
-            self::UPSTREAM_CONTROL_HTTP_PROBE_PATH,
-            self::UPSTREAM_CONTROL_QUIESCE_PATH,
-        ], true)) {
+        // upstream 与 gateway 的控制链路（status/health/quiesce/shutdown）统一走本地 IPC，
+        // 不再占用 upstream worker 的 onRequest 通道。这里仅保留：
+        // 1) HTTP worker 探针；
+        // 2) 切流校验阶段的入口命中探针（gateway business port -> nginx -> upstream）。
+        if (!in_array($path, [self::UPSTREAM_CONTROL_HTTP_PROBE_PATH, self::UPSTREAM_CONTROL_CUTOVER_PROBE_PATH], true)) {
             return false;
         }
 
@@ -220,38 +322,19 @@ class CgiListener extends Listener {
             return true;
         }
 
-        if ($path === self::UPSTREAM_CONTROL_STATUS_PATH) {
-            $status = $this->buildProxyUpstreamRuntimeStatus();
-            $response->status(200);
-            $response->header('Content-Type', 'application/json;charset=utf-8');
-            $response->end(JsonHelper::toJson([
-                'errCode' => 0,
-                'message' => 'SUCCESS',
-                'data' => $status
-            ]));
-            return true;
-        }
-
-        if ($path === self::UPSTREAM_CONTROL_HEALTH_PATH) {
-            $response->status(200);
-            $response->header('Content-Type', 'application/json;charset=utf-8');
-            $response->end(JsonHelper::toJson([
-                'errCode' => 0,
-                'message' => 'SUCCESS',
-                'data' => Server::instance()->proxyUpstreamHealthStatus(),
-            ]));
-            return true;
-        }
-
-        if ($path === self::UPSTREAM_CONTROL_HTTP_PROBE_PATH) {
-            // 这条探针必须走真实的 onRequest/worker 响应链，专门用来证明 HTTP worker 还能接收并返回请求。
+        if ($path === self::UPSTREAM_CONTROL_CUTOVER_PROBE_PATH) {
+            // 切流探针要求显式 header，避免业务路径偶然命中该 internal path。
+            if (((string)($request->header['x-scf-cutover-probe'] ?? '')) !== '1') {
+                return false;
+            }
             $response->status(200);
             $response->header('Content-Type', 'application/json;charset=utf-8');
             $response->end(JsonHelper::toJson([
                 'errCode' => 0,
                 'message' => 'SUCCESS',
                 'data' => [
-                    'probe' => 'http',
+                    'probe' => 'cutover',
+                    'upstream_port' => (int)(Runtime::instance()->httpPort() ?: 0),
                     'worker_id' => (int)(Server::server()->worker_id ?? -1),
                     'ts' => microtime(true),
                 ],
@@ -259,35 +342,19 @@ class CgiListener extends Listener {
             return true;
         }
 
-        if ($path === self::UPSTREAM_CONTROL_QUIESCE_PATH) {
-            $response->status(200);
-            $response->header('Content-Type', 'application/json;charset=utf-8');
-            $response->end(JsonHelper::toJson([
-                'errCode' => 0,
-                'message' => 'SUCCESS',
-                'data' => 'quiesce'
-            ]));
-            Timer::after(1, static function () {
-                Server::instance()->quiesceBusinessPlane();
-            });
-            return true;
-        }
-
+        // 这条探针必须走真实的 onRequest/worker 响应链，专门用来证明 HTTP worker 还能接收并返回请求。
         $response->status(200);
         $response->header('Content-Type', 'application/json;charset=utf-8');
         $response->end(JsonHelper::toJson([
             'errCode' => 0,
             'message' => 'SUCCESS',
-            'data' => 'shutdown'
+            'data' => [
+                'probe' => 'http',
+                'worker_id' => (int)(Server::server()->worker_id ?? -1),
+                'ts' => microtime(true),
+            ],
         ]));
-        Timer::after(1, static function () {
-            Server::instance()->shutdown();
-        });
         return true;
-    }
-
-    protected function buildProxyUpstreamRuntimeStatus(): array {
-        return Server::instance()->proxyUpstreamRuntimeStatus();
     }
 
     /**

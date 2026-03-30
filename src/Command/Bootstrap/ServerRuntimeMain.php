@@ -206,7 +206,7 @@ function scf_run_server_process_loop(array $argv): void {
 
         $ret = \Swoole\Process::wait();
         if ($ret) {
-            scf_stdout("[manager] child exit pid={$ret['pid']} code={$ret['code']} signal={$ret['signal']}");
+            scf_stdout("【Boot】子进程退出: pid={$ret['pid']}, code={$ret['code']}, signal={$ret['signal']}");
         }
         if (scf_should_stop_server_process_loop($argv)) {
             break;
@@ -218,7 +218,7 @@ function scf_run_server_process_loop(array $argv): void {
         try {
             $nextPack = scf_try_upgrade($argv);
         } catch (\Throwable $e) {
-            scf_stderr("[manager] update failed: {$e->getMessage()}");
+            scf_stderr("【Boot】更新检查失败: {$e->getMessage()}");
         }
         scf_wait_command_ports_released($argv);
         if (scf_should_reexec_server_process_loop($nextPack)) {
@@ -316,16 +316,16 @@ function scf_should_reexec_server_process_loop(string $targetPack): bool {
 }
 
 function scf_reexec_current_boot(array $argv): never {
-    scf_stdout('[manager] framework pack changed, re-exec boot process');
+    scf_stdout('【Boot】检测到 framework 包已变更，准备重新执行 boot 进程');
     if (!function_exists('pcntl_exec')) {
-        scf_stderr('[manager] pcntl_exec unavailable, cannot reload framework pack in-process');
+        scf_stderr('【Boot】当前环境不支持 pcntl_exec，无法在进程内重载 framework 包');
         exit(4);
     }
 
     pcntl_exec(PHP_BINARY, $argv);
 
     $error = function_exists('pcntl_get_last_error') ? pcntl_strerror(pcntl_get_last_error()) : 'unknown';
-    scf_stderr('[manager] re-exec failed: ' . $error);
+    scf_stderr('【Boot】重新执行 boot 进程失败: ' . $error);
     exit(5);
 }
 

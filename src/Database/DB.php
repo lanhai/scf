@@ -234,6 +234,7 @@ class DB {
      * @return Connection|Transaction
      */
     protected function borrow(): Connection|Transaction {
+        $this->ensureConnectionClassLoaded();
         if ($this->actor == DBS_MASTER) {
             try {
                 $transaction = $this->getTransaction();
@@ -253,6 +254,25 @@ class DB {
             $conn = new Connection($this->driver, $this->logger, ['prefix' => $this->config['prefix'] ?? ''], $this->actor);
         }
         return $conn;
+    }
+
+    /**
+     * 确保 Connection 类在运行态可用。
+     *
+     * gateway/upstream 的 phar 迭代过程中，自动加载器可能短时读取到旧代 class map，
+     * 从而把 `new Connection(...)` 退化成“类不存在”的致命错误。这里提供一次本地
+     * 文件兜底加载，避免把可恢复的加载抖动放大成 worker 崩溃。
+     *
+     * @return void
+     */
+    protected function ensureConnectionClassLoaded(): void {
+        if (class_exists(Connection::class, false)) {
+            return;
+        }
+        $connectionFile = __DIR__ . '/Connection.php';
+        if (is_file($connectionFile)) {
+            require_once $connectionFile;
+        }
     }
 
     /**

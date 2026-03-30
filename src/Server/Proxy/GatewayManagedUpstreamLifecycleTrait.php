@@ -4,6 +4,7 @@ namespace Scf\Server\Proxy;
 
 use Scf\Core\App;
 use Scf\Core\Console;
+use Scf\Core\Server as CoreServer;
 use Scf\Core\Table\Runtime;
 use Swoole\Process;
 use Swoole\Timer;
@@ -21,6 +22,220 @@ use Throwable;
 trait GatewayManagedUpstreamLifecycleTrait {
 
     /**
+     * 在真正拉起 managed upstream 前，确认计划端口没有被外部进程抢占。
+     *
+     * gateway 控制面端口是固定入口，冲突时可以按“回收旧自己”的策略处理；
+     * 但 upstream 端口属于内部动态端口，若被无关进程占用，绝不能直接 kill 对方。
+     * 这里统一在 spawn 前识别“当前端口上的监听者是不是自家的 managed upstream”，
+     * 若不是且计划允许动态端口，就改分配下一个可用端口。
+     *
+     * @param array<string, mixed> $plan 原始 managed plan
+     * @return array<string, mixed> 调整后的 managed plan
+     */
+    protected function resolveManagedBootstrapPlan(array $plan): array {
+        if (!$this->launcher) {
+            return $plan;
+        }
+
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        $metadata = (array)($plan['metadata'] ?? []);
+        $dynamicPort = !array_key_exists('dynamic_port', $metadata) || (bool)$metadata['dynamic_port'];
+        $dynamicRpcPort = !array_key_exists('dynamic_rpc_port', $metadata) || (bool)$metadata['dynamic_rpc_port'];
+        $httpPortReassigned = false;
+        $reservedPorts = $this->collectReservedPorts();
+        $port > 0 && !in_array($port, $reservedPorts, true) and $reservedPorts[] = $port;
+        $rpcPort > 0 && !in_array($rpcPort, $reservedPorts, true) and $reservedPorts[] = $rpcPort;
+
+        if ($port > 0 && $this->managedBootstrapPortOccupiedByForeignListener($host, $port)) {
+            if ($dynamicPort) {
+                $newPort = $this->launcher->findAvailablePortAvoiding(
+                    '127.0.0.1',
+                    max(1025, $port + 1),
+                    $reservedPorts,
+                    2000
+                );
+                Console::warning("【Gateway】业务实例目标端口已被外部进程占用，改用新端口: {$host}:{$port} => {$host}:{$newPort}");
+                $metadata['reassigned_from_port'] = $port;
+                $plan['port'] = $newPort;
+                $port = $newPort;
+                !in_array($newPort, $reservedPorts, true) and $reservedPorts[] = $newPort;
+                $httpPortReassigned = true;
+            } else {
+                Console::warning("【Gateway】业务实例目标端口已被外部进程占用，但当前计划不允许改端口: {$host}:{$port}");
+            }
+        }
+
+        // HTTP 端口一旦因为冲突被换掉，RPC 端口也要重新做一次真实监听探测，
+        // 避免出现“HTTP 已避让但 RPC 仍撞在旧实例上”的半迁移状态。
+        if ($rpcPort > 0 && ($this->managedBootstrapRpcPortOccupied($rpcPort) || ($httpPortReassigned && $dynamicRpcPort))) {
+            if ($dynamicRpcPort) {
+                $newRpcPort = $this->launcher->findAvailablePortAvoiding(
+                    '127.0.0.1',
+                    max(1025, $rpcPort + 1),
+                    array_merge($reservedPorts, [$port]),
+                    2000
+                );
+                Console::warning("【Gateway】业务实例RPC端口已被占用，改用新端口: 127.0.0.1:{$rpcPort} => 127.0.0.1:{$newRpcPort}");
+                $metadata['reassigned_from_rpc_port'] = $rpcPort;
+                $plan['rpc_port'] = $newRpcPort;
+            } else {
+                Console::warning("【Gateway】业务实例RPC端口已被占用，但当前计划不允许改端口: 127.0.0.1:{$rpcPort}");
+            }
+        }
+
+        $metadata['dynamic_port'] = $dynamicPort;
+        $metadata['dynamic_rpc_port'] = $dynamicRpcPort;
+        $plan['metadata'] = $metadata;
+        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
+        return $plan;
+    }
+
+    /**
+     * 判断目标 RPC 端口是否已处于监听态。
+     *
+     * RPC 端口不暴露 HTTP 状态接口，因此这里不去区分“是否属于自家实例”，
+     * 只要端口当前已经有人监听，就让动态 upstream 直接换端口，避免误杀
+     * 其他业务或与旧实例互相踩踏。
+     *
+     * @param int $rpcPort 目标 RPC 端口
+     * @return bool true 表示当前 RPC 端口不可复用
+     */
+    protected function managedBootstrapRpcPortOccupied(int $rpcPort): bool {
+        if ($rpcPort <= 0 || !$this->launcher) {
+            return false;
+        }
+
+        return $this->launcher->isListening('127.0.0.1', $rpcPort, 0.2)
+            || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2)
+            || \Scf\Core\Server::isListeningPortInUse($rpcPort);
+    }
+
+    /**
+     * 判断当前目标 HTTP 端口上是否是“非本应用 managed upstream”的监听者。
+     *
+     * @param string $host 目标 host
+     * @param int $port 目标端口
+     * @return bool true 表示端口已被外部监听者占用
+     */
+    protected function managedBootstrapPortOccupiedByForeignListener(string $host, int $port): bool {
+        if ($port <= 0 || !$this->launcher) {
+            return false;
+        }
+
+        $listening = $this->launcher->isListening($host, $port, 0.2)
+            || $this->launcher->isListening('127.0.0.1', $port, 0.2)
+            || $this->launcher->isListening('0.0.0.0', $port, 0.2);
+        if (!$listening) {
+            return false;
+        }
+
+        // 端口已在监听时，只有“当前 gateway epoch+port 所属 upstream”才允许复用。
+        // 过去仅按 app/fingerprint 识别会把旧代实例误判为可复用，导致把不可用端口
+        // 继续下发给新 upstream，最终在 child listen 阶段失败。
+        if ($this->managedBootstrapPortOwnedByCurrentGatewayLease($port)) {
+            return false;
+        }
+
+        $status = $this->fetchUpstreamRuntimeStatusSync('127.0.0.1', $port);
+        if (!$status) {
+            return true;
+        }
+
+        if ((string)($status['name'] ?? '') !== APP_DIR_NAME
+            || (string)($status['fingerprint'] ?? '') !== APP_FINGERPRINT) {
+            return true;
+        }
+
+        // upstream.status 的 owner 字段用于兜底兼容无法读取命令行的场景。
+        // 对“同应用但 owner 不明”的监听者默认按外部占用处理，宁可换端口，
+        // 也不能把高概率不可用端口继续分配给新实例。
+        $expectedEpoch = $this->gatewayLeaseEpoch();
+        $expectedGatewayPort = $this->businessPort();
+        $statusEpoch = (int)($status['upstream_owner_epoch'] ?? 0);
+        $statusGatewayPort = (int)($status['upstream_gateway_port'] ?? 0);
+        if ($expectedEpoch <= 0) {
+            return true;
+        }
+        if ($statusEpoch <= 0 || $statusEpoch !== $expectedEpoch) {
+            return true;
+        }
+        if ($expectedGatewayPort > 0 && $statusGatewayPort > 0 && $statusGatewayPort !== $expectedGatewayPort) {
+            return true;
+        }
+        if ($expectedGatewayPort > 0 && $statusGatewayPort <= 0) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 判断目标端口监听者是否属于“当前 gateway lease”。
+     *
+     * 复用端口必须满足以下条件：
+     * 1. 监听进程是 `gateway_upstream start`；
+     * 2. `-app` 与当前应用一致；
+     * 3. `-gateway_port/-gateway_epoch` 与当前 gateway lease 完全一致。
+     *
+     * 只要任一监听者满足条件，就允许把该端口视作“当前代已接管实例”而复用；
+     * 否则统一按外部占用处理，触发动态改端口。
+     *
+     * @param int $port 目标端口
+     * @return bool
+     */
+    protected function managedBootstrapPortOwnedByCurrentGatewayLease(int $port): bool {
+        if ($port <= 0) {
+            return false;
+        }
+        $expectedEpoch = $this->gatewayLeaseEpoch();
+        $expectedGatewayPort = $this->businessPort();
+        if ($expectedEpoch <= 0 || $expectedGatewayPort <= 0) {
+            return false;
+        }
+
+        $pids = CoreServer::findPidsByPort($port);
+        if (!$pids) {
+            return false;
+        }
+
+        $appFlag = '-app=' . APP_DIR_NAME;
+        $gatewayPortFlag = '-gateway_port=' . $expectedGatewayPort;
+        foreach ($pids as $pid) {
+            $command = $this->readManagedBootstrapProcessCommand((int)$pid);
+            if ($command === '' || !str_contains($command, 'boot gateway_upstream start')) {
+                continue;
+            }
+            if (!str_contains($command, $appFlag) || !str_contains($command, $gatewayPortFlag)) {
+                continue;
+            }
+            if (preg_match('/(?:^|\\s)-gateway_epoch=(\\d+)(?:\\s|$)/', $command, $matches)) {
+                $epoch = (int)($matches[1] ?? 0);
+                if ($epoch > 0 && $epoch === $expectedEpoch) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 读取指定 PID 的完整命令行。
+     *
+     * @param int $pid
+     * @return string
+     */
+    protected function readManagedBootstrapProcessCommand(int $pid): string {
+        if ($pid <= 0 || !@Process::kill($pid, 0)) {
+            return '';
+        }
+        $command = @shell_exec('ps -o command= -p ' . $pid . ' 2>/dev/null');
+        return is_string($command) ? trim($command) : '';
+    }
+
+    /**
      * 清理所有 pending recycle watcher。
      *
      * @return void
@@ -30,7 +245,14 @@ trait GatewayManagedUpstreamLifecycleTrait {
             Timer::clear($timerId);
             unset($this->pendingManagedRecycleWatchers[$key]);
         }
+        $this->pendingManagedRecycleWarnState = [];
+        $this->pendingManagedRecycles = [];
         $this->pendingManagedRecycleCompletions = [];
+        $this->pendingManagedRecycleCheckInFlight = [];
+        $this->pendingManagedRecycleEndpointReservations = [];
+        $this->quarantinedManagedRecycles = [];
+        $this->quarantinedManagedRecycleWarnState = [];
+        $this->managedRecyclePortCooldowns = [];
     }
 
     /**
@@ -167,14 +389,33 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $reserved = $this->collectReservedPorts();
 
         foreach ($basePlans as $plan) {
-            $newPlan = $this->buildRollingManagedPlan($plan, $generationVersion, $reserved, $metadataPatchBuilder);
+            try {
+                $newPlan = $this->buildRollingManagedPlan($plan, $generationVersion, $reserved, $metadataPatchBuilder);
+                $newPlan = $this->resolveManagedBootstrapPlan($newPlan);
+                $newPlan = $this->withManagedPlanLeaseBinding($newPlan);
+            } catch (Throwable $throwable) {
+                $failedNodes[] = [
+                    'host' => (string)($plan['host'] ?? '127.0.0.1') . ':' . (int)($plan['port'] ?? 0),
+                    'error' => "新业务实例计划构建失败: {$throwable->getMessage()}",
+                ];
+                Console::error('【Gateway】业务实例计划构建失败: ' . $this->describePlan($plan) . ', error=' . $throwable->getMessage());
+                continue;
+            }
+            $resolvedHttpPort = (int)($newPlan['port'] ?? 0);
+            $resolvedRpcPort = (int)($newPlan['rpc_port'] ?? 0);
+            $resolvedHttpPort > 0 && !in_array($resolvedHttpPort, $reserved, true) and $reserved[] = $resolvedHttpPort;
+            $resolvedRpcPort > 0 && !in_array($resolvedRpcPort, $reserved, true) and $reserved[] = $resolvedRpcPort;
             $newPlans[] = $newPlan;
             Console::info("【Gateway】启动新业务实例: " . $this->describePlan($newPlan));
 
             $host = (string)($newPlan['host'] ?? '127.0.0.1');
             $newPort = (int)($newPlan['port'] ?? 0);
             $newRpcPort = (int)($newPlan['rpc_port'] ?? 0);
-            $this->upstreamSupervisor->sendCommand(['action' => 'spawn', 'plan' => $newPlan]);
+            $this->upstreamSupervisor->sendCommand([
+                'action' => 'spawn',
+                'owner_epoch' => $this->gatewayLeaseEpoch(),
+                'plan' => $newPlan,
+            ]);
             if (!$this->launcher->waitUntilServicesReady($host, $newPort, $newRpcPort, 30)) {
                 $failedNodes[] = [
                     'host' => $host . ':' . $newPort,
@@ -182,7 +423,6 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 ];
                 continue;
             }
-            Console::success("【Gateway】新业务实例已通过就绪探测，等待切换流量: " . $this->describePlan($newPlan));
 
             $this->registerManagedPlan($newPlan, false);
             $registeredPlans[] = $newPlan;
@@ -205,9 +445,30 @@ trait GatewayManagedUpstreamLifecycleTrait {
 
         $this->instanceManager->activateVersion($generationVersion, self::ROLLING_DRAIN_GRACE_SECONDS);
         $this->notifyManagedUpstreamGenerationIterated($generationVersion);
-        $this->syncNginxProxyTargets($activationReason);
+        // 先执行 nginx 同步但延后摘要输出，确保“挂载实例完成”只会在切流校验通过后打印。
+        // 这里必须显式校验同步结果：如果 nginx 同步本身失败，不能继续进入切流校验流程。
+        $nginxSyncOk = $this->syncNginxProxyTargets($activationReason, [], true);
+        if (!$nginxSyncOk) {
+            $this->clearPendingNginxSyncSummary();
+            $oldPort = (int)(($basePlans[0]['port'] ?? 0));
+            $this->logOldInstanceLifecycle(
+                "【Gateway】{$operationLabel}切流前同步失败，回滚旧实例: new={$generationVersion}",
+                $oldPort
+            );
+            $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, $stage);
+            return [
+                'success_count' => 0,
+                'failed_nodes' => [[
+                    'host' => $generationVersion,
+                    'error' => 'nginx转发同步失败，已回滚，旧实例保持运行',
+                ]],
+            ];
+        }
         if (!$this->waitForManagedGenerationCutover($generationVersion, $registeredPlans, $stage)) {
-            Console::warning("【Gateway】{$operationLabel}切换校验失败，回滚旧业务实例: generation={$generationVersion}");
+            $this->clearPendingNginxSyncSummary();
+            Console::warning("【Gateway】Nginx挂载实例完成日志未输出: stage={$stage}, generation={$generationVersion}, reason=切流校验未通过(已回滚)");
+            $oldPort = (int)(($basePlans[0]['port'] ?? 0));
+            $this->logOldInstanceLifecycle("【Gateway】{$operationLabel}切换校验失败，回滚旧实例: new={$generationVersion}", $oldPort);
             $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, $stage);
             return [
                 'success_count' => 0,
@@ -217,14 +478,22 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 ]],
             ];
         }
+        $this->flushPendingNginxSyncSummary();
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
         }
+        // 先明确“切流校验已通过且入口已稳定命中新代”，再进入旧代回收，
+        // 避免日志时序看起来像“还在切流就提前回收旧实例”。
+        $oldPort = (int)(($basePlans[0]['port'] ?? 0));
+        $this->logOldInstanceLifecycle(
+            "【Gateway】{$operationLabel}切流完成，开始回收: success={$successCount}, drain_grace="
+            . self::ROLLING_DRAIN_GRACE_SECONDS . "s",
+            $oldPort
+        );
+        $this->logPreviousGenerationTransition($previousActiveVersion);
         foreach ($basePlans as $plan) {
             $this->quiesceManagedPlanBusinessPlane($plan);
         }
-        Console::success("【Gateway】{$operationLabel}完成并切换流量: generation={$generationVersion}, success={$successCount}, drain_grace=" . self::ROLLING_DRAIN_GRACE_SECONDS . "s");
-        $this->logPreviousGenerationTransition($previousActiveVersion);
 
         return [
             'success_count' => $successCount,
@@ -330,7 +599,33 @@ trait GatewayManagedUpstreamLifecycleTrait {
             foreach ($plans as $plan) {
                 $probe = $this->probeManagedUpstreamHealth($plan);
                 if ($probe['healthy']) {
-                    continue;
+                    $cutoverProbe = $this->probeManagedIngressCutover($plan);
+                    if ($cutoverProbe['healthy']) {
+                        continue;
+                    }
+                    $allHealthy = false;
+                    $cutoverReason = (string)($cutoverProbe['reason'] ?? 'unknown');
+                    $lastReason = 'ingress_' . $cutoverReason;
+                    if ($cutoverReason === 'gateway_ingress_target_mismatch') {
+                        $expected = (int)($cutoverProbe['expected_port'] ?? ($plan['port'] ?? 0));
+                        $actual = (int)($cutoverProbe['actual_port'] ?? 0);
+                        $probeHost = trim((string)($cutoverProbe['probe_host'] ?? ''));
+                        $lastReason .= "(expect={$expected},actual={$actual}";
+                        if ($probeHost !== '') {
+                            $lastReason .= ",host={$probeHost}";
+                        }
+                        $lastReason .= ')';
+                    } elseif ($cutoverReason === 'gateway_ingress_non_200') {
+                        $statusCode = (int)($cutoverProbe['status_code'] ?? 0);
+                        $probeHost = trim((string)($cutoverProbe['probe_host'] ?? ''));
+                        $lastReason .= "(status={$statusCode}";
+                        if ($probeHost !== '') {
+                            $lastReason .= ",host={$probeHost}";
+                        }
+                        $lastReason .= ')';
+                    }
+                    $stableChecks = 0;
+                    break;
                 }
                 $allHealthy = false;
                 $lastReason = (string)($probe['reason'] ?? 'unknown');
@@ -343,13 +638,110 @@ trait GatewayManagedUpstreamLifecycleTrait {
             }
             $stableChecks++;
             if ($stableChecks >= self::ROLLING_CUTOVER_STABLE_CHECKS) {
-                Console::success("【Gateway】新业务实例切换校验通过: stage={$stage}, generation={$generationVersion}, checks={$stableChecks}");
                 return true;
             }
             usleep(200000);
         }
         Console::warning("【Gateway】新业务实例切换校验超时: stage={$stage}, generation={$generationVersion}, reason={$lastReason}");
         return false;
+    }
+
+    /**
+     * 通过 gateway 对外入口探测，确认流量已经命中新实例。
+     *
+     * 切流不仅要看“新实例本身健康”，还要确认 nginx 入口已经把请求导向目标实例。
+     * 这里走 `gateway business port -> nginx -> upstream` 的真实链路，并校验响应里
+     * 的 `upstream_port` 与目标 plan 一致，防止出现“内部健康通过但入口仍打旧代”的窗口。
+     *
+     * @param array<string, mixed> $plan 新代实例 plan
+     * @return array{healthy: bool, reason: string, expected_port?: int, actual_port?: int, status_code?: int, probe_host?: string}
+     */
+    protected function probeManagedIngressCutover(array $plan): array {
+        if (!$this->nginxProxyModeEnabled()) {
+            return ['healthy' => true, 'reason' => 'skipped_non_nginx_mode'];
+        }
+        $gatewayPort = $this->businessPort();
+        $expectedPort = (int)($plan['port'] ?? 0);
+        if ($gatewayPort <= 0 || $expectedPort <= 0) {
+            return ['healthy' => false, 'reason' => 'invalid_probe_port'];
+        }
+
+        $probePath = self::INTERNAL_UPSTREAM_CUTOVER_PROBE_PATH . '?expect_port=' . $expectedPort
+            . '&_probe_ts=' . rawurlencode((string)microtime(true));
+        $probeHost = $this->resolveManagedIngressProbeHost($gatewayPort);
+        $headers = [
+            'Host: ' . $probeHost,
+            'Connection: close',
+            'X-Scf-Cutover-Probe: 1',
+        ];
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 0.8,
+                'ignore_errors' => true,
+                'header' => implode("\r\n", $headers),
+            ],
+        ]);
+
+        $body = @file_get_contents('http://127.0.0.1:' . $gatewayPort . $probePath, false, $context);
+        if (!is_string($body) || $body === '') {
+            return ['healthy' => false, 'reason' => 'gateway_ingress_unreachable'];
+        }
+
+        $statusCode = 0;
+        foreach ((array)($http_response_header ?? []) as $headerLine) {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', (string)$headerLine, $matches)) {
+                $statusCode = (int)($matches[1] ?? 0);
+                break;
+            }
+        }
+        if ($statusCode !== 200) {
+            return [
+                'healthy' => false,
+                'reason' => 'gateway_ingress_non_200',
+                'status_code' => $statusCode,
+                'probe_host' => $probeHost,
+            ];
+        }
+
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded) || json_last_error() !== JSON_ERROR_NONE) {
+            return ['healthy' => false, 'reason' => 'gateway_ingress_invalid_json'];
+        }
+        if ((int)($decoded['errCode'] ?? -1) !== 0) {
+            return ['healthy' => false, 'reason' => 'gateway_ingress_error_payload'];
+        }
+        $actualPort = (int)($decoded['data']['upstream_port'] ?? 0);
+        if ($actualPort !== $expectedPort) {
+            return [
+                'healthy' => false,
+                'reason' => 'gateway_ingress_target_mismatch',
+                'expected_port' => $expectedPort,
+                'actual_port' => $actualPort,
+                'probe_host' => $probeHost,
+            ];
+        }
+        return ['healthy' => true, 'reason' => 'ok'];
+    }
+
+    /**
+     * 为入口切流探针生成 Host 头。
+     *
+     * 切流校验请求应尽量命中与真实外部流量一致的 nginx server block。若配置了
+     * `gateway_nginx_server_name`，优先选取其中首个确定主机名；否则回退到
+     * `127.0.0.1:{gatewayPort}`。
+     *
+     * @param int $gatewayPort gateway 业务入口端口
+     * @return string Host 头值
+     */
+    protected function resolveManagedIngressProbeHost(int $gatewayPort): string {
+        if (method_exists($this, 'resolvedGatewayIngressProbeHost')) {
+            $resolved = (string)$this->resolvedGatewayIngressProbeHost($gatewayPort);
+            if ($resolved !== '') {
+                return $resolved;
+            }
+        }
+        return '127.0.0.1:' . $gatewayPort;
     }
 
     /**
@@ -395,10 +787,10 @@ trait GatewayManagedUpstreamLifecycleTrait {
         if (($generation['status'] ?? '') !== 'draining') {
             return;
         }
-        Console::info(
-            "【Gateway】旧业务实例进入 draining: generation={$version}, "
-            . "started_at=" . (int)($generation['drain_started_at'] ?? 0)
-            . ", deadline_at=" . (int)($generation['drain_deadline_at'] ?? 0)
+        $this->logOldInstanceLifecycle(
+            "【Gateway】进入draining: started_at=" . (int)($generation['drain_started_at'] ?? 0)
+            . ", deadline_at=" . (int)($generation['drain_deadline_at'] ?? 0),
+            $this->oldGenerationRepresentativePort($version)
         );
     }
 
@@ -416,85 +808,127 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
         $status = (string)($generation['status'] ?? '');
         if ($status === 'draining') {
-            Console::info("【Gateway】旧业务实例保持服务尾流，待 nginx 切换稳定且无在途请求后再进入 shutdown: previous={$version}");
+            $this->logOldInstanceLifecycle(
+                "【Gateway】保持尾流，待切流稳定后进入shutdown",
+                $this->oldGenerationRepresentativePort($version)
+            );
             $this->logDrainingGenerationSchedule($version);
             return;
         }
         if ($status === 'offline') {
-            Console::info("【Gateway】旧业务实例已不可达或已无尾流，直接进入回收: previous={$version}");
+            $this->logOldInstanceLifecycle(
+                "【Gateway】实例不可达或无尾流，直接进入回收",
+                $this->oldGenerationRepresentativePort($version)
+            );
         }
     }
 
     /**
-     * 请求 supervisor 回收一个 managed plan。
+     * 启动一个 managed plan 的异步回收流程。
+     *
+     * 先投递 graceful shutdown，再由 pending/quarantine/reaper 状态机持续收口，
+     * 避免单个顽固进程阻塞 gateway 主链路。
      *
      * @param array<string, mixed> $plan 目标 managed plan
      * @param bool $removeState 回收完成后是否从 registry 中移除实例状态
      * @param bool $removePlan 回收完成后是否从内存计划表中移除
+     * @param array<string, mixed> $recycleOptions 回收时序覆盖参数：
+     *                                              - force_after_seconds
+     *                                              - quarantine_after_seconds
      * @return void
      */
-    protected function stopManagedPlan(array $plan, bool $removeState = true, bool $removePlan = true): void {
+    protected function stopManagedPlan(array $plan, bool $removeState = true, bool $removePlan = true, array $recycleOptions = []): void {
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
-        $plan = $this->hydrateManagedPlanRuntimeMetadata($plan);
-        $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
-        $descriptor = $this->managedPlanDescriptor($plan);
-
-        if ($this->upstreamSupervisor) {
-            if (isset($this->pendingManagedRecycles[$key])) {
-                return;
-            }
-            unset($this->managedUpstreamHealthState[$key]);
-            if (!$this->upstreamSupervisor->sendCommand([
-                'action' => 'stop_instance',
-                'instance' => [
-                    'version' => (string)($plan['version'] ?? ''),
-                    'host' => $host,
-                    'port' => $port,
-                    'rpc_port' => (int)($plan['rpc_port'] ?? 0),
-                    'metadata' => [
-                        'managed' => true,
-                        'rpc_port' => (int)($plan['rpc_port'] ?? 0),
-                        'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
-                    ],
-                ],
-            ])) {
-                Console::warning("【Gateway】旧业务实例回收命令发送失败 {$descriptor}");
-                return;
-            }
-            $this->pendingManagedRecycles[$key] = [
-                'plan' => $plan,
-                'remove_state' => $removeState,
-                'remove_plan' => $removePlan,
-                'requested_at' => time(),
-            ];
-            unset($this->pendingManagedRecycleWarnState[$key]);
-            $this->ensurePendingManagedRecycleWatcher($key);
-            Console::info("【Gateway】开始回收旧业务实例 {$descriptor}");
+        $endpointKey = $this->managedRecycleEndpointKey($host, $port);
+        if (!$this->reserveManagedRecycleEndpoint($endpointKey)) {
             return;
-        } elseif ($this->launcher) {
-            $rpcPort = (int)($plan['rpc_port'] ?? 0);
-            $this->launcher->stop([
-                'host' => $host,
-                'port' => $port,
-                'rpc_port' => $rpcPort,
-                'metadata' => [
-                    'managed' => true,
-                    'rpc_port' => $rpcPort,
-                    'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
-                ],
-            ], AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS);
         }
+        try {
+            $plan = $this->hydrateManagedPlanRuntimeMetadata($plan);
+            $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
+            $existingEndpointKey = $this->findManagedRecycleKeyByEndpoint($host, $port);
 
-        if ($removeState) {
-            $this->instanceManager->removeInstance($host, $port);
-        }
-        unset($this->bootstrappedManagedInstances[$key]);
-        if ($removePlan) {
-            $this->removeManagedPlan($plan);
-        }
-        if ($port > 0) {
-            Console::success("【Gateway】旧业务实例回收完成 {$descriptor}");
+            // 回收去重必须以“端点(host:port)”为主键，而不是 version。
+            // 旧实例版本字符串在 draining/offline 迁移期间可能发生变化，若仅按 version@host:port
+            // 去重，会出现同一端口并存两条 pending 项，导致同一秒重复执行 SIGKILL。
+            if ($existingEndpointKey !== null || isset($this->pendingManagedRecycles[$key]) || isset($this->quarantinedManagedRecycles[$key])) {
+                return;
+            }
+
+            unset($this->managedUpstreamHealthState[$key]);
+            if ($this->launcher) {
+                $requestedAt = time();
+                $forceAfterSeconds = array_key_exists('force_after_seconds', $recycleOptions)
+                    ? max(3, (int)$recycleOptions['force_after_seconds'])
+                    : $this->managedRecycleForceAfterSeconds();
+                $gracefulAccepted = $this->launcher->requestManagedGracefulShutdown($plan, 1.0);
+                $quarantineAfterSeconds = array_key_exists('quarantine_after_seconds', $recycleOptions)
+                    ? max($forceAfterSeconds + 30, (int)$recycleOptions['quarantine_after_seconds'])
+                    : $this->managedRecycleQuarantineAfterSeconds($forceAfterSeconds);
+                $nextForceElapsed = min($forceAfterSeconds, $this->managedRecycleInitialForceWindowSeconds());
+                if (!$gracefulAccepted) {
+                    $this->logOldInstanceLifecycle("【Gateway】优雅回收请求未响应，进入异步兜底", $port);
+                }
+                $this->pendingManagedRecycles[$key] = [
+                    'plan' => $plan,
+                    'remove_state' => $removeState,
+                    'remove_plan' => $removePlan,
+                    'requested_at' => $requestedAt,
+                    'force_after_seconds' => $forceAfterSeconds,
+                    'quarantine_after_seconds' => $quarantineAfterSeconds,
+                    'force_attempts' => 0,
+                    'last_force_at' => 0,
+                    'next_force_elapsed' => $nextForceElapsed,
+                    'graceful_accepted' => $gracefulAccepted,
+                ];
+                unset($this->pendingManagedRecycleWarnState[$key], $this->pendingManagedRecycleCompletions[$key]);
+                $this->ensurePendingManagedRecycleWatcher($key);
+                $this->logOldInstanceLifecycle(
+                    "【Gateway】开始异步回收: force_after={$forceAfterSeconds}s, quarantine_after={$quarantineAfterSeconds}s, "
+                    . "force_windows={$nextForceElapsed}s->2x...->deadline",
+                    $port
+                );
+                return;
+            } elseif ($this->upstreamSupervisor) {
+                if (!$this->upstreamSupervisor->sendCommand([
+                    'action' => 'stop_instance',
+                    'owner_epoch' => $this->gatewayLeaseEpoch(),
+                    'grace_seconds' => self::ROLLING_DRAIN_GRACE_SECONDS,
+                    'instance' => [
+                        'version' => (string)($plan['version'] ?? ''),
+                        'host' => $host,
+                        'port' => $port,
+                        'rpc_port' => (int)($plan['rpc_port'] ?? 0),
+                        'metadata' => [
+                            'managed' => true,
+                            'rpc_port' => (int)($plan['rpc_port'] ?? 0),
+                            'pid' => (int)(($plan['metadata']['pid'] ?? 0)),
+                            'owner_epoch' => (int)(($plan['metadata']['owner_epoch'] ?? 0)),
+                        ],
+                    ],
+                ])) {
+                    $this->logOldInstanceLifecycle("【Gateway】回收命令发送失败", $port);
+                    return;
+                }
+                $this->logOldInstanceLifecycle("【Gateway】已交由supervisor回收", $port);
+                return;
+            } else {
+                $this->logOldInstanceLifecycle("【Gateway】缺少回收执行器，无法继续回收", $port);
+            }
+
+            if ($removeState) {
+                $this->instanceManager->removeInstance($host, $port);
+            }
+            unset($this->bootstrappedManagedInstances[$key]);
+            if ($removePlan) {
+                $this->removeManagedPlan($plan);
+            }
+            if ($port > 0) {
+                $this->logOldInstanceLifecycle("【Gateway】回收完成", $port);
+            }
+        } finally {
+            $this->releaseManagedRecycleEndpoint($endpointKey);
         }
     }
 
@@ -595,7 +1029,27 @@ trait GatewayManagedUpstreamLifecycleTrait {
     }
 
     /**
-     * 归一化计划里的额外启动参数，确保 dev/pack/src/gateway_port 语义能继承到子进程。
+     * 给 managed plan 注入当前 gateway 租约绑定信息。
+     *
+     * 每个 upstream 在启动参数里都要携带 `gateway_epoch/gateway_port`，运行期才能
+     * 在独立进程里校验 owner lease，避免 gateway 异常退出后遗留孤儿实例。
+     *
+     * @param array<string, mixed> $plan managed plan
+     * @return array<string, mixed>
+     */
+    protected function withManagedPlanLeaseBinding(array $plan): array {
+        $metadata = (array)($plan['metadata'] ?? []);
+        if ($this->gatewayLeaseEpoch() > 0) {
+            $metadata['owner_epoch'] = $this->gatewayLeaseEpoch();
+        }
+        $metadata['gateway_port'] = $this->businessPort();
+        $plan['metadata'] = $metadata;
+        $plan['extra'] = $this->normalizeManagedPlanExtraFlags($plan);
+        return $plan;
+    }
+
+    /**
+     * 归一化计划里的额外启动参数，确保 dev/pack/src/gateway lease 语义能继承到子进程。
      *
      * @param array<string, mixed> $plan managed plan
      * @return array<int, string>
@@ -618,12 +1072,18 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $hasPhar = false;
         $hasPackMode = false;
         $hasGatewayPort = false;
+        $hasGatewayEpoch = false;
+        $hasGatewayLeaseGrace = false;
+        $hasGatewayRestartGrace = false;
         foreach ($flags as $flag) {
             $hasDev = $hasDev || $flag === '-dev';
             $hasDir = $hasDir || $flag === '-dir';
             $hasPhar = $hasPhar || $flag === '-phar';
             $hasPackMode = $hasPackMode || in_array($flag, ['-pack', '-nopack'], true);
             $hasGatewayPort = $hasGatewayPort || str_starts_with($flag, '-gateway_port=');
+            $hasGatewayEpoch = $hasGatewayEpoch || str_starts_with($flag, '-gateway_epoch=');
+            $hasGatewayLeaseGrace = $hasGatewayLeaseGrace || str_starts_with($flag, '-gateway_lease_grace=');
+            $hasGatewayRestartGrace = $hasGatewayRestartGrace || str_starts_with($flag, '-gateway_restart_grace=');
         }
 
         if (!$hasDev && SERVER_RUN_ENV === 'dev') {
@@ -642,6 +1102,15 @@ trait GatewayManagedUpstreamLifecycleTrait {
         }
         if (!$hasGatewayPort && $this->businessPort() > 0) {
             $flags[] = '-gateway_port=' . $this->businessPort();
+        }
+        if (!$hasGatewayEpoch && $this->gatewayLeaseEpoch() > 0) {
+            $flags[] = '-gateway_epoch=' . $this->gatewayLeaseEpoch();
+        }
+        if (!$hasGatewayLeaseGrace && $this->gatewayLeaseGraceSeconds > 0) {
+            $flags[] = '-gateway_lease_grace=' . $this->gatewayLeaseGraceSeconds;
+        }
+        if (!$hasGatewayRestartGrace && $this->gatewayLeaseRestartGraceSeconds > 0) {
+            $flags[] = '-gateway_restart_grace=' . $this->gatewayLeaseRestartGraceSeconds;
         }
 
         $normalized = [];
@@ -685,9 +1154,22 @@ trait GatewayManagedUpstreamLifecycleTrait {
      * @return array<int, int>
      */
     protected function collectReservedPorts(): array {
+        $this->sweepManagedRecyclePortCooldowns();
         $ports = [$this->port];
         if ($this->rpcPort > 0) {
             $ports[] = $this->rpcPort;
+        }
+        foreach ($this->managedRecyclePortCooldowns as $port => $expiresAt) {
+            if ((int)$expiresAt > time()) {
+                $ports[] = (int)$port;
+            }
+        }
+        foreach ($this->quarantinedManagedRecycles as $item) {
+            $plan = (array)($item['plan'] ?? []);
+            $quarantinedHttpPort = (int)($plan['port'] ?? 0);
+            $quarantinedRpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
+            $quarantinedHttpPort > 0 and $ports[] = $quarantinedHttpPort;
+            $quarantinedRpcPort > 0 and $ports[] = $quarantinedRpcPort;
         }
         foreach ($this->managedUpstreamPlans as $plan) {
             $planPort = (int)($plan['port'] ?? 0);
@@ -696,14 +1178,72 @@ trait GatewayManagedUpstreamLifecycleTrait {
             $planRpcPort > 0 and $ports[] = $planRpcPort;
         }
         foreach (($this->instanceManager->snapshot()['generations'] ?? []) as $generation) {
+            $status = (string)($generation['status'] ?? '');
+            $isLiveGeneration = in_array($status, ['active', 'prepared', 'draining'], true);
             foreach (($generation['instances'] ?? []) as $instance) {
                 $instancePort = (int)($instance['port'] ?? 0);
                 $instanceRpcPort = (int)(($instance['metadata']['rpc_port'] ?? 0));
+                if (!$isLiveGeneration) {
+                    // offline 代际里的历史端口不应长期占用端口池，否则会导致“端口
+                    // 明明可用却一直扫不到”的假失败。仅当端口现在仍被监听时才保留。
+                    $httpInUse = $instancePort > 0 && \Scf\Core\Server::isPortInUse($instancePort, '127.0.0.1');
+                    $rpcInUse = $instanceRpcPort > 0 && \Scf\Core\Server::isPortInUse($instanceRpcPort, '127.0.0.1');
+                    if (!$httpInUse && !$rpcInUse) {
+                        continue;
+                    }
+                }
                 $instancePort > 0 and $ports[] = $instancePort;
                 $instanceRpcPort > 0 and $ports[] = $instanceRpcPort;
             }
         }
         return array_values(array_unique(array_filter($ports)));
+    }
+
+    /**
+     * 清理过期端口冷却项，避免历史隔离端口永久占用分配池。
+     *
+     * @return void
+     */
+    protected function sweepManagedRecyclePortCooldowns(): void {
+        if (!$this->managedRecyclePortCooldowns) {
+            return;
+        }
+        $now = time();
+        foreach ($this->managedRecyclePortCooldowns as $port => $expiresAt) {
+            if ((int)$expiresAt <= $now) {
+                unset($this->managedRecyclePortCooldowns[$port]);
+            }
+        }
+    }
+
+    /**
+     * 把端口放入冷却窗口，避免刚回收失败/恢复的端口被立即复用。
+     *
+     * @param int $port 端口号。
+     * @param int|null $ttlSeconds 冷却时长；为空时走配置默认值。
+     * @return void
+     */
+    protected function markManagedRecyclePortCooldown(int $port, ?int $ttlSeconds = null): void {
+        if ($port <= 0) {
+            return;
+        }
+        $ttlSeconds = is_int($ttlSeconds)
+            ? max(10, $ttlSeconds)
+            : $this->managedRecyclePortCooldownSeconds();
+        $expiresAt = time() + $ttlSeconds;
+        $existing = (int)($this->managedRecyclePortCooldowns[$port] ?? 0);
+        if ($existing < $expiresAt) {
+            $this->managedRecyclePortCooldowns[$port] = $expiresAt;
+        }
+    }
+
+    /**
+     * 读取“端口冷却窗口”配置。
+     *
+     * @return int
+     */
+    protected function managedRecyclePortCooldownSeconds(): int {
+        return max(30, (int)(\Scf\Core\Config::server()['gateway_managed_recycle_port_cooldown'] ?? 300));
     }
 
     /**
@@ -715,19 +1255,23 @@ trait GatewayManagedUpstreamLifecycleTrait {
      */
     protected function allocateManagedPort(int $startPort, array $reserved): int {
         $port = max(1025, $startPort);
-        while (true) {
-            if (in_array($port, $reserved, true)) {
+        if (!$this->launcher) {
+            while (in_array($port, $reserved, true)) {
                 $port++;
-                continue;
-            }
-            if (!$this->launcher) {
-                return $port;
-            }
-            if ($this->launcher->isListening('127.0.0.1', $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1)) {
-                $port++;
-                continue;
             }
             return $port;
+        }
+        try {
+            return $this->launcher->findAvailablePortAvoiding('127.0.0.1', $port, $reserved, 4000);
+        } catch (Throwable) {
+            // 第一段扫描失败后，跳到 gateway 业务端口附近再给一次更大窗口，
+            // 避免历史连续端口区把滚动重启卡死在单一递增区间。
+            $fallbackStart = max(1025, $this->businessPort() + 16);
+            if ($fallbackStart <= $port) {
+                $fallbackStart = $port + 1;
+            }
+            Console::warning("【Gateway】业务实例端口主扫描失败，尝试扩展区间: start={$port}, fallback_start={$fallbackStart}");
+            return $this->launcher->findAvailablePortAvoiding('127.0.0.1', $fallbackStart, $reserved, 20000);
         }
     }
 
@@ -869,6 +1413,42 @@ trait GatewayManagedUpstreamLifecycleTrait {
     }
 
     /**
+     * 统一输出旧实例生命周期日志。
+     *
+     * 旧实例日志统一带 `#U{port}` 前缀并使用灰色，便于与当前 active 实例日志区分，
+     * 同时保证 dashboard/终端看到的文案一致。
+     *
+     * @param string $message 日志正文（含模块前缀）
+     * @param int $port 旧实例端口
+     * @return void
+     */
+    protected function logOldInstanceLifecycle(string $message, int $port = 0): void {
+        $prefix = $port > 0 ? "#U{$port} " : '#U ';
+        Console::log($prefix . $message, true, 'gray');
+    }
+
+    /**
+     * 从 generation 快照中解析一个可用于日志前缀的旧实例端口。
+     *
+     * @param string $version generation 版本号
+     * @return int
+     */
+    protected function oldGenerationRepresentativePort(string $version): int {
+        if ($version === '') {
+            return 0;
+        }
+        $snapshot = $this->instanceManager->snapshot();
+        $generation = (array)(($snapshot['generations'] ?? [])[$version] ?? []);
+        foreach ((array)($generation['instances'] ?? []) as $instance) {
+            $port = (int)($instance['port'] ?? 0);
+            if ($port > 0) {
+                return $port;
+            }
+        }
+        return 0;
+    }
+
+    /**
      * 在新代切流成功后，让旧业务实例停止接收新业务。
      *
      * @param array<string, mixed> $plan 旧 generation 对应的 managed plan
@@ -899,43 +1479,79 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 (!$reachability['http_listening'] && !$reachability['rpc_listening'])
                 || (!$probe['healthy'] && in_array((string)($probe['reason'] ?? ''), $unrecoverableReasons, true))
             ) {
-                Console::warning(
-                    "【Gateway】旧业务实例已不可达，直接进入回收: " . $this->managedPlanDescriptor($plan)
-                    . ", reason=" . (string)($probe['reason'] ?? 'unknown')
+                $this->logOldInstanceLifecycle(
+                    "【Gateway】实例不可达，直接进入回收: reason=" . (string)($probe['reason'] ?? 'unknown')
                     . ", http=" . ($reachability['http_listening'] ? 'listening' : 'down')
                     . ", rpc=" . ($reachability['rpc_port'] > 0 ? ($reachability['rpc_listening'] ? 'listening' : 'down') : 'n/a')
-                    . ", process=" . ($reachability['pid_alive'] ? 'alive' : 'down')
+                    . ", process=" . ($reachability['pid_alive'] ? 'alive' : 'down'),
+                    $port
                 );
                 $this->instanceManager->markInstanceOffline($host, $port, $version);
                 $this->stopManagedPlan($plan, true);
                 return;
             }
-            Console::warning("【Gateway】旧业务实例业务平面静默失败: " . $this->managedPlanDescriptor($plan));
+            $this->logOldInstanceLifecycle("【Gateway】业务平面静默失败", $port);
             return;
         }
         $runtimeStatus = $this->fetchUpstreamRuntimeStatus($plan);
+        $runtimeMasterPid = (int)($runtimeStatus['master_pid'] ?? 0);
+        $runtimeManagerPid = (int)($runtimeStatus['manager_pid'] ?? 0);
+        if ($runtimeMasterPid > 0 || $runtimeManagerPid > 0) {
+            $pidPatch = [];
+            if ($runtimeMasterPid > 0) {
+                // 回收链统一以 upstream master pid 作为主 PID，避免 TERM/KILL 只打到 manager
+                // 触发 master 补拉 worker，出现“旧实例关闭后又启动”的连锁。
+                $pidPatch['pid'] = $runtimeMasterPid;
+                $pidPatch['master_pid'] = $runtimeMasterPid;
+            }
+            if ($runtimeManagerPid > 0) {
+                $pidPatch['manager_pid'] = $runtimeManagerPid;
+            }
+            $this->instanceManager->mergeInstanceMetadata($host, $port, $pidPatch);
+            $this->mergeManagedPlanMetadata($host, $port, $pidPatch);
+            $plan['metadata'] = array_merge((array)($plan['metadata'] ?? []), $pidPatch);
+        }
         $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
         $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0);
         $rpcProcessing = (int)($runtimeStatus['rpc_request_processing'] ?? 0);
-        Console::info(
-            "【Gateway】旧业务实例开始平滑回收: " . $this->managedPlanDescriptor($plan)
-            . ", ws=" . $gatewayWs
-            . ", http=" . $httpProcessing
-            . ", rpc=" . $rpcProcessing
-            . ", queue=" . (int)($runtimeStatus['redis_queue_processing'] ?? 0)
-            . ", crontab=" . (int)($runtimeStatus['crontab_busy'] ?? 0)
+        $queueProcessing = (int)($runtimeStatus['redis_queue_processing'] ?? 0);
+        $crontabBusy = (int)($runtimeStatus['crontab_busy'] ?? 0);
+        $mysqlInflight = (int)($runtimeStatus['mysql_inflight'] ?? 0);
+        $redisInflight = (int)($runtimeStatus['redis_inflight'] ?? 0);
+        $outboundHttpInflight = (int)($runtimeStatus['outbound_http_inflight'] ?? 0);
+        $inflightTotal = $httpProcessing + $rpcProcessing + $mysqlInflight + $redisInflight + $outboundHttpInflight;
+        $this->logOldInstanceLifecycle(
+            "【Gateway】开始平滑回收: ws=" . $gatewayWs
+            . ", inflight={$inflightTotal}"
+            . ", queue=" . $queueProcessing
+            . ", crontab=" . $crontabBusy
+            . ", http={$httpProcessing}, rpc={$rpcProcessing}",
+            $port
         );
         $disconnected = $this->disconnectManagedPlanClients($plan);
         if ($disconnected > 0) {
             $gatewayWs = $this->instanceManager->gatewayConnectionCountFor($version, $host, $port);
-            Console::info(
-                "【Gateway】旧业务实例客户端连接已主动断开: " . $this->managedPlanDescriptor($plan)
-                . ", disconnected={$disconnected}, remaining_ws={$gatewayWs}"
+            $this->logOldInstanceLifecycle(
+                "【Gateway】已主动断开客户端: disconnected={$disconnected}, remaining_ws={$gatewayWs}",
+                $port
             );
         }
-        if ($gatewayWs === 0 && $httpProcessing === 0 && $rpcProcessing === 0) {
-            Console::info("【Gateway】旧业务实例已无在途请求，立即进入 shutdown: " . $this->managedPlanDescriptor($plan));
-            $this->stopManagedPlan($plan, true);
+        // 旧代已经不再承接流量时，立即进入异步回收窗口序列（5/10/20/40...）。
+        // 这样可以保证“尽快收口”与“30 分钟 deadline 无条件清理”同时成立。
+        if (
+            $gatewayWs === 0
+            && $httpProcessing === 0
+            && $rpcProcessing === 0
+            && $queueProcessing === 0
+            && $crontabBusy === 0
+            && $mysqlInflight === 0
+            && $redisInflight === 0
+            && $outboundHttpInflight === 0
+        ) {
+            $this->logOldInstanceLifecycle("【Gateway】无在途请求，立即进入shutdown", $port);
+            $this->stopManagedPlan($plan, true, true, [
+                'force_after_seconds' => $this->managedRecycleForceAfterWhenIdleSeconds(),
+            ]);
         }
     }
 
@@ -989,7 +1605,8 @@ trait GatewayManagedUpstreamLifecycleTrait {
             $this->launcher->isListening($host, $rpcPort, 0.2)
             || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2)
         );
-        $pidAlive = $pid > 0 && Process::kill($pid, 0);
+        // 回收链必须按“真实存活”判定，僵尸进程不应继续占用 pending/quarantine 状态。
+        $pidAlive = $pid > 0 && $this->launcher->isProcessAlive($pid);
 
         return [
             'http_listening' => $httpListening,
@@ -1007,6 +1624,8 @@ trait GatewayManagedUpstreamLifecycleTrait {
     protected function cleanupOfflineManagedUpstreams(): void {
         $snapshot = $this->instanceManager->snapshot();
         $removedVersions = [];
+        $removedVersionPorts = [];
+        $offlineForceAfterSeconds = $this->managedOfflineRecycleForceAfterSeconds();
         foreach (($snapshot['generations'] ?? []) as $generation) {
             if (($generation['status'] ?? '') !== 'offline') {
                 continue;
@@ -1024,11 +1643,22 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 if ($this->isManagedPlanRecyclePending($plan)) {
                     continue;
                 }
-                $this->stopManagedPlan($plan);
+                // offline 代际已经不承接入口流量，只做后台收口。
+                // 这里统一收紧强制窗口，避免“无业务请求但旧代长期驻留”。
+                $this->stopManagedPlan($plan, true, true, [
+                    'force_after_seconds' => $offlineForceAfterSeconds,
+                ]);
             }
             $version = (string)($generation['version'] ?? '');
             if ($this->hasPendingRecycleForVersion($version)) {
                 continue;
+            }
+            foreach ((array)($generation['instances'] ?? []) as $instance) {
+                $instancePort = (int)($instance['port'] ?? 0);
+                if ($instancePort > 0) {
+                    $removedVersionPorts[$version] = $instancePort;
+                    break;
+                }
             }
             $this->instanceManager->removeVersion($version);
             if ($version !== '') {
@@ -1039,7 +1669,12 @@ trait GatewayManagedUpstreamLifecycleTrait {
             if ($this->startupSummaryPending()) {
                 $this->recordStartupRemovedGenerations($removedVersions);
             } else {
-                Console::success("【Gateway】旧业务实例代际已移除: count=" . count($removedVersions) . ", generations=" . implode(' | ', $removedVersions));
+                foreach ($removedVersions as $removedVersion) {
+                    $this->logOldInstanceLifecycle(
+                        "【Gateway】旧实例代际已移除: generation={$removedVersion}",
+                        (int)($removedVersionPorts[$removedVersion] ?? 0)
+                    );
+                }
             }
         }
     }
@@ -1055,6 +1690,11 @@ trait GatewayManagedUpstreamLifecycleTrait {
         }
 
         foreach (array_keys($this->pendingManagedRecycles) as $key) {
+            // 正常路径由 per-key watcher 驱动；主循环只兜底“意外缺 watcher”的项，
+            // 避免同一回收项在同一轮被双重推进，导致重复 SIGTERM/SIGKILL 日志与重试抖动。
+            if (isset($this->pendingManagedRecycleWatchers[$key])) {
+                continue;
+            }
             $this->checkPendingManagedRecycle($key);
         }
     }
@@ -1109,37 +1749,277 @@ trait GatewayManagedUpstreamLifecycleTrait {
         if (!$this->launcher || !isset($this->pendingManagedRecycles[$key])) {
             return true;
         }
-        if (($this->pendingManagedRecycleCompletions[$key] ?? false) === true) {
+        if (($this->pendingManagedRecycleCheckInFlight[$key] ?? false) === true) {
             return false;
         }
+        $this->pendingManagedRecycleCheckInFlight[$key] = true;
+        try {
+            if (($this->pendingManagedRecycleCompletions[$key] ?? false) === true) {
+                return false;
+            }
 
-        $item = $this->pendingManagedRecycles[$key];
-        $plan = (array)($item['plan'] ?? []);
+            $item = $this->pendingManagedRecycles[$key];
+            $plan = (array)($item['plan'] ?? []);
+        // pending recycle 可能在创建时拿到的是旧 runtime 快照（例如 pid 仍是 manager）。
+        // 每轮都用最新 registry/runtime 元数据回填，确保强制回收始终命中当前 master pid，
+        // 避免“杀了 manager 又被 master 拉起 worker”的反复重启现象。
+        $latestPlan = $this->hydrateManagedPlanRuntimeMetadata($plan);
+        if ($latestPlan !== $plan) {
+            $plan = $latestPlan;
+            $item['plan'] = $plan;
+            $this->pendingManagedRecycles[$key] = $item;
+        }
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
         $rpcPort = (int)($plan['rpc_port'] ?? 0);
-        $httpAlive = $port > 0 && ($this->launcher->isListening($host, $port, 0.1) || $this->launcher->isListening('0.0.0.0', $port, 0.1));
-        $rpcAlive = $rpcPort > 0 && ($this->launcher->isListening($host, $rpcPort, 0.1) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.1));
-        if ($httpAlive || $rpcAlive) {
-            $requestedAt = (int)($item['requested_at'] ?? time());
-            $elapsed = max(0, time() - $requestedAt);
+        $reachability = $this->managedPlanReachability($plan);
+        $httpAlive = $port > 0 && ($reachability['http_listening'] ?? false);
+        $rpcAlive = $rpcPort > 0 && ($reachability['rpc_listening'] ?? false);
+        $pidAlive = (bool)($reachability['pid_alive'] ?? false);
+        $requestedAt = (int)($item['requested_at'] ?? time());
+        $elapsed = max(0, time() - $requestedAt);
+        $forceAfter = max(10, (int)($item['force_after_seconds'] ?? $this->managedRecycleForceAfterSeconds()));
+        $quarantineAfter = max(
+            $forceAfter + 30,
+            (int)($item['quarantine_after_seconds'] ?? $this->managedRecycleQuarantineAfterSeconds($forceAfter))
+        );
+        if ($httpAlive || $rpcAlive || $pidAlive) {
+            $runtimeStatus = $this->fetchUpstreamRuntimeStatus($plan);
+            $runtimeSource = 'live';
+            if ($runtimeStatus === []) {
+                // 旧实例在 shutdown 阶段可能先于回收状态机停止响应状态接口。
+                // 这里允许短时回退到最近一次 runtime 快照，避免窗口判断因“采样空洞”
+                // 被迫拖到更晚轮次甚至 deadline。
+                $cachedRuntime = $this->instanceManager->instanceRuntimeStatus($host, $port, 15);
+                if ($cachedRuntime) {
+                    $runtimeStatus = $cachedRuntime;
+                    $runtimeSource = 'cache';
+                } else {
+                    $runtimeSource = 'unavailable';
+                }
+            }
+            $runtimeStatusAvailable = $runtimeStatus !== [];
+            $gatewayWs = $this->instanceManager->gatewayConnectionCountFor((string)($plan['version'] ?? ''), $host, $port);
+            $httpProcessing = (int)($runtimeStatus['http_request_processing'] ?? 0);
+            $rpcProcessing = (int)($runtimeStatus['rpc_request_processing'] ?? 0);
+            $queueProcessing = (int)($runtimeStatus['redis_queue_processing'] ?? 0);
+            $crontabBusy = (int)($runtimeStatus['crontab_busy'] ?? 0);
+            $mysqlInflight = (int)($runtimeStatus['mysql_inflight'] ?? 0);
+            $redisInflight = (int)($runtimeStatus['redis_inflight'] ?? 0);
+            $outboundHttpInflight = (int)($runtimeStatus['outbound_http_inflight'] ?? 0);
+            $serverConnectionNum = (int)(($runtimeStatus['server_stats']['connection_num'] ?? 0));
+            $inflightTotal = $httpProcessing + $rpcProcessing + $mysqlInflight + $redisInflight + $outboundHttpInflight;
+            $noInflight = $runtimeStatusAvailable
+                && $httpProcessing === 0
+                && $rpcProcessing === 0
+                && $queueProcessing === 0
+                && $crontabBusy === 0
+                && $mysqlInflight === 0
+                && $redisInflight === 0
+                && $outboundHttpInflight === 0;
+            // 回收窗口命中时，只要“无连接 + 无 inflight”就可以强制收口，
+            // 即使端口仍在 LISTEN，也不再继续等待“自退出”。
+            $windowKillEligible = $noInflight
+                && $gatewayWs === 0
+                && $serverConnectionNum === 0;
+            $deadlineReached = $elapsed >= $forceAfter;
+            $currentWindowElapsed = max(1, (int)($item['next_force_elapsed'] ?? $this->managedRecycleInitialForceWindowSeconds()));
+            $currentWindowElapsed = min($forceAfter, $currentWindowElapsed);
+            $windowDue = $elapsed >= $currentWindowElapsed;
+            $nextWindowElapsed = $currentWindowElapsed;
+            if ($windowDue || $deadlineReached) {
+                $shouldForceKill = $deadlineReached || $windowKillEligible;
+                $now = time();
+                $nextWindowElapsed = $this->managedRecycleNextForceWindowSeconds($currentWindowElapsed, $forceAfter);
+                $item['next_force_elapsed'] = $nextWindowElapsed;
+                if ($shouldForceKill) {
+                    $attempts = (int)($item['force_attempts'] ?? 0) + 1;
+                    $hard = true;
+                    $this->launcher->forceStopManagedInstance($plan, $hard);
+                    $item['force_attempts'] = $attempts;
+                    $item['last_force_at'] = $now;
+                    $this->markManagedRecyclePortCooldown($port);
+                    $rpcPort > 0 and $this->markManagedRecyclePortCooldown($rpcPort);
+                    $this->logOldInstanceLifecycle(
+                        "【Gateway】回收升级执行: phase=SIGKILL"
+                        . ", waiting={$elapsed}s, attempts={$attempts}, reason=" . ($deadlineReached ? 'deadline' : 'window_empty')
+                        . ", window={$currentWindowElapsed}s",
+                        $port
+                    );
+                } elseif ($windowDue) {
+                    $this->logOldInstanceLifecycle(
+                        "【Gateway】回收窗口命中但仍有在途，继续等待: waiting={$elapsed}s, window={$currentWindowElapsed}s"
+                        . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
+                        . ", inflight=" . ($runtimeStatusAvailable ? (string)$inflightTotal : 'n/a')
+                        . ", queue={$queueProcessing}, crontab={$crontabBusy}",
+                        $port
+                    );
+                }
+                $this->pendingManagedRecycles[$key] = $item;
+            }
+            if ($elapsed >= $quarantineAfter) {
+                $this->quarantinePendingManagedRecycle($key, $item, "recycle_timeout_{$elapsed}s");
+                return true;
+            }
             if ($elapsed >= 60) {
                 $lastWarnAt = (int)($this->pendingManagedRecycleWarnState[$key] ?? 0);
                 if ($lastWarnAt <= 0 || (time() - $lastWarnAt) >= 60) {
                     $this->pendingManagedRecycleWarnState[$key] = time();
-                    Console::warning(
-                        "【Gateway】旧业务实例回收等待中: " . $this->managedPlanDescriptor($plan)
-                        . ", waiting={$elapsed}s, http=" . ($httpAlive ? 'listening' : 'closed')
+                    $this->logOldInstanceLifecycle(
+                        "【Gateway】回收等待中: waiting={$elapsed}s, deadline={$forceAfter}s, next_window={$nextWindowElapsed}s, quarantine_after={$quarantineAfter}s"
+                        . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
+                        . ", inflight=" . ($runtimeStatusAvailable ? (string)$inflightTotal : 'n/a')
+                        . ", queue={$queueProcessing}, crontab={$crontabBusy}"
+                        . ", http=" . ($httpAlive ? 'listening' : 'closed')
                         . ", rpc=" . ($rpcAlive ? 'listening' : 'closed')
+                        . ", process=" . ($pidAlive ? 'alive' : 'down'),
+                        $port
                     );
                 }
             }
             return false;
         }
 
+            $this->completeManagedRecycle($key, $item, 'pending_drained');
+            return true;
+        } finally {
+            unset($this->pendingManagedRecycleCheckInFlight[$key]);
+        }
+    }
+
+    /**
+     * 处理已进入 quarantine 的回收项，持续执行后台收口。
+     *
+     * @return void
+     */
+    protected function drainQuarantinedManagedRecycles(): void {
+        if (!$this->launcher || !$this->quarantinedManagedRecycles) {
+            return;
+        }
+        $this->sweepManagedRecyclePortCooldowns();
+        $now = time();
+        $retryInterval = $this->managedRecycleQuarantineRetryIntervalSeconds();
+        foreach (array_keys($this->quarantinedManagedRecycles) as $key) {
+            $item = (array)($this->quarantinedManagedRecycles[$key] ?? []);
+            $plan = (array)($item['plan'] ?? []);
+            $host = (string)($plan['host'] ?? '127.0.0.1');
+            $port = (int)($plan['port'] ?? 0);
+            $rpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
+            if ($host === '' || $port <= 0) {
+                unset($this->quarantinedManagedRecycles[$key], $this->quarantinedManagedRecycleWarnState[$key]);
+                continue;
+            }
+
+            $reachability = $this->managedPlanReachability($plan);
+            $httpAlive = (bool)($reachability['http_listening'] ?? false);
+            $rpcAlive = $rpcPort > 0 && (bool)($reachability['rpc_listening'] ?? false);
+            $pidAlive = (bool)($reachability['pid_alive'] ?? false);
+            if (!$httpAlive && !$rpcAlive && !$pidAlive) {
+                $this->completeManagedRecycle($key, $item, 'quarantine_reaped');
+                continue;
+            }
+
+            $this->markManagedRecyclePortCooldown($port);
+            $rpcPort > 0 and $this->markManagedRecyclePortCooldown($rpcPort);
+            $lastRetryAt = (int)($item['last_retry_at'] ?? 0);
+            if ($lastRetryAt > 0 && ($now - $lastRetryAt) < $retryInterval) {
+                continue;
+            }
+            $retryCount = (int)($item['retry_count'] ?? 0) + 1;
+            $hard = $retryCount >= 2;
+            $this->launcher->forceStopManagedInstance($plan, $hard);
+            $item['last_retry_at'] = $now;
+            $item['retry_count'] = $retryCount;
+            $this->quarantinedManagedRecycles[$key] = $item;
+
+            $lastWarnAt = (int)($this->quarantinedManagedRecycleWarnState[$key] ?? 0);
+            if ($lastWarnAt <= 0 || ($now - $lastWarnAt) >= 60) {
+                $this->quarantinedManagedRecycleWarnState[$key] = $now;
+                $quarantinedAt = (int)($item['quarantined_at'] ?? $now);
+                $quarantinedElapsed = max(0, $now - $quarantinedAt);
+                $this->logOldInstanceLifecycle(
+                    "【Gateway】隔离态后台回收: phase=" . ($hard ? 'SIGKILL' : 'SIGTERM')
+                    . ", quarantined={$quarantinedElapsed}s, retries={$retryCount}"
+                    . ", http=" . ($httpAlive ? 'listening' : 'closed')
+                    . ", rpc=" . ($rpcAlive ? 'listening' : 'closed')
+                    . ", process=" . ($pidAlive ? 'alive' : 'down'),
+                    $port
+                );
+            }
+        }
+    }
+
+    /**
+     * 将长时间无法回收的实例转入 quarantine 隔离态。
+     *
+     * @param string $key 回收项键。
+     * @param array<string, mixed> $item 回收上下文。
+     * @param string $reason 转入隔离的原因。
+     * @return void
+     */
+    protected function quarantinePendingManagedRecycle(string $key, array $item, string $reason): void {
+        $plan = (array)($item['plan'] ?? []);
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $rpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
+        $now = time();
+        $item['quarantined_at'] = $now;
+        $item['quarantine_reason'] = $reason;
+        $item['last_retry_at'] = 0;
+        $item['retry_count'] = 0;
+        $this->quarantinedManagedRecycles[$key] = $item;
+
+        // 隔离态下先把实例从路由/计划中摘掉，避免单个顽固进程拖住主链路。
         $removeState = (bool)($item['remove_state'] ?? true);
         $removePlan = (bool)($item['remove_plan'] ?? true);
-        $this->pendingManagedRecycleCompletions[$key] = true;
+        if ($removeState) {
+            $this->instanceManager->removeInstance($host, $port);
+        } else {
+            $this->instanceManager->markInstanceOffline($host, $port, (string)($plan['version'] ?? ''));
+            $this->instanceManager->mergeInstanceMetadata($host, $port, [
+                'quarantined' => true,
+                'quarantine_reason' => $reason,
+                'quarantined_at' => $now,
+            ]);
+        }
+        unset($this->bootstrappedManagedInstances[$key]);
+        if ($removePlan) {
+            $this->removeManagedPlan($plan);
+        } else {
+            $this->mergeManagedPlanMetadata($host, $port, [
+                'quarantined' => true,
+                'quarantine_reason' => $reason,
+                'quarantined_at' => $now,
+            ]);
+        }
+        $this->markManagedRecyclePortCooldown($port);
+        $rpcPort > 0 and $this->markManagedRecyclePortCooldown($rpcPort);
+        unset(
+            $this->pendingManagedRecycleWarnState[$key],
+            $this->pendingManagedRecycles[$key],
+            $this->pendingManagedRecycleCompletions[$key]
+        );
+        $this->logOldInstanceLifecycle(
+            "【Gateway】回收超时，转入隔离态: reason={$reason}",
+            $port
+        );
+    }
+
+    /**
+     * 统一收口回收完成态，清理计划/实例与辅助状态。
+     *
+     * @param string $key 回收项键。
+     * @param array<string, mixed> $item 回收上下文。
+     * @param string $stage 完成阶段标识。
+     * @return void
+     */
+    protected function completeManagedRecycle(string $key, array $item, string $stage): void {
+        $plan = (array)($item['plan'] ?? []);
+        $host = (string)($plan['host'] ?? '127.0.0.1');
+        $port = (int)($plan['port'] ?? 0);
+        $removeState = (bool)($item['remove_state'] ?? true);
+        $removePlan = (bool)($item['remove_plan'] ?? true);
+
         if ($removeState) {
             $this->instanceManager->removeInstance($host, $port);
         }
@@ -1160,15 +2040,29 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 }
             }
         }
-        unset($this->pendingManagedRecycleWarnState[$key], $this->pendingManagedRecycles[$key], $this->pendingManagedRecycleCompletions[$key]);
+        unset(
+            $this->pendingManagedRecycleWarnState[$key],
+            $this->pendingManagedRecycles[$key],
+            $this->pendingManagedRecycleCompletions[$key],
+            $this->quarantinedManagedRecycles[$key],
+            $this->quarantinedManagedRecycleWarnState[$key]
+        );
+        if ($port > 0) {
+            $this->markManagedRecyclePortCooldown($port, 60);
+            $rpcPort = (int)($plan['rpc_port'] ?? ($plan['metadata']['rpc_port'] ?? 0));
+            $rpcPort > 0 and $this->markManagedRecyclePortCooldown($rpcPort, 60);
+        }
         if (!$this->startupSummaryPending()) {
-            Console::success("【Gateway】旧业务实例回收完成 " . $this->managedPlanDescriptor($plan));
+            $this->logOldInstanceLifecycle("【Gateway】回收完成({$stage})", $port);
         }
         if ($removedGeneration !== '') {
             if ($this->startupSummaryPending()) {
                 $this->recordStartupRemovedGenerations([$removedGeneration]);
             } else {
-                Console::success("【Gateway】旧业务实例代际已移除: count=1, generations={$removedGeneration}");
+                $this->logOldInstanceLifecycle(
+                    "【Gateway】旧实例代际已移除: generation={$removedGeneration}",
+                    $port
+                );
             }
         }
         $activeVersion = (string)($this->instanceManager->snapshot()['active_version'] ?? '');
@@ -1179,7 +2073,98 @@ trait GatewayManagedUpstreamLifecycleTrait {
             $this->managedUpstreamHealthState = [];
             $this->lastManagedUpstreamHealthCheckAt = 0;
         }
-        return true;
+    }
+
+    /**
+     * 读取“升级到强制回收”之前的等待窗口（秒）。
+     *
+     * @return int
+     */
+    protected function managedRecycleForceAfterSeconds(): int {
+        return max(
+            self::ROLLING_DRAIN_GRACE_SECONDS,
+            (int)(\Scf\Core\Config::server()['gateway_managed_recycle_force_after'] ?? AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
+        );
+    }
+
+    /**
+     * 无在途业务时的强制回收等待窗口。
+     *
+     * 仅用于“ws/http/rpc/queue/crontab 全空”的旧代收口。
+     * 默认沿用标准 30 分钟平滑窗口，只有显式配置时才缩短。
+     *
+     * @return int
+     */
+    protected function managedRecycleForceAfterWhenIdleSeconds(): int {
+        return max(
+            5,
+            (int)(\Scf\Core\Config::server()['gateway_managed_recycle_force_after_idle'] ?? AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
+        );
+    }
+
+    /**
+     * offline 代际后台回收的强制窗口。
+     *
+     * offline 代际已经从流量平面摘除，默认沿用空载快速窗口，避免旧代长期滞留。
+     *
+     * @return int
+     */
+    protected function managedOfflineRecycleForceAfterSeconds(): int {
+        return max(
+            5,
+            (int)(\Scf\Core\Config::server()['gateway_managed_offline_recycle_force_after'] ?? $this->managedRecycleForceAfterWhenIdleSeconds())
+        );
+    }
+
+    /**
+     * 读取“转入隔离态”阈值（秒）。
+     *
+     * @param int $forceAfterSeconds 强制回收起始阈值。
+     * @return int
+     */
+    protected function managedRecycleQuarantineAfterSeconds(int $forceAfterSeconds): int {
+        $configured = (int)(\Scf\Core\Config::server()['gateway_managed_recycle_quarantine_after'] ?? ($forceAfterSeconds + 120));
+        return max($forceAfterSeconds + 30, $configured);
+    }
+
+    /**
+     * 读取 pending 回收的首个强制窗口（秒）。
+     *
+     * 窗口序列按指数推进：5 -> 10 -> 20 -> 40 ... 直到 deadline。
+     *
+     * @return int
+     */
+    protected function managedRecycleInitialForceWindowSeconds(): int {
+        return max(
+            1,
+            (int)(\Scf\Core\Config::server()['gateway_managed_recycle_force_window_initial'] ?? 5)
+        );
+    }
+
+    /**
+     * 计算下一次强制窗口（秒）。
+     *
+     * @param int $currentWindow 当前窗口阈值（相对 requested_at 的秒数）。
+     * @param int $deadline 强制回收 deadline（秒）。
+     * @return int
+     */
+    protected function managedRecycleNextForceWindowSeconds(int $currentWindow, int $deadline): int {
+        $currentWindow = max(1, $currentWindow);
+        $deadline = max($currentWindow, $deadline);
+        if ($currentWindow >= $deadline) {
+            return $deadline;
+        }
+        $next = max($currentWindow + 1, $currentWindow * 2);
+        return min($deadline, $next);
+    }
+
+    /**
+     * quarantine 阶段后台 reaper 的重试间隔（秒）。
+     *
+     * @return int
+     */
+    protected function managedRecycleQuarantineRetryIntervalSeconds(): int {
+        return max(10, (int)(\Scf\Core\Config::server()['gateway_managed_recycle_quarantine_retry_interval'] ?? 30));
     }
 
     /**
@@ -1192,7 +2177,10 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
         $key = ((string)($plan['version'] ?? '') . '@' . $host . ':' . $port);
-        return isset($this->pendingManagedRecycles[$key]);
+        if (isset($this->pendingManagedRecycles[$key]) || isset($this->quarantinedManagedRecycles[$key])) {
+            return true;
+        }
+        return $this->findManagedRecycleKeyByEndpoint($host, $port) !== null;
     }
 
     /**
@@ -1211,7 +2199,92 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 return true;
             }
         }
+        foreach ($this->quarantinedManagedRecycles as $item) {
+            $plan = (array)($item['plan'] ?? []);
+            if ((string)($plan['version'] ?? '') === $version) {
+                return true;
+            }
+        }
         return false;
+    }
+
+    /**
+     * 按端点查找已存在的 recycle 键。
+     *
+     * pending/quarantine 的 map key 历史上包含 version 维度，容易出现
+     * “同端点不同 version 的重复回收项”。这里统一按 host:port 做一次归一化
+     * 查找，确保同一实例端点在任意时刻只有一条回收状态机。
+     *
+     * @param string $host 实例 host
+     * @param int $port 实例端口
+     * @return string|null 命中的 recycle key
+     */
+    protected function findManagedRecycleKeyByEndpoint(string $host, int $port): ?string {
+        if ($port <= 0) {
+            return null;
+        }
+        $endpoint = $this->managedRecycleEndpointKey($host, $port);
+        foreach ($this->pendingManagedRecycles as $existingKey => $item) {
+            $plan = (array)($item['plan'] ?? []);
+            if ($this->managedRecycleEndpointKey((string)($plan['host'] ?? '127.0.0.1'), (int)($plan['port'] ?? 0)) === $endpoint) {
+                return (string)$existingKey;
+            }
+        }
+        foreach ($this->quarantinedManagedRecycles as $existingKey => $item) {
+            $plan = (array)($item['plan'] ?? []);
+            if ($this->managedRecycleEndpointKey((string)($plan['host'] ?? '127.0.0.1'), (int)($plan['port'] ?? 0)) === $endpoint) {
+                return (string)$existingKey;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 生成回收端点的归一化键。
+     *
+     * @param string $host 实例 host
+     * @param int $port 实例端口
+     * @return string
+     */
+    protected function managedRecycleEndpointKey(string $host, int $port): string {
+        $host = strtolower(trim($host));
+        if ($host === '' || $host === 'localhost') {
+            $host = '127.0.0.1';
+        }
+        return $host . ':' . max(0, $port);
+    }
+
+    /**
+     * 预占回收端点，防止并发 stopManagedPlan 对同端点重复入队。
+     *
+     * stopManagedPlan 在写入 pending map 前会先发优雅回收请求，该步骤可能发生协程切换。
+     * 若不做端点预占，同一端口会在“map 尚未写入”的窗口被再次入队，造成重复 SIGKILL。
+     *
+     * @param string $endpointKey 端点键（host:port）
+     * @return bool true=预占成功；false=已有流程占用
+     */
+    protected function reserveManagedRecycleEndpoint(string $endpointKey): bool {
+        if ($endpointKey === '') {
+            return true;
+        }
+        if (isset($this->pendingManagedRecycleEndpointReservations[$endpointKey])) {
+            return false;
+        }
+        $this->pendingManagedRecycleEndpointReservations[$endpointKey] = time();
+        return true;
+    }
+
+    /**
+     * 释放回收端点预占。
+     *
+     * @param string $endpointKey 端点键（host:port）
+     * @return void
+     */
+    protected function releaseManagedRecycleEndpoint(string $endpointKey): void {
+        if ($endpointKey === '') {
+            return;
+        }
+        unset($this->pendingManagedRecycleEndpointReservations[$endpointKey]);
     }
 
     /**
@@ -1246,14 +2319,20 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 continue;
             }
             $this->drainingGenerationWarnState[$version] = $now;
-            Console::warning(
-                "【Gateway】旧业务实例仍在 draining，尚未进入 shutdown: generation={$version}, "
-                . "draining={$elapsed}s, ws=" . (int)($item['connections'] ?? 0)
-                . ", http=" . (int)($item['http_processing'] ?? 0)
-                . ", rpc=" . (int)($item['rpc_processing'] ?? 0)
+            $httpProcessing = (int)($item['http_processing'] ?? 0);
+            $rpcProcessing = (int)($item['rpc_processing'] ?? 0);
+            $mysqlInflight = (int)($item['mysql_inflight'] ?? 0);
+            $redisInflight = (int)($item['redis_inflight'] ?? 0);
+            $outboundHttpInflight = (int)($item['outbound_http_inflight'] ?? 0);
+            $inflightTotal = $httpProcessing + $rpcProcessing + $mysqlInflight + $redisInflight + $outboundHttpInflight;
+            $this->logOldInstanceLifecycle(
+                "【Gateway】draining超时仍未shutdown: draining={$elapsed}s, ws=" . (int)($item['connections'] ?? 0)
+                . ", inflight={$inflightTotal}"
                 . ", queue=" . (int)($item['redis_queue_processing'] ?? 0)
                 . ", crontab=" . (int)($item['crontab_busy'] ?? 0)
-                . ", deadline_at=" . (int)($item['drain_deadline_at'] ?? 0)
+                . ", http={$httpProcessing}, rpc={$rpcProcessing}"
+                . ", deadline_at=" . (int)($item['drain_deadline_at'] ?? 0),
+                $this->oldGenerationRepresentativePort($version)
             );
         }
         foreach (array_keys($this->drainingGenerationWarnState) as $version) {

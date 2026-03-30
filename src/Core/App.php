@@ -255,17 +255,33 @@ class App {
         if (!is_dir($dir)) {
             return;
         }
-        $files = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::CHILD_FIRST
-        );
-        foreach ($files as $fileinfo) {
-            $todo = ($fileinfo->isDir() ? 'rmdir' : 'unlink');
-            if (!@$todo($fileinfo->getRealPath())) {
-                Console::error("Failed to delete {$fileinfo->getRealPath()}");
-            }
+
+        try {
+            $files = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::CHILD_FIRST
+            );
+        } catch (Throwable) {
+            // 目录可能在初始化并发过程中被其他进程提前删掉，清理任务可直接跳过。
+            return;
         }
-        rmdir($dir);
+
+        try {
+            foreach ($files as $fileinfo) {
+                $path = $fileinfo->getRealPath();
+                if (!$path) {
+                    continue;
+                }
+                $todo = ($fileinfo->isDir() ? 'rmdir' : 'unlink');
+                if (!@$todo($path) && file_exists($path)) {
+                    Console::error("Failed to delete {$path}");
+                }
+            }
+        } catch (Throwable) {
+            // 遍历期间目录可能继续被并发删除，不应中断启动链路。
+        }
+
+        is_dir($dir) && @rmdir($dir);
     }
 
     /**

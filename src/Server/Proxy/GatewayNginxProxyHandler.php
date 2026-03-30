@@ -4,6 +4,7 @@ namespace Scf\Server\Proxy;
 
 use RuntimeException;
 use Scf\Core\App;
+use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Table\Runtime;
 
@@ -82,6 +83,7 @@ class GatewayNginxProxyHandler {
         $upstreamFile = $this->generatedUpstreamFile();
         $serverFile = $this->generatedServerFile();
         $exampleFile = $this->generatedExampleServerFile();
+        $conflictCleaned = $this->cleanupConflictingManagedConfigFiles();
         $globalContent = $this->renderGlobalConfig();
         $upstreamContent = $this->renderUpstreamConfig();
         $serverContent = $this->renderServerConfig();
@@ -97,7 +99,7 @@ class GatewayNginxProxyHandler {
 
         $tested = false;
         $reloaded = false;
-        $configChanged = $globalChanged || $upstreamChanged || $serverChanged || $exampleChanged;
+        $configChanged = $globalChanged || $upstreamChanged || $serverChanged || $exampleChanged || $conflictCleaned;
         $shouldEnsureRunning = $this->shouldReloadNginx() && !$this->isNginxRunning();
         $shouldForceReload = $this->shouldReloadNginx()
             && $this->isNginxRunning()
@@ -156,24 +158,38 @@ class GatewayNginxProxyHandler {
     public function startupSummaryData(): array {
         $runtimeMeta = $this->nginxRuntimeMeta();
         $disableLogs = (bool)($this->gateway->serverConfig()['gateway_nginx_disable_global_logs'] ?? true);
-        $proxyConnectTimeout = max(1, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_connect_timeout'] ?? 3));
-        $proxyIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_io_timeout'] ?? 31536000));
-        $clientIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_client_io_timeout'] ?? $proxyIoTimeout));
+        $proxyTimeouts = $this->resolveNginxProxyTimeouts();
+        $proxyConnectTimeout = $proxyTimeouts['connect_timeout'];
+        $proxyIoTimeout = $proxyTimeouts['business_io_timeout'];
+        $clientIoTimeout = $proxyTimeouts['client_io_timeout'];
         $buffering = (bool)($this->gateway->serverConfig()['gateway_nginx_proxy_buffering'] ?? true);
         $realIpHeader = trim((string)($this->gateway->serverConfig()['gateway_nginx_real_ip_header'] ?? 'X-Forwarded-For'));
         $realIpRecursive = (bool)($this->gateway->serverConfig()['gateway_nginx_real_ip_recursive'] ?? true);
         $trustedProxies = $this->trustedRealIpProxies();
         $bodyBytes = (int)($this->gateway->serverConfig()['package_max_length'] ?? 10 * 1024 * 1024);
+        $businessKeepalive = $this->resolveBusinessUpstreamKeepalive();
+        $controlKeepalive = $this->resolveControlUpstreamKeepalive();
+        $workerProcesses = $this->resolveNginxWorkerProcessCount();
+        $listenPort = $this->gateway->businessPort();
+        $serverName = trim($this->gateway->resolvedGatewayNginxServerName());
+        $defaultUpstream = $this->shouldRouteBusinessTrafficToControlPlane() ? 'control' : 'business';
 
         return [
             'bin' => (string)($runtimeMeta['bin'] ?? 'nginx'),
             'conf' => (string)($runtimeMeta['conf_path'] ?? '--'),
             'dir' => (string)($runtimeMeta['conf_dir'] ?? '--'),
+            'server' => 'listen:' . $listenPort
+                . ', server_name:' . ($serverName !== '' ? $serverName : '_')
+                . ', default_upstream:' . $defaultUpstream
+                . ', control_paths:/dashboard.socket,/_gateway,/~',
             'body' => $this->formatBytes(max(0, $bodyBytes)) . ' (' . $this->clientMaxBodySizeDirectiveValue() . ')',
             'proxy' => 'buffer:' . ($buffering ? 'on' : 'off')
                 . ', conn:' . $proxyConnectTimeout . 's'
                 . ', io:' . $proxyIoTimeout . 's'
                 . ', client:' . $clientIoTimeout . 's',
+            'upstream' => 'workers:' . $workerProcesses
+                . ', business_keepalive:' . $businessKeepalive
+                . ', control_keepalive:' . $controlKeepalive,
             'log' => 'http:' . ($disableLogs ? 'off' : 'keep')
                 . ', error:' . ($disableLogs ? '/dev/null crit' : 'keep')
                 . ', static:off',
@@ -258,9 +274,10 @@ class GatewayNginxProxyHandler {
      */
     protected function renderGlobalConfig(): string {
         $disableLogs = (bool)($this->gateway->serverConfig()['gateway_nginx_disable_global_logs'] ?? true);
-        $proxyConnectTimeout = max(1, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_connect_timeout'] ?? 3));
-        $proxyIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_io_timeout'] ?? 31536000));
-        $clientIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_client_io_timeout'] ?? $proxyIoTimeout));
+        $proxyTimeouts = $this->resolveNginxProxyTimeouts();
+        $proxyConnectTimeout = $proxyTimeouts['connect_timeout'];
+        $proxyIoTimeout = $proxyTimeouts['business_io_timeout'];
+        $clientIoTimeout = $proxyTimeouts['client_io_timeout'];
         $buffering = (bool)($this->gateway->serverConfig()['gateway_nginx_proxy_buffering'] ?? true);
         $existing = $this->existingHttpDirectives();
 
@@ -310,6 +327,8 @@ class GatewayNginxProxyHandler {
         $controlPort = $this->gateway->controlPort();
         $businessName = $this->businessUpstreamName();
         $controlName = $this->controlUpstreamName();
+        $businessKeepalive = $this->resolveBusinessUpstreamKeepalive();
+        $controlKeepalive = $this->resolveControlUpstreamKeepalive();
 
         return implode("\n", [
             '# generated by SCF Gateway',
@@ -318,12 +337,12 @@ class GatewayNginxProxyHandler {
             '',
             'upstream ' . $businessName . ' {',
             $businessServers,
-            '    keepalive 128;',
+            '    keepalive ' . $businessKeepalive . ';',
             '}',
             '',
             'upstream ' . $controlName . ' {',
             '    server ' . $controlHost . ':' . $controlPort . ' max_fails=1 fail_timeout=2s;',
-            '    keepalive 16;',
+            '    keepalive ' . $controlKeepalive . ';',
             '}',
             '',
         ]);
@@ -338,13 +357,17 @@ class GatewayNginxProxyHandler {
      * @return string nginx server block 内容。
      */
     protected function renderServerConfig(): string {
-        $serverName = (string)($this->gateway->serverConfig()['gateway_nginx_server_name'] ?? '_');
+        $serverName = $this->gateway->resolvedGatewayNginxServerName();
         $listenPort = $this->gateway->businessPort();
         $businessName = $this->businessUpstreamName();
         $controlName = $this->controlUpstreamName();
         $defaultUpstream = $this->shouldRouteBusinessTrafficToControlPlane() ? $controlName : $businessName;
         $upgradeMapVar = '$' . $this->safeToken('scf_gateway_connection_upgrade_' . APP_DIR_NAME . '_' . SERVER_ROLE . '_' . $listenPort);
         $clientMaxBodySize = $this->clientMaxBodySizeDirectiveValue();
+        $proxyTimeouts = $this->resolveNginxProxyTimeouts();
+        $businessIoTimeout = $proxyTimeouts['business_io_timeout'];
+        $controlIoTimeout = $proxyTimeouts['control_io_timeout'];
+        $dashboardSocketIoTimeout = $proxyTimeouts['dashboard_socket_io_timeout'];
         $realIpHeader = trim((string)($this->gateway->serverConfig()['gateway_nginx_real_ip_header'] ?? 'X-Forwarded-For'));
         $realIpRecursive = (bool)($this->gateway->serverConfig()['gateway_nginx_real_ip_recursive'] ?? true);
         $trustedProxies = $this->trustedRealIpProxies();
@@ -395,6 +418,8 @@ class GatewayNginxProxyHandler {
             '        proxy_set_header X-Forwarded-Port $server_port;',
             '        proxy_set_header X-Forwarded-Proto $scheme;',
             '        proxy_set_header X-Real-IP $remote_addr;',
+            '        proxy_read_timeout ' . $dashboardSocketIoTimeout . 's;',
+            '        proxy_send_timeout ' . $dashboardSocketIoTimeout . 's;',
             '        proxy_pass http://' . $controlName . ';',
             '    }',
             '',
@@ -406,6 +431,8 @@ class GatewayNginxProxyHandler {
             '        proxy_set_header X-Forwarded-Host $host;',
             '        proxy_set_header X-Forwarded-Port $server_port;',
             '        proxy_set_header X-Forwarded-Proto $scheme;',
+            '        proxy_read_timeout ' . $controlIoTimeout . 's;',
+            '        proxy_send_timeout ' . $controlIoTimeout . 's;',
             '        proxy_pass http://' . $controlName . ';',
             '    }',
             '',
@@ -417,6 +444,8 @@ class GatewayNginxProxyHandler {
             '        proxy_set_header X-Forwarded-Host $host;',
             '        proxy_set_header X-Forwarded-Port $server_port;',
             '        proxy_set_header X-Forwarded-Proto $scheme;',
+            '        proxy_read_timeout ' . $controlIoTimeout . 's;',
+            '        proxy_send_timeout ' . $controlIoTimeout . 's;',
             '        proxy_pass http://' . $controlName . ';',
             '    }',
             '',
@@ -431,11 +460,112 @@ class GatewayNginxProxyHandler {
             '        proxy_set_header X-Forwarded-Host $host;',
             '        proxy_set_header X-Forwarded-Port $server_port;',
             '        proxy_set_header X-Forwarded-Proto $scheme;',
+            '        proxy_read_timeout ' . $businessIoTimeout . 's;',
+            '        proxy_send_timeout ' . $businessIoTimeout . 's;',
             '        proxy_pass http://' . $defaultUpstream . ';',
             '    }',
             '}',
             '',
         ]));
+    }
+
+    /**
+     * 解析业务 upstream keepalive 连接池容量。
+     *
+     * 默认值会按 `max_connection` 与 nginx worker 进程数动态推导，避免在
+     * “worker 数较多 + 固定 keepalive”场景下把 upstream 长连接池堆到超出
+     * 业务面承载能力。
+     *
+     * @return int
+     */
+    protected function resolveBusinessUpstreamKeepalive(): int {
+        $configured = (int)($this->gateway->serverConfig()['gateway_nginx_upstream_keepalive'] ?? 0);
+        if ($configured > 0) {
+            return $this->normalizeKeepaliveSize($configured, 8, 512);
+        }
+
+        $maxConnection = max(256, (int)($this->gateway->serverConfig()['max_connection'] ?? 4096));
+        $workerProcesses = $this->resolveNginxWorkerProcessCount();
+        $budgetRatio = (float)($this->gateway->serverConfig()['gateway_nginx_keepalive_capacity_ratio'] ?? 0.5);
+        $budgetRatio = max(0.1, min(0.9, $budgetRatio));
+        $keepaliveBudget = max(8, (int)floor($maxConnection * $budgetRatio));
+        $perWorker = max(8, (int)floor($keepaliveBudget / max(1, $workerProcesses)));
+        return $this->normalizeKeepaliveSize($perWorker, 8, 512);
+    }
+
+    /**
+     * 解析控制面 upstream keepalive 容量。
+     *
+     * @return int
+     */
+    protected function resolveControlUpstreamKeepalive(): int {
+        $configured = (int)($this->gateway->serverConfig()['gateway_nginx_control_keepalive'] ?? 16);
+        return $this->normalizeKeepaliveSize($configured, 4, 128);
+    }
+
+    /**
+     * 统一解析 nginx 代理超时配置。
+     *
+     * @return array{connect_timeout:int,business_io_timeout:int,client_io_timeout:int,control_io_timeout:int,dashboard_socket_io_timeout:int}
+     */
+    protected function resolveNginxProxyTimeouts(): array {
+        $connectTimeout = max(1, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_connect_timeout'] ?? 3));
+        // 保持全局默认向后兼容：未显式配置时仍沿用旧值；应用可通过配置覆盖成更短的超时。
+        $businessIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_proxy_io_timeout'] ?? 31536000));
+        $clientIoTimeout = max(30, (int)($this->gateway->serverConfig()['gateway_nginx_client_io_timeout'] ?? $businessIoTimeout));
+        $controlIoTimeout = max(10, (int)($this->gateway->serverConfig()['gateway_nginx_control_io_timeout'] ?? min(120, $businessIoTimeout)));
+        $dashboardSocketIoTimeout = max(60, (int)($this->gateway->serverConfig()['gateway_nginx_dashboard_socket_io_timeout'] ?? $businessIoTimeout));
+        return [
+            'connect_timeout' => $connectTimeout,
+            'business_io_timeout' => $businessIoTimeout,
+            'client_io_timeout' => $clientIoTimeout,
+            'control_io_timeout' => $controlIoTimeout,
+            'dashboard_socket_io_timeout' => $dashboardSocketIoTimeout,
+        ];
+    }
+
+    /**
+     * 归一化 keepalive 数值边界。
+     *
+     * @param int $value
+     * @param int $min
+     * @param int $max
+     * @return int
+     */
+    protected function normalizeKeepaliveSize(int $value, int $min, int $max): int {
+        return max($min, min($max, $value));
+    }
+
+    /**
+     * 推导 nginx worker 进程数。
+     *
+     * 优先读取显式配置，其次解析 nginx 主配置中的 `worker_processes`。
+     * 配置为 `auto` 时按本机 CPU 数回退。
+     *
+     * @return int
+     */
+    protected function resolveNginxWorkerProcessCount(): int {
+        $configured = (int)($this->gateway->serverConfig()['gateway_nginx_worker_processes'] ?? 0);
+        if ($configured > 0) {
+            return $configured;
+        }
+        $confPath = trim((string)($this->nginxRuntimeMeta()['conf_path'] ?? ''));
+        if ($confPath === '' || !is_file($confPath)) {
+            return 1;
+        }
+        $content = (string)@file_get_contents($confPath);
+        if ($content === '' || !preg_match('/^\\s*worker_processes\\s+([^;]+);/m', $content, $matches)) {
+            return 1;
+        }
+        $rawValue = trim((string)($matches[1] ?? ''));
+        if ($rawValue === '') {
+            return 1;
+        }
+        if (strcasecmp($rawValue, 'auto') === 0) {
+            $cpuNum = function_exists('swoole_cpu_num') ? (int)swoole_cpu_num() : 0;
+            return max(1, $cpuNum);
+        }
+        return max(1, (int)$rawValue);
     }
 
     /**
@@ -691,7 +821,7 @@ class GatewayNginxProxyHandler {
      * @return string upstream 配置文件路径。
      */
     protected function generatedUpstreamFile(): string {
-        return rtrim($this->confDir(), '/') . '/' . $this->fileBaseName() . '.upstreams.conf';
+        return rtrim($this->confDir(), '/') . '/' . $this->fileBaseName() . '.conf';
     }
 
     /**
@@ -750,10 +880,106 @@ class GatewayNginxProxyHandler {
     /**
      * 生成配置文件的基础名。
      *
+     * 约束：同一台机器上，同一个业务入口端口只允许存在一套 gateway nginx
+     * 转发配置文件。因此基础名只收敛到端口维度，确保“新 app/新进程接管同端口”
+     * 时直接覆盖旧文件，避免同端口并存导致入口命中不确定。
+     *
      * @return string 配置文件基名。
      */
     protected function fileBaseName(): string {
-        return $this->safeToken('scf_gateway_' . APP_DIR_NAME . '_' . SERVER_ROLE . '_' . $this->gateway->businessPort());
+        return $this->safeToken('scf_upsteam_' . (int)$this->gateway->businessPort());
+    }
+
+    /**
+     * 清理与当前 gateway 端口冲突的历史 managed 配置文件。
+     *
+     * 历史版本文件名可能包含 app/role（例如 `scf_gateway_{app}_{role}_{port}`），
+     * 也可能是当前端口收敛命名（`scf_upsteam_{port}`）。只要文件解析出的端口与
+     * 当前 businessPort 一致、且不是当前基础名，就视作冲突并删除。
+     *
+     * @return bool 本轮是否实际清理了冲突文件
+     */
+    protected function cleanupConflictingManagedConfigFiles(): bool {
+        $confDir = $this->confDir();
+        if (!is_dir($confDir)) {
+            return false;
+        }
+
+        $currentBase = $this->fileBaseName();
+        $port = (int)$this->gateway->businessPort();
+        if ($port <= 0) {
+            return false;
+        }
+
+        $patterns = [
+            $confDir . '/scf_gateway_*.server.conf',
+            $confDir . '/scf_gateway_*.upstreams.conf',
+            $confDir . '/scf_gateway_*.server.example',
+            $confDir . '/scf_upsteam_*.conf',
+            $confDir . '/scf_upsteam_*.server.conf',
+            $confDir . '/scf_upsteam_*.server.example',
+        ];
+
+        $removed = [];
+        foreach ($patterns as $pattern) {
+            $matches = glob($pattern) ?: [];
+            foreach ($matches as $path) {
+                if (!is_file($path)) {
+                    continue;
+                }
+                $basename = basename($path);
+                $filePort = $this->extractManagedConfigPortFromBasename($basename);
+                if ($filePort !== $port) {
+                    continue;
+                }
+                if (str_starts_with($basename, $currentBase . '.')) {
+                    continue;
+                }
+                if (@unlink($path)) {
+                    $removed[] = $basename;
+                }
+            }
+        }
+
+        if ($removed) {
+            Console::warning(
+                '【Gateway】检测到并清理同端口历史nginx配置冲突: port=' . $port
+                . ', files=' . implode(' | ', array_values(array_unique($removed)))
+            );
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 从 managed 配置文件名中提取业务端口。
+     *
+     * 兼容两种命名：
+     * - 新版：`scf_upsteam_{port}.conf`
+     * - 旧版：`scf_gateway_{app}_{role}_{port}.server.conf`
+     *
+     * @param string $basename 文件名（不含路径）
+     * @return int 解析成功返回端口，失败返回 0
+     */
+    protected function extractManagedConfigPortFromBasename(string $basename): int {
+        $basename = trim($basename);
+        if ($basename === '') {
+            return 0;
+        }
+
+        if (preg_match('/^scf_gateway_(\d+)\.(?:server\.conf|upstreams\.conf|server\.example)$/', $basename, $matches)) {
+            return max(0, (int)($matches[1] ?? 0));
+        }
+
+        if (preg_match('/^scf_upsteam_(\d+)\.(?:conf|server\.conf|server\.example)$/', $basename, $matches)) {
+            return max(0, (int)($matches[1] ?? 0));
+        }
+
+        if (preg_match('/^scf_gateway_.+_(\d+)\.(?:server\.conf|upstreams\.conf|server\.example)$/', $basename, $matches)) {
+            return max(0, (int)($matches[1] ?? 0));
+        }
+
+        return 0;
     }
 
     /**
@@ -1412,7 +1638,7 @@ class GatewayNginxProxyHandler {
 
         $baseName = $this->fileBaseName();
         $paths = [
-            $candidate . '/' . $baseName . '.upstreams.conf',
+            $candidate . '/' . $baseName . '.conf',
             $candidate . '/' . $baseName . '.server.conf',
             $candidate . '/' . $baseName . '.server.example',
         ];

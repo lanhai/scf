@@ -29,11 +29,43 @@ function scf_safe_call(callable $callback, ?string &$error = null): mixed {
 }
 
 function scf_stdout(string $message): void {
-    fwrite(STDOUT, $message . PHP_EOL);
+    scf_stream_write(STDOUT, $message);
 }
 
 function scf_stderr(string $message): void {
-    fwrite(STDERR, $message . PHP_EOL);
+    scf_stream_write(STDERR, $message);
+}
+
+/**
+ * 输出 bootstrap 日志。
+ *
+ * 仅对 `【Boot】` 前缀日志补齐统一时间戳，保持与运行时 Console 日志同一视觉格式；
+ * 其余文本（例如业务命令原始输出）保持原样，避免误改命令返回内容。
+ *
+ * @param resource $stream
+ * @param string $message
+ * @return void
+ */
+function scf_stream_write($stream, string $message): void {
+    $lines = preg_split('/\r\n|\r|\n/', $message) ?: [''];
+    foreach ($lines as $line) {
+        if (str_starts_with($line, '【Boot】')) {
+            $line = scf_boot_log_prefix() . ' ' . $line;
+        }
+        fwrite($stream, $line . PHP_EOL);
+    }
+}
+
+/**
+ * 生成 bootstrap 统一时间戳。
+ *
+ * @return string 形如 `03-31 02:29:49.192`
+ */
+function scf_boot_log_prefix(): string {
+    $micro = microtime(true);
+    $sec = (int)$micro;
+    $ms = (int)(($micro - $sec) * 1000);
+    return date('m-d H:i:s', $sec) . '.' . str_pad((string)$ms, 3, '0', STR_PAD_LEFT);
 }
 
 function scf_detect_timezone(): string {

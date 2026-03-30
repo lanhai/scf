@@ -66,12 +66,18 @@ class Crontab implements CommandInterface {
      */
     public function help(Help $commandHelp): Help {
         $commandHelp->addAction('list', '列出当前 app / role 下可执行的已注册 crontab 脚本');
+        $commandHelp->addAction('log', '查看 Linux crontab 统一日志（默认实时跟随）');
         $commandHelp->addActionOpt('{classname}', '要执行的脚本类名、显示名或完整命名空间');
         $commandHelp->addActionOpt('-app', '应用目录名, 例如 mtvideo');
         $commandHelp->addActionOpt('-env', '运行环境, 例如 dev');
         $commandHelp->addActionOpt('-role', '运行角色【master|slave】, 默认 master');
         $commandHelp->addActionOpt('-namespace', '显式指定完整命名空间, 优先级高于 classname');
         $commandHelp->addActionOpt('-entry_id', 'Linux 系统排程条目 id, 用于回写最近运行时间');
+        $commandHelp->addActionOpt('-n', '查看最后 N 行日志（默认 100）');
+        $commandHelp->addActionOpt('-lines', '同 -n');
+        $commandHelp->addActionOpt('-f', '开启实时跟随（等价于 -follow=1）');
+        $commandHelp->addActionOpt('-follow', '是否实时跟随，1 开启，0 关闭（默认 1）');
+        $commandHelp->addActionOpt('-clear', '先清空日志文件；未指定 tail 参数时仅清空并退出');
         return $commandHelp;
     }
 
@@ -84,19 +90,157 @@ class Crontab implements CommandInterface {
      * @return string|null
      */
     public function exec(): ?string {
+        $namespace = trim((string)Manager::instance()->getOpt('namespace', ''));
+        $action = trim((string)Manager::instance()->getArg(0, ''));
+
+        // `log` 只需要读取文件，不依赖应用运行时常量和模块装载。
+        // 先走轻量路径，避免初始化阶段的模板缓存清理影响日志排查链路。
+        if ($namespace === '' && strcasecmp($action, 'log') === 0) {
+            return $this->showLog();
+        }
+
         Env::initialize(MODE_CGI);
         App::mount(MODE_CGI);
 
-        $script = trim((string)Manager::instance()->getOpt('namespace', Manager::instance()->getArg(0, '')));
-        if ($script === '') {
+        if ($namespace !== '') {
+            return $this->runTask($namespace);
+        }
+
+        if ($action === '') {
             return Manager::instance()->displayCommandHelp($this->commandName());
         }
 
-        if (strcasecmp($script, 'list') === 0) {
+        if (strcasecmp($action, 'list') === 0) {
             return $this->listTasks();
         }
 
-        return $this->runTask($script);
+        if (strcasecmp($action, 'log') === 0) {
+            return $this->showLog();
+        }
+
+        return $this->runTask($action);
+    }
+
+    /**
+     * 查看 Linux crontab 统一日志。
+     *
+     * 该 action 封装了 `tail` 的常用参数，默认显示最近 100 行并实时跟随，
+     * 便于直接在同一个 crontab CLI 入口里排查任务执行输出。
+     *
+     * @return string|null
+     */
+    protected function showLog(): ?string {
+        $logFile = $this->crontabLogFile();
+        $logDir = dirname($logFile);
+        if (!is_dir($logDir) && !@mkdir($logDir, 0775, true) && !is_dir($logDir)) {
+            return Color::danger('创建日志目录失败: ' . $logDir);
+        }
+        if (!is_file($logFile) && !@touch($logFile)) {
+            return Color::danger('创建日志文件失败: ' . $logFile);
+        }
+
+        if ($this->shouldClearLog()) {
+            if (@file_put_contents($logFile, '') === false) {
+                return Color::danger('清空日志文件失败: ' . $logFile);
+            }
+            if (!$this->shouldTailAfterClear()) {
+                return Color::success('日志已清空: ' . $logFile);
+            }
+        }
+
+        $lines = $this->logTailLines();
+        $follow = $this->shouldFollowLog();
+        $tailArgs = $follow ? '-n ' . $lines . ' -F ' : '-n ' . $lines . ' ';
+        $command = '/usr/bin/env tail ' . $tailArgs . escapeshellarg($logFile);
+        $status = 0;
+        passthru($command, $status);
+
+        if ($status !== 0) {
+            return Color::danger('日志查看命令执行失败: ' . $command);
+        }
+
+        return null;
+    }
+
+    /**
+     * 返回 Linux crontab 统一日志文件路径。
+     *
+     * @return string
+     */
+    protected function crontabLogFile(): string {
+        if (defined('APP_LOG_PATH')) {
+            return APP_LOG_PATH . '/crontab/inst.log';
+        }
+
+        $appsRoot = defined('SCF_APPS_ROOT') ? rtrim((string)SCF_APPS_ROOT, '/') : (dirname(SCF_ROOT) . '/apps');
+        $defaultApp = '';
+        if (defined('ENV_VARIABLES') && is_array(ENV_VARIABLES)) {
+            $defaultApp = trim((string)(ENV_VARIABLES['app_dir'] ?? ''));
+        }
+        if ($defaultApp === '') {
+            $defaultApp = trim((string)(getenv('APP_DIR') ?: ''));
+        }
+
+        $app = trim((string)Manager::instance()->getOpt('app', $defaultApp !== '' ? $defaultApp : 'app'));
+        $app = str_replace(['..', '\\'], '', trim($app, " \t\n\r\0\x0B/"));
+        if ($app === '') {
+            $app = 'app';
+        }
+
+        return $appsRoot . '/' . $app . '/log/crontab/inst.log';
+    }
+
+    /**
+     * 解析日志输出行数参数。
+     *
+     * @return int
+     */
+    protected function logTailLines(): int {
+        $raw = Manager::instance()->getOpt('n', Manager::instance()->getOpt('lines', 100));
+        $lines = (int)$raw;
+        if ($lines <= 0) {
+            $lines = 100;
+        }
+        return min($lines, 1000);
+    }
+
+    /**
+     * 判断是否需要实时跟随日志输出。
+     *
+     * @return bool
+     */
+    protected function shouldFollowLog(): bool {
+        if (Manager::instance()->issetOpt('f')) {
+            return true;
+        }
+
+        $follow = trim((string)Manager::instance()->getOpt('follow', '1'));
+        return !in_array(strtolower($follow), ['0', 'false', 'off', 'no'], true);
+    }
+
+    /**
+     * 判断是否要求先清空日志文件。
+     *
+     * @return bool
+     */
+    protected function shouldClearLog(): bool {
+        return Manager::instance()->issetOpt('clear');
+    }
+
+    /**
+     * 判断清空后是否还要继续 tail 输出。
+     *
+     * 为避免 `-clear` 默认进入阻塞跟随模式，这里约定：
+     * - 仅传 `-clear` 时，清空后直接退出；
+     * - 明确传了 `-f/-follow/-n/-lines` 时，清空后继续 tail。
+     *
+     * @return bool
+     */
+    protected function shouldTailAfterClear(): bool {
+        return Manager::instance()->issetOpt('f')
+            || Manager::instance()->issetOpt('follow')
+            || Manager::instance()->issetOpt('n')
+            || Manager::instance()->issetOpt('lines');
     }
 
     /**

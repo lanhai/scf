@@ -500,7 +500,11 @@ class Manager extends Component {
     }
 
     /**
-     * 判断 Saber WebSocket 是否握手成功（HTTP 101 + connected=true + 无错误码）
+     * 判断 Saber WebSocket 是否握手成功且连接仍可用。
+     *
+     * 长连接子进程（cluster/heartbeat）在 recv(timeout) 场景下，底层 client
+     * 可能把 errCode 置为 ETIMEDOUT/EAGAIN；这属于“当前无消息”的瞬态状态，
+     * 不应被判定为断链。这里保留握手成功约束，并把瞬态错误码视为可用连接。
      */
     protected function wsConnected(WebSocket $ws): bool {
         $cli = $this->getWsClient($ws);
@@ -508,7 +512,31 @@ class Manager extends Component {
         $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
         $status = property_exists($cli, 'statusCode') ? (int)$cli->statusCode : 0;
         $errCode = property_exists($cli, 'errCode') ? (int)$cli->errCode : 0;
-        return $connected && $status === 101 && $errCode === 0;
+        $handshakeOk = $connected && $status === 101;
+        if (!$handshakeOk) {
+            return false;
+        }
+        if ($errCode === 0) {
+            return true;
+        }
+        return $this->isTransientSocketErrCode($errCode);
+    }
+
+    /**
+     * 判断 WebSocket client 的 errCode 是否为“可忽略的瞬态错误”。
+     *
+     * @param int $errCode 底层 socket 错误码。
+     * @return bool true 表示仅是超时/暂时无数据，不代表连接断开。
+     */
+    protected function isTransientSocketErrCode(int $errCode): bool {
+        if ($errCode <= 0) {
+            return false;
+        }
+        $transientCodes = [11, 60, 110];
+        defined('SOCKET_EAGAIN') and $transientCodes[] = (int)SOCKET_EAGAIN;
+        defined('SOCKET_EWOULDBLOCK') and $transientCodes[] = (int)SOCKET_EWOULDBLOCK;
+        defined('SOCKET_ETIMEDOUT') and $transientCodes[] = (int)SOCKET_ETIMEDOUT;
+        return in_array($errCode, array_values(array_unique($transientCodes)), true);
     }
 
     /**
@@ -524,6 +552,20 @@ class Manager extends Component {
         } catch (Throwable $e) {
             return false;
         }
+    }
+
+    /**
+     * 对外暴露 Saber WebSocket 当前是否仍处于握手成功且连接存活状态。
+     *
+     * cluster / heartbeat 这类长连接子进程在 recv timeout 时，需要区分
+     * “当前仅无消息”与“底层连接已经断开”。这里复用框架内部已有的 wsConnected
+     * 判定，避免每个子进程各自再做一套反射判断。
+     *
+     * @param WebSocket $ws
+     * @return bool
+     */
+    public function isSocketConnected(WebSocket $ws): bool {
+        return $this->wsConnected($ws);
     }
 
     /**

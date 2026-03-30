@@ -45,6 +45,21 @@ class LinuxCrontabManager {
     private const STORAGE_DIRECTORY = '/db/';
 
     /**
+     * Linux crontab 执行日志目录（相对 APP_LOG_PATH）。
+     */
+    private const CRONTAB_LOG_SUB_DIRECTORY = '/crontab';
+
+    /**
+     * Linux crontab 执行日志文件名。
+     */
+    private const CRONTAB_LOG_FILE_NAME = 'inst.log';
+
+    /**
+     * Linux crontab 执行日志保留的最大行数。
+     */
+    private const CRONTAB_LOG_MAX_LINES = 1000;
+
+    /**
      * 支持的调度类型。
      *
      * - interval: 每 N 分钟执行一次
@@ -1309,6 +1324,8 @@ class LinuxCrontabManager {
      */
     protected function buildCommand(array $entry): string {
         $binDir = SCF_ROOT . '/bin';
+        $logDirectory = $this->crontabLogDirectory();
+        $logFile = $this->crontabLogFile();
         // flock 直接执行后续 command argv，而不会像 shell 那样解释前置的环境变量赋值。
         // 这里统一改成显式走 `/usr/bin/env`，让“设置 SCF_PHP_BIN + 执行 bash 脚本”
         // 在有无 flock 两种路径下都保持同样语义。
@@ -1338,7 +1355,38 @@ class LinuxCrontabManager {
                 . $command;
         }
 
-        return 'cd ' . escapeshellarg($binDir) . ' && ' . $command . ' >/dev/null 2>&1';
+        // Linux crontab 没有交互终端，这里统一把标准输出与错误输出写入固定文件，
+        // 并在每次执行后裁剪日志，仅保留最新 N 行，方便实时 tail 且避免日志无限增长。
+        $runCommand = $command . ' >> ' . escapeshellarg($logFile) . ' 2>&1';
+        $trimCommand = 'log_tmp=' . escapeshellarg($logFile . '.tmp') . '.$$; '
+            . '/usr/bin/env tail -n ' . self::CRONTAB_LOG_MAX_LINES
+            . ' ' . escapeshellarg($logFile)
+            . ' > "$log_tmp"'
+            . ' && /bin/mv "$log_tmp" ' . escapeshellarg($logFile)
+            . '; /bin/rm -f "$log_tmp"';
+
+        return 'cd ' . escapeshellarg($binDir)
+            . ' && /bin/mkdir -p ' . escapeshellarg($logDirectory)
+            . ' && ' . $runCommand
+            . '; ' . $trimCommand;
+    }
+
+    /**
+     * 返回 Linux crontab 执行日志目录。
+     *
+     * @return string
+     */
+    protected function crontabLogDirectory(): string {
+        return APP_LOG_PATH . self::CRONTAB_LOG_SUB_DIRECTORY;
+    }
+
+    /**
+     * 返回 Linux crontab 执行日志文件。
+     *
+     * @return string
+     */
+    protected function crontabLogFile(): string {
+        return $this->crontabLogDirectory() . '/' . self::CRONTAB_LOG_FILE_NAME;
     }
 
     /**

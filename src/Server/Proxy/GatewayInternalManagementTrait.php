@@ -79,15 +79,26 @@ trait GatewayInternalManagementTrait {
                     $this->json($response, 403, ['message' => 'forbidden']);
                     return;
                 }
-                $result = $this->dispatchInternalGatewayCommand((string)($payload['command'] ?? ''));
+                $result = $this->dispatchInternalGatewayCommand(
+                    (string)($payload['command'] ?? ''),
+                    (array)($payload['params'] ?? [])
+                );
                 $afterWrite = isset($result['__after_write']) && is_callable($result['__after_write'])
                     ? $result['__after_write']
                     : null;
                 unset($result['__after_write']);
+                $payload = $result['data'] ?? ['message' => (string)($result['message'] ?? 'request failed')];
+                if (!is_array($payload)) {
+                    $payload = [
+                        'accepted' => false,
+                        'message' => (string)($result['message'] ?? 'request failed'),
+                        'result' => $payload,
+                    ];
+                }
                 $this->json(
                     $response,
                     (int)($result['status'] ?? 500),
-                    $result['data'] ?? ['message' => (string)($result['message'] ?? 'request failed')]
+                    $payload
                 );
                 $afterWrite && $afterWrite();
                 return;
@@ -183,11 +194,12 @@ trait GatewayInternalManagementTrait {
      * 将内部 HTTP 命令映射到 gateway 控制命令执行语义。
      *
      * @param string $command
+     * @param array<string, mixed> $params
      * @return array<string, mixed>
      */
-    protected function dispatchInternalGatewayCommand(string $command): array {
+    protected function dispatchInternalGatewayCommand(string $command, array $params = []): array {
         return $this->formatGatewayInternalCommandExecution(
-            $this->resolveGatewayControlCommandExecution($command)
+            $this->resolveGatewayControlCommandExecution($command, $params)
         );
     }
 
@@ -223,6 +235,7 @@ trait GatewayInternalManagementTrait {
             'data' => [
                 'accepted' => true,
                 'message' => $message,
+                'result' => $result->getData(),
             ],
         ];
         $afterWrite = $execution['after_write'] ?? null;

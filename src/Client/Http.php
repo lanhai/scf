@@ -2,6 +2,7 @@
 
 namespace Scf\Client;
 
+use Scf\Core\InflightCounter;
 use Scf\Core\Result;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
@@ -104,6 +105,7 @@ class Http {
      * @return Result
      */
     public function post(mixed $body = [], int $timeout = 30): Result {
+        InflightCounter::beginOutboundHttp();
         try {
             $this->headerInit();
             $this->client->setHeaders($this->headers);
@@ -112,8 +114,9 @@ class Http {
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
         }
-
     }
 
     /**
@@ -132,6 +135,7 @@ class Http {
      * @return Result
      */
     public function JPost(mixed $body = [], int $timeout = 30): Result {
+        InflightCounter::beginOutboundHttp();
         try {
             $body = $body ? JsonHelper::toJson($body) : "{}";
             $this->headerInit();
@@ -143,6 +147,8 @@ class Http {
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
         }
     }
 
@@ -153,6 +159,7 @@ class Http {
      * @return Result
      */
     public function XPost(mixed $body = [], int $timeout = 30): Result {
+        InflightCounter::beginOutboundHttp();
         try {
             $this->headerInit();
             $this->headers['Content-Type'] = 'text/xml; charset=utf-8';
@@ -162,6 +169,8 @@ class Http {
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
         }
     }
 
@@ -171,6 +180,7 @@ class Http {
      * @return Result
      */
     public function get(int $timeout = 30): Result {
+        InflightCounter::beginOutboundHttp();
         try {
             $this->headerInit();
             $this->client->setHeaders($this->headers);
@@ -179,6 +189,8 @@ class Http {
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
         }
     }
 
@@ -189,6 +201,7 @@ class Http {
      * @return Result
      */
     public function download($filePath, int $timeout = -1): Result {
+        InflightCounter::beginOutboundHttp();
         try {
             $this->headerInit();
             $this->client->setHeaders($this->headers);
@@ -197,6 +210,8 @@ class Http {
             return $this->getResult();
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
         }
     }
 

@@ -6,6 +6,7 @@ namespace Scf\Server\Proxy;
 
 require_once __DIR__ . '/AppServerLauncher.php';
 require_once __DIR__ . '/AppInstanceManager.php';
+require_once __DIR__ . '/GatewayLease.php';
 require_once __DIR__ . '/GatewayServer.php';
 require_once __DIR__ . '/UpstreamRegistry.php';
 require_once __DIR__ . '/UpstreamSupervisor.php';
@@ -118,13 +119,26 @@ class CliBootstrap {
         $registry = new UpstreamRegistry($startup['state_file']);
         $manager = new AppInstanceManager($registry);
         $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
+        $preservedUpstreamPorts = [];
+        if ($upstreamBootstrap['spawn_metadata'] && !$upstreamBootstrap['managed_upstream_plans']) {
+            $preservedPort = (int)($upstreamBootstrap['upstream_port'] ?? 0);
+            if ($preservedPort > 0) {
+                // 只有“复用已有 upstream / 使用外部 upstream”这类不由 gateway 再次拉起的场景，
+                // 才需要在启动前清理孤儿实例时保留当前端口；managed spawn 场景后面会在清理完成后
+                // 重新解析一次 plan，避免拿着 cleanup 之前的旧端口继续启动。
+                $preservedUpstreamPorts[] = $preservedPort;
+            }
+        }
 
         self::reconcileRegistry($manager, $launcher, $startup['bind_host'], $startup['bind_port']);
         self::cleanupManagedUpstreams($manager, $launcher);
-        self::cleanupOrphanManagedUpstreams($launcher, $startup['bind_port'], array_values(array_unique(array_filter([
-            $upstreamBootstrap['upstream_port'] > 0 ? $upstreamBootstrap['upstream_port'] : 0,
-        ]))));
+        self::cleanupOrphanManagedUpstreams($launcher, $startup['bind_port'], $preservedUpstreamPorts);
         self::forgetGatewayRegistryEntries($manager, $startup['bind_host'], $startup['bind_port']);
+
+        // upstream 端口选择必须基于 cleanup 之后的真实监听态；否则一旦历史实例在
+        // resolve 之后、spawn 之前才被清理或仍未完全退出，就会拿着过期端口继续启动。
+        $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
+
         if ($upstreamBootstrap['spawn_metadata'] && !$upstreamBootstrap['managed_upstream_plans']) {
             foreach ($manager->otherInstances($startup['version'], $startup['upstream_host'], $upstreamBootstrap['upstream_port']) as $instance) {
                 $launcher->stop($instance, 2);
@@ -272,6 +286,7 @@ class CliBootstrap {
         $serverConfig = (array)($startup['server_config'] ?? []);
         $bindPort = (int)($startup['bind_port'] ?? 0);
         $rpcBindPort = (int)($startup['rpc_bind_port'] ?? 0);
+        $controlBindPort = (int)($startup['control_bind_port'] ?? 0);
         $upstreamHost = (string)($startup['upstream_host'] ?? '127.0.0.1');
         $version = (string)($startup['version'] ?? 'current');
         $upstreamRole = (string)($startup['upstream_role'] ?? SERVER_ROLE);
@@ -279,19 +294,34 @@ class CliBootstrap {
         $spawnUpstream = (bool)($startup['spawn_upstream'] ?? true);
         $reuseExistingUpstream = (bool)($startup['reuse_existing_upstream'] ?? false);
         $upstreamStartTimeout = (int)($startup['upstream_start_timeout'] ?? 25);
+        $reservedGatewayPorts = array_values(array_unique(array_filter([
+            $bindPort,
+            $rpcBindPort,
+            $controlBindPort,
+        ], static fn(int $port): bool => $port > 0)));
 
         $upstreamPortExplicit = isset($opts['upstream_port']);
         $upstreamPort = $upstreamPortExplicit
             ? (int)$opts['upstream_port']
-            : $launcher->findAvailablePort('127.0.0.1', max($bindPort + 1, (int)($serverConfig['proxy_upstream_port'] ?? ($bindPort + 1))));
+            : $launcher->findAvailablePortAvoiding(
+                '127.0.0.1',
+                max($bindPort + 1, (int)($serverConfig['proxy_upstream_port'] ?? ($bindPort + 1))),
+                $reservedGatewayPorts,
+                2000
+            );
         $upstreamRpcPortExplicit = isset($opts['upstream_rpc_port']);
         $upstreamRpcPort = $rpcBindPort > 0
             ? ($upstreamRpcPortExplicit
                 ? (int)$opts['upstream_rpc_port']
-                : $launcher->findAvailablePort('127.0.0.1', max($rpcBindPort + 1, (int)($serverConfig['proxy_upstream_rpc_port'] ?? ($rpcBindPort + 1)))))
+                : $launcher->findAvailablePortAvoiding(
+                    '127.0.0.1',
+                    max($rpcBindPort + 1, (int)($serverConfig['proxy_upstream_rpc_port'] ?? ($rpcBindPort + 1))),
+                    array_merge($reservedGatewayPorts, [$upstreamPort]),
+                    2000
+                ))
             : 0;
 
-        self::validateUpstreamListenerLayout($bindPort, $rpcBindPort, $upstreamPort, $upstreamRpcPort);
+        self::validateUpstreamListenerLayout($bindPort, $rpcBindPort, $controlBindPort, $upstreamPort, $upstreamRpcPort);
 
         if ($spawnUpstream) {
             return self::resolveManagedUpstreamBootstrap(
@@ -330,16 +360,32 @@ class CliBootstrap {
      *
      * @param int $bindPort gateway 业务端口
      * @param int $rpcBindPort gateway RPC 端口
+     * @param int $controlBindPort gateway 控制面端口
      * @param int $upstreamPort upstream HTTP 端口
      * @param int $upstreamRpcPort upstream RPC 端口
      * @return void
      */
-    protected static function validateUpstreamListenerLayout(int $bindPort, int $rpcBindPort, int $upstreamPort, int $upstreamRpcPort): void {
+    protected static function validateUpstreamListenerLayout(int $bindPort, int $rpcBindPort, int $controlBindPort, int $upstreamPort, int $upstreamRpcPort): void {
         if ($upstreamPort > 0 && $upstreamPort === $bindPort) {
             throw new RuntimeException("upstream HTTP 端口不能与 Gateway 监听端口相同: {$bindPort}");
         }
+        if ($rpcBindPort > 0 && $upstreamPort > 0 && $upstreamPort === $rpcBindPort) {
+            throw new RuntimeException("upstream HTTP 端口不能与 Gateway RPC 端口相同: {$rpcBindPort}");
+        }
+        if ($controlBindPort > 0 && $upstreamPort > 0 && $upstreamPort === $controlBindPort) {
+            throw new RuntimeException("upstream HTTP 端口不能与 Gateway 控制面端口相同: {$controlBindPort}");
+        }
         if ($rpcBindPort > 0 && $upstreamRpcPort > 0 && $upstreamRpcPort === $rpcBindPort) {
             throw new RuntimeException("upstream RPC 端口不能与 Gateway RPC 端口相同: {$rpcBindPort}");
+        }
+        if ($upstreamRpcPort > 0 && $upstreamRpcPort === $bindPort) {
+            throw new RuntimeException("upstream RPC 端口不能与 Gateway 监听端口相同: {$bindPort}");
+        }
+        if ($controlBindPort > 0 && $upstreamRpcPort > 0 && $upstreamRpcPort === $controlBindPort) {
+            throw new RuntimeException("upstream RPC 端口不能与 Gateway 控制面端口相同: {$controlBindPort}");
+        }
+        if ($upstreamPort > 0 && $upstreamRpcPort > 0 && $upstreamRpcPort === $upstreamPort) {
+            throw new RuntimeException("upstream RPC 端口不能与 upstream HTTP 端口相同: {$upstreamPort}");
         }
     }
 
@@ -383,9 +429,19 @@ class CliBootstrap {
         bool $upstreamRpcPortExplicit,
         bool $reuseExistingUpstream
     ): array {
+        $reservedGatewayPorts = array_values(array_unique(array_filter([
+            (int)($startup['bind_port'] ?? 0),
+            (int)($startup['rpc_bind_port'] ?? 0),
+            (int)($startup['control_bind_port'] ?? 0),
+        ], static fn(int $port): bool => $port > 0)));
         $portInUse = $launcher->isListening($upstreamHost, $upstreamPort, 0.2);
         if ($portInUse && !$upstreamPortExplicit) {
-            $upstreamPort = $launcher->findAvailablePort('127.0.0.1', $upstreamPort + 1);
+            $upstreamPort = $launcher->findAvailablePortAvoiding(
+                '127.0.0.1',
+                $upstreamPort + 1,
+                $reservedGatewayPorts,
+                2000
+            );
             $portInUse = false;
         }
 
@@ -395,6 +451,8 @@ class CliBootstrap {
                 'role' => $upstreamRole,
                 'started_at' => time(),
                 'managed_mode' => 'gateway_supervisor',
+                'dynamic_port' => !$upstreamPortExplicit,
+                'dynamic_rpc_port' => !$upstreamRpcPortExplicit,
             ];
 
             return [
@@ -666,7 +724,7 @@ class CliBootstrap {
         }
 
         $keep = array_fill_keys(array_map('intval', array_filter($keepPorts, static fn($port) => (int)$port > 0)), true);
-        $instances = [];
+        $instancesByEndpoint = [];
         foreach (preg_split('/\r?\n/', trim($output)) as $line) {
             $line = trim((string)$line);
             if ($line === '' || !preg_match('/^(\d+)\s+(.+)$/', $line, $matches)) {
@@ -687,17 +745,51 @@ class CliBootstrap {
             if ($port <= 0 || isset($keep[$port])) {
                 continue;
             }
-            $instances[] = [
+            $host = '127.0.0.1';
+            $rpcPort = self::extractIntFlag($command, 'rport');
+            $ownerEpoch = self::extractIntFlag($command, 'gateway_epoch');
+            $instanceGatewayPort = self::extractIntFlag($command, 'gateway_port');
+            $endpoint = $host . ':' . $port;
+            $candidate = [
                 'host' => '127.0.0.1',
                 'port' => $port,
                 'metadata' => [
                     'managed' => true,
                     'pid' => $pid,
-                    'rpc_port' => self::extractIntFlag($command, 'rport'),
+                    'master_pid' => $pid,
+                    'rpc_port' => $rpcPort,
+                    'owner_epoch' => $ownerEpoch,
+                    'gateway_port' => $instanceGatewayPort,
+                    'command' => $command,
                 ],
             ];
+            if (!isset($instancesByEndpoint[$endpoint])) {
+                $instancesByEndpoint[$endpoint] = $candidate;
+                continue;
+            }
+
+            // `ps` 会把同一 upstream 的 master/manager/worker 都列出来。
+            // 孤儿清理必须按 endpoint 去重，只保留“一条根实例”记录，否则会出现
+            // 对同一端口反复 stop，触发“关闭中又拉起”的链式噪音。
+            $current = $instancesByEndpoint[$endpoint];
+            $currentPid = (int)($current['metadata']['pid'] ?? 0);
+            if ($pid > 0 && ($currentPid <= 0 || $pid < $currentPid)) {
+                $current['metadata']['pid'] = $pid;
+                $current['metadata']['master_pid'] = $pid;
+                $current['metadata']['command'] = $command;
+            }
+            if ((int)($current['metadata']['rpc_port'] ?? 0) <= 0 && $rpcPort > 0) {
+                $current['metadata']['rpc_port'] = $rpcPort;
+            }
+            if ((int)($current['metadata']['owner_epoch'] ?? 0) <= 0 && $ownerEpoch > 0) {
+                $current['metadata']['owner_epoch'] = $ownerEpoch;
+            }
+            if ((int)($current['metadata']['gateway_port'] ?? 0) <= 0 && $instanceGatewayPort > 0) {
+                $current['metadata']['gateway_port'] = $instanceGatewayPort;
+            }
+            $instancesByEndpoint[$endpoint] = $current;
         }
-        return $instances;
+        return array_values($instancesByEndpoint);
     }
 
     /**

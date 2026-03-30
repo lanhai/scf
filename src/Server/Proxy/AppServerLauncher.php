@@ -44,10 +44,9 @@ class AppServerLauncher {
         }
         $host = $this->normalizeProbeHost($host);
 
-        // gateway 托管的 upstream 端口探测绝大多数发生在本机。这里优先复用框架
-        // 现有的“监听进程扫描”能力，而不是在协程定时器里走 TCP connect。
-        // 这样可以避免 reload / recycle watcher 只剩少量协程时，再因为 connect
-        // 挂起把 worker 带进 "all coroutines are asleep" 死锁态。
+        // 本机 managed upstream 的“是否在监听”必须使用真实 LISTEN 语义。
+        // 仅用 socket_bind 在 macOS 上会出现误判（TIME_WAIT/SO_REUSEPORT 场景），
+        // 导致旧实例回收卡住、端口不断上抬，最终把不可用端口分配给新实例。
         if ($this->isLocalProbeHost($host)) {
             return CoreServer::isListeningPortInUse($port);
         }
@@ -90,8 +89,8 @@ class AppServerLauncher {
     /**
      * 判断探测目标是否仍可视为当前节点本机地址。
      *
-     * gateway 托管的 upstream 都运行在本机，因此对这类地址直接走“端口是否被监听”
-     * 的进程扫描更稳，不需要再做一次 TCP connect。
+     * gateway 托管的 upstream 都运行在本机，因此本机地址可以走轻量 bind 冲突探测，
+     * 避免高频端口扫描时频繁触发外部进程级探测开销。
      *
      * @param string $host
      * @return bool
@@ -120,17 +119,46 @@ class AppServerLauncher {
     public function findAvailablePort(string $host, int $startPort, int $maxScan = 200): int {
         $port = max(1025, $startPort);
         for ($i = 0; $i < $maxScan; $i++, $port++) {
-            if ($this->isListening($host, $port, 0.1)) {
-                continue;
+            if (!CoreServer::isListeningPortInUse($port)) {
+                return $port;
             }
-            $server = @stream_socket_server("tcp://{$host}:{$port}", $errno, $errstr);
-            if ($server === false) {
-                continue;
-            }
-            fclose($server);
-            return $port;
         }
         throw new RuntimeException("未找到可用端口，起始端口:{$startPort}");
+    }
+
+    /**
+     * 从起始端口开始扫描可用端口，并排除一组保留端口。
+     *
+     * 这个方法用于 gateway/upstream 联合编排场景：除了“端口当前没人监听”，
+     * 还要保证不和 gateway 业务入口、gateway RPC、gateway 控制面及本轮
+     * 其它已预留端口冲突，从根上避免“计划端口可用但运行时被控制面占掉”。
+     *
+     * @param string $host 目标主机名或 IP。
+     * @param int $startPort 扫描起始端口。
+     * @param array<int, int> $reservedPorts 保留端口集合。
+     * @param int $maxScan 最大扫描次数。
+     * @return int 找到的可用端口。
+     * @throws RuntimeException 当连续扫描后仍未找到可用端口时抛出。
+     */
+    public function findAvailablePortAvoiding(string $host, int $startPort, array $reservedPorts = [], int $maxScan = 200): int {
+        $reserved = [];
+        foreach ($reservedPorts as $reservedPort) {
+            $reservedPort = (int)$reservedPort;
+            if ($reservedPort > 0) {
+                $reserved[$reservedPort] = true;
+            }
+        }
+
+        $port = max(1025, $startPort);
+        for ($i = 0; $i < $maxScan; $i++, $port++) {
+            if (isset($reserved[$port])) {
+                continue;
+            }
+            if (!CoreServer::isListeningPortInUse($port)) {
+                return $port;
+            }
+        }
+        throw new RuntimeException("未找到可用端口(含保留端口约束)，起始端口:{$startPort}");
     }
 
     /**
@@ -348,9 +376,11 @@ class AppServerLauncher {
                 $nextWarnAt += self::RECYCLE_WARN_INTERVAL_SECONDS;
             }
             if (!$termSent && microtime(true) >= $termAt) {
-                if ($this->isProcessRunning($pid)) {
-                    @Process::kill($pid, SIGTERM);
-                }
+                // 回收升级不能直接对 metadata.pid 发 TERM：
+                // 在代际切换与状态延迟窗口里，pid 可能短暂指向 manager/worker，
+                // 直接杀它会被 master 立即补拉 worker，表现为“正在关闭后又启动”。
+                // 这里统一复用 owner 感知的树形回收，确保信号命中真正的实例根进程。
+                $this->forceStopManagedInstance($instance, false);
                 $termSent = true;
             }
             usleep(200000);
@@ -358,15 +388,186 @@ class AppServerLauncher {
 
         $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
         Console::warning("【Gateway】业务实例回收超时，开始强制终止: {$host}:{$port}{$rpcInfo}, pid={$pid}");
-        if ($this->isProcessRunning($pid)) {
-            @Process::kill($pid, SIGKILL);
+        $this->forceStopManagedInstance($instance, true);
+        // 强制回收后短暂等待一次监听态收敛，再做最后一次 owner-aware 硬回收。
+        usleep(200000);
+        $stillHttpAlive = $port > 0 && $this->isListening($host, $port, 0.2);
+        $stillRpcAlive = $rpcPort > 0 && $this->isListening($host, $rpcPort, 0.2);
+        if ($stillHttpAlive || $stillRpcAlive) {
+            $this->forceStopManagedInstance($instance, true);
         }
-        if ($port > 0 && $this->isListening($host, $port, 0.2)) {
-            \Scf\Core\Server::killProcessByPort($port);
+    }
+
+    /**
+     * 对指定实例发起“仅优雅停机请求”，不在此方法内等待回收完成。
+     *
+     * 这个入口用于 gateway 的异步回收状态机：先让 upstream 自己进入
+     * draining/shutdown，再由外层定时驱动决定是否升级到 TERM/KILL。
+     *
+     * @param array<string, mixed> $instance upstream 实例运行态信息。
+     * @param float $timeoutSeconds 请求超时，单位秒。
+     * @return bool 请求被 upstream 接收时返回 true。
+     */
+    public function requestManagedGracefulShutdown(array $instance, float $timeoutSeconds = 1.0): bool {
+        $host = (string)($instance['host'] ?? '127.0.0.1');
+        $port = (int)($instance['port'] ?? 0);
+        if ($port <= 0) {
+            return false;
         }
-        if ($rpcPort > 0 && $this->isListening($host, $rpcPort, 0.2)) {
-            \Scf\Core\Server::killProcessByPort($rpcPort);
+        return $this->requestGracefulShutdown($host, $port, $timeoutSeconds);
+    }
+
+    /**
+     * 对指定实例执行一次强制回收动作（可重复调用）。
+     *
+     * soft 模式优先发送 SIGTERM；hard 模式直接 SIGKILL。
+     *
+     * 注意：这里不能再“按端口盲杀全部监听者”。滚动重启期间端口可能被下一代实例复用，
+     * 若不做 owner 约束会把新代实例误杀，导致回收永远不收敛。
+     * 该方法不阻塞等待结果，适合作为异步 reaper 的周期动作。
+     *
+     * @param array<string, mixed> $instance upstream 实例运行态信息。
+     * @param bool $hard 是否执行硬回收。
+     * @return void
+     */
+    public function forceStopManagedInstance(array $instance, bool $hard = false): void {
+        $host = (string)($instance['host'] ?? '127.0.0.1');
+        $port = (int)($instance['port'] ?? 0);
+        $metadata = (array)($instance['metadata'] ?? []);
+        $rpcPort = (int)($instance['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
+        $masterPid = (int)($metadata['master_pid'] ?? 0);
+        $managerPid = (int)($metadata['manager_pid'] ?? 0);
+        $pid = (int)($metadata['pid'] ?? 0);
+        $signal = $hard ? SIGKILL : SIGTERM;
+        $targetRootPids = [];
+        if ($masterPid > 0 && @Process::kill($masterPid, 0)) {
+            $targetRootPids[$masterPid] = $masterPid;
         }
+        if ($managerPid > 0 && @Process::kill($managerPid, 0)) {
+            $snapshot = $this->loadProcessSnapshot();
+            $resolvedRootPid = $this->resolveOwnedManagedRootPid($managerPid, $snapshot, $instance);
+            if ($resolvedRootPid <= 0) {
+                $fallbackRootPid = $this->resolveProcessTreeRootPid($managerPid, $snapshot);
+                if (
+                    $fallbackRootPid > 0
+                    && (
+                        ($port > 0 && $this->processTreeOwnsPort($fallbackRootPid, $port, $snapshot))
+                        || ($rpcPort > 0 && $this->processTreeOwnsPort($fallbackRootPid, $rpcPort, $snapshot))
+                    )
+                ) {
+                    $resolvedRootPid = $fallbackRootPid;
+                }
+            }
+            if ($resolvedRootPid > 0) {
+                $targetRootPids[$resolvedRootPid] = $resolvedRootPid;
+            }
+        }
+        if ($pid > 0) {
+            $snapshot = $this->loadProcessSnapshot();
+            // metadata.pid 可能短暂指向 manager/worker。强制回收必须先解析到 owner 根进程，
+            // 否则只杀 manager 会被 master 立刻补拉 worker，出现“关闭后又启动”的假象。
+            $resolvedRootPid = $this->resolveOwnedManagedRootPid($pid, $snapshot, $instance);
+            if ($resolvedRootPid > 0) {
+                $targetRootPids[$resolvedRootPid] = $resolvedRootPid;
+            } elseif ($masterPid <= 0 && $managerPid <= 0) {
+                // 仅在没有明确 master/manager PID 可用时，才把原始 pid 作为最后兜底，
+                // 防止 “无目标可杀” 导致回收状态机永远卡在 pending。
+                $targetRootPids[$pid] = $pid;
+            }
+        }
+        if ($port > 0) {
+            foreach ($this->collectOwnedManagedRootPids($instance, $port, true) as $ownerRootPid) {
+                $targetRootPids[$ownerRootPid] = $ownerRootPid;
+            }
+        }
+        if ($rpcPort > 0) {
+            foreach ($this->collectOwnedManagedRootPids($instance, $rpcPort, false) as $ownerRootPid) {
+                $targetRootPids[$ownerRootPid] = $ownerRootPid;
+            }
+        }
+
+        // 强制回收不能只依赖 metadata.pid：
+        // pending 项可能短暂持有旧 pid（例如 manager）。这里统一补充“按端口 ownership
+        // 反查得到的实例根 pid”，确保软/硬回收都能命中真正的 upstream master 进程。
+        foreach ($targetRootPids as $targetPid) {
+            $this->killProcessTree((int)$targetPid, $signal);
+        }
+    }
+
+    /**
+     * 沿父链回溯到当前进程树的根 PID。
+     *
+     * @param int $pid 起始 PID
+     * @param array<int, array{ppid:int, command:string}> $snapshot 进程快照
+     * @return int 根 PID，不可解析时返回 0
+     */
+    protected function resolveProcessTreeRootPid(int $pid, array $snapshot): int {
+        if ($pid <= 0 || !isset($snapshot[$pid])) {
+            return 0;
+        }
+        $currentPid = $pid;
+        $depth = 0;
+        while ($currentPid > 0 && isset($snapshot[$currentPid]) && $depth < 64) {
+            $depth++;
+            $parentPid = (int)($snapshot[$currentPid]['ppid'] ?? 0);
+            if ($parentPid <= 1 || $parentPid === $currentPid || !isset($snapshot[$parentPid])) {
+                return $currentPid;
+            }
+            $currentPid = $parentPid;
+        }
+        return $currentPid > 0 ? $currentPid : 0;
+    }
+
+    /**
+     * 判断某个 root PID 的进程树是否拥有指定监听端口。
+     *
+     * @param int $rootPid 候选根 PID
+     * @param int $port 监听端口
+     * @param array<int, array{ppid:int, command:string}> $snapshot 进程快照
+     * @return bool
+     */
+    protected function processTreeOwnsPort(int $rootPid, int $port, array $snapshot): bool {
+        if ($rootPid <= 0 || $port <= 0) {
+            return false;
+        }
+        foreach (CoreServer::findPidsByPort($port) as $listenerPid) {
+            $listenerPid = (int)$listenerPid;
+            if ($listenerPid <= 0) {
+                continue;
+            }
+            if ($this->isPidDescendantOf($listenerPid, $rootPid, $snapshot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断 child PID 是否位于 ancestor PID 的进程树内。
+     *
+     * @param int $childPid 子进程 PID
+     * @param int $ancestorPid 祖先进程 PID
+     * @param array<int, array{ppid:int, command:string}> $snapshot 进程快照
+     * @return bool
+     */
+    protected function isPidDescendantOf(int $childPid, int $ancestorPid, array $snapshot): bool {
+        if ($childPid <= 0 || $ancestorPid <= 0 || !isset($snapshot[$childPid])) {
+            return false;
+        }
+        $currentPid = $childPid;
+        $depth = 0;
+        while ($currentPid > 0 && isset($snapshot[$currentPid]) && $depth < 64) {
+            if ($currentPid === $ancestorPid) {
+                return true;
+            }
+            $depth++;
+            $parentPid = (int)($snapshot[$currentPid]['ppid'] ?? 0);
+            if ($parentPid <= 1 || $parentPid === $currentPid) {
+                break;
+            }
+            $currentPid = $parentPid;
+        }
+        return false;
     }
 
     /**
@@ -396,6 +597,282 @@ class AppServerLauncher {
             return false;
         }
         return !str_contains(trim($stat), 'Z');
+    }
+
+    /**
+     * 对外提供“进程是否真实存活”的统一判定。
+     *
+     * 注意这里会过滤僵尸进程（Z）。gateway 的异步回收状态机若把 zombie 当成
+     * alive，会导致实例端口已释放但回收永远不完成，持续进入重试/隔离循环。
+     *
+     * @param int $pid 目标 PID
+     * @return bool true 表示进程存在且非僵尸
+     */
+    public function isProcessAlive(int $pid): bool {
+        return $this->isProcessRunning($pid);
+    }
+
+    /**
+     * 杀掉指定 root pid 及其当前可见子孙进程。
+     *
+     * Swoole upstream 的 master/manager/worker 是一棵进程树。
+     * 仅杀 manager/worker 往往会被 master 立即补拉，因此这里统一以“树”为单位回收。
+     *
+     * @param int $rootPid 根进程 PID
+     * @param int $signal SIGTERM 或 SIGKILL
+     * @return void
+     */
+    protected function killProcessTree(int $rootPid, int $signal): void {
+        if ($rootPid <= 0 || !@Process::kill($rootPid, 0)) {
+            return;
+        }
+        $tree = $this->collectDescendantPids($rootPid);
+        // 先杀子进程再杀根，避免 manager 在 root 存活期间立刻补拉 worker。
+        foreach (array_reverse($tree) as $pid) {
+            if ($pid <= 0) {
+                continue;
+            }
+            if (@Process::kill($pid, 0)) {
+                @Process::kill($pid, $signal);
+            }
+        }
+        if (@Process::kill($rootPid, 0)) {
+            @Process::kill($rootPid, $signal);
+        }
+    }
+
+    /**
+     * 收集 root pid 的子孙进程列表。
+     *
+     * @param int $rootPid 根进程 PID
+     * @return array<int, int>
+     */
+    protected function collectDescendantPids(int $rootPid): array {
+        if ($rootPid <= 0) {
+            return [];
+        }
+        $output = @shell_exec('ps -axo pid=,ppid= 2>/dev/null');
+        if (!is_string($output) || trim($output) === '') {
+            return [];
+        }
+
+        $childrenByParent = [];
+        foreach (preg_split('/\r?\n/', trim($output)) ?: [] as $line) {
+            $line = trim((string)$line);
+            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)$/', $line, $matches)) {
+                continue;
+            }
+            $pid = (int)($matches[1] ?? 0);
+            $ppid = (int)($matches[2] ?? 0);
+            if ($pid <= 0 || $ppid <= 0) {
+                continue;
+            }
+            $childrenByParent[$ppid][] = $pid;
+        }
+
+        $queue = [$rootPid];
+        $seen = [$rootPid => true];
+        $descendants = [];
+        while ($queue) {
+            $parent = array_shift($queue);
+            foreach ((array)($childrenByParent[$parent] ?? []) as $childPid) {
+                $childPid = (int)$childPid;
+                if ($childPid <= 0 || isset($seen[$childPid])) {
+                    continue;
+                }
+                $seen[$childPid] = true;
+                $descendants[] = $childPid;
+                $queue[] = $childPid;
+            }
+        }
+        return $descendants;
+    }
+
+    /**
+     * 从端口监听者里筛选“可确认属于当前 managed upstream 实例”的 PID。
+     *
+     * @param array<string, mixed> $instance upstream 实例运行态信息
+     * @param int $listenPort 当前检查的监听端口
+     * @param bool $matchHttpPort true 表示按 `-port` 匹配；false 表示按 `-rport` 匹配
+     * @return array<int, int>
+     */
+    protected function collectOwnedManagedListenerPids(array $instance, int $listenPort, bool $matchHttpPort): array {
+        if ($listenPort <= 0) {
+            return [];
+        }
+        $metadata = (array)($instance['metadata'] ?? []);
+        $httpPort = (int)($instance['port'] ?? 0);
+        $rpcPort = (int)($instance['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
+        $gatewayPort = (int)($metadata['gateway_port'] ?? 0);
+        $ownerEpoch = (int)($metadata['owner_epoch'] ?? 0);
+        $appFlag = '-app=' . APP_DIR_NAME;
+        $expectedPortFlag = $matchHttpPort ? ('-port=' . $httpPort) : ($rpcPort > 0 ? ('-rport=' . $rpcPort) : '');
+
+        $owned = [];
+        foreach (CoreServer::findPidsByPort($listenPort) as $pid) {
+            $pid = (int)$pid;
+            if ($pid <= 0 || !@Process::kill($pid, 0)) {
+                continue;
+            }
+            $command = @shell_exec('ps -o command= -p ' . $pid . ' 2>/dev/null');
+            $command = is_string($command) ? trim($command) : '';
+            if ($command === '' || !str_contains($command, 'boot gateway_upstream start')) {
+                continue;
+            }
+            if (!str_contains($command, $appFlag)) {
+                continue;
+            }
+            if ($expectedPortFlag !== '' && !str_contains($command, $expectedPortFlag)) {
+                continue;
+            }
+
+            // 只清理 owner 匹配的实例，避免误伤同机其它 gateway/upstream。
+            if ($gatewayPort > 0 && !str_contains($command, '-gateway_port=' . $gatewayPort)) {
+                continue;
+            }
+            if ($ownerEpoch > 0) {
+                if (!preg_match('/(?:^|\s)-gateway_epoch=(\d+)(?:\s|$)/', $command, $matches)) {
+                    continue;
+                }
+                if ((int)($matches[1] ?? 0) !== $ownerEpoch) {
+                    continue;
+                }
+            }
+            $owned[$pid] = $pid;
+        }
+        ksort($owned);
+        return array_values($owned);
+    }
+
+    /**
+     * 将“端口监听 PID”提升为对应 managed upstream 的根 PID。
+     *
+     * 监听端口通常落在 worker 上，直接对 worker/manager 发信号会被 master 补拉，
+     * 造成“服务器正在关闭 + Workers 启动完成”反复出现。这里通过父链上溯，统一
+     * 收敛到同 owner 的根进程（通常是 upstream master）。
+     *
+     * @param array<string, mixed> $instance upstream 实例运行态信息
+     * @param int $listenPort 当前检查的监听端口
+     * @param bool $matchHttpPort true 表示按 `-port` 匹配；false 表示按 `-rport` 匹配
+     * @return array<int, int>
+     */
+    protected function collectOwnedManagedRootPids(array $instance, int $listenPort, bool $matchHttpPort): array {
+        $listenerPids = $this->collectOwnedManagedListenerPids($instance, $listenPort, $matchHttpPort);
+        if (!$listenerPids) {
+            return [];
+        }
+        $snapshot = $this->loadProcessSnapshot();
+        $roots = [];
+        foreach ($listenerPids as $listenerPid) {
+            $rootPid = $this->resolveOwnedManagedRootPid((int)$listenerPid, $snapshot, $instance);
+            if ($rootPid > 0) {
+                $roots[$rootPid] = $rootPid;
+            }
+        }
+        ksort($roots);
+        return array_values($roots);
+    }
+
+    /**
+     * 读取当前系统进程快照（pid/ppid/command）。
+     *
+     * @return array<int, array{ppid:int, command:string}>
+     */
+    protected function loadProcessSnapshot(): array {
+        $snapshot = [];
+        $output = @shell_exec('ps -axo pid=,ppid=,command= 2>/dev/null');
+        if (!is_string($output) || trim($output) === '') {
+            return $snapshot;
+        }
+        foreach (preg_split('/\r?\n/', trim($output)) ?: [] as $line) {
+            $line = trim((string)$line);
+            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)\s+(.+)$/', $line, $matches)) {
+                continue;
+            }
+            $pid = (int)($matches[1] ?? 0);
+            $ppid = (int)($matches[2] ?? 0);
+            $command = trim((string)($matches[3] ?? ''));
+            if ($pid <= 0 || $ppid < 0 || $command === '') {
+                continue;
+            }
+            $snapshot[$pid] = [
+                'ppid' => $ppid,
+                'command' => $command,
+            ];
+        }
+        return $snapshot;
+    }
+
+    /**
+     * 把指定 PID 沿父链上溯到同 owner 的最顶层 upstream 进程。
+     *
+     * @param int $pid 起始 pid（通常是监听 worker）
+     * @param array<int, array{ppid:int, command:string}> $snapshot 进程快照
+     * @param array<string, mixed> $instance upstream 实例运行态信息
+     * @return int
+     */
+    protected function resolveOwnedManagedRootPid(int $pid, array $snapshot, array $instance): int {
+        if ($pid <= 0 || !isset($snapshot[$pid])) {
+            return 0;
+        }
+        $metadata = (array)($instance['metadata'] ?? []);
+        $expectedMasterPid = (int)($metadata['master_pid'] ?? 0);
+        $currentPid = $pid;
+        $lastOwnedPid = 0;
+        $depth = 0;
+        while ($currentPid > 0 && isset($snapshot[$currentPid]) && $depth < 64) {
+            $depth++;
+            if ($expectedMasterPid > 0 && $currentPid === $expectedMasterPid) {
+                return $currentPid;
+            }
+            $command = (string)($snapshot[$currentPid]['command'] ?? '');
+            if (!$this->commandMatchesManagedOwnership($command, $instance)) {
+                break;
+            }
+            $lastOwnedPid = $currentPid;
+            $parentPid = (int)($snapshot[$currentPid]['ppid'] ?? 0);
+            if ($parentPid <= 1 || $parentPid === $currentPid) {
+                break;
+            }
+            $currentPid = $parentPid;
+        }
+        return $lastOwnedPid;
+    }
+
+    /**
+     * 判断某条命令行是否属于当前实例 owner。
+     *
+     * @param string $command 进程命令行
+     * @param array<string, mixed> $instance upstream 实例运行态信息
+     * @return bool
+     */
+    protected function commandMatchesManagedOwnership(string $command, array $instance): bool {
+        $command = trim($command);
+        if ($command === '' || !str_contains($command, 'boot gateway_upstream start')) {
+            return false;
+        }
+
+        $metadata = (array)($instance['metadata'] ?? []);
+        $appFlag = '-app=' . APP_DIR_NAME;
+        if (!str_contains($command, $appFlag)) {
+            return false;
+        }
+
+        $gatewayPort = (int)($metadata['gateway_port'] ?? 0);
+        if ($gatewayPort > 0 && !str_contains($command, '-gateway_port=' . $gatewayPort)) {
+            return false;
+        }
+
+        $ownerEpoch = (int)($metadata['owner_epoch'] ?? 0);
+        if ($ownerEpoch > 0) {
+            if (!preg_match('/(?:^|\s)-gateway_epoch=(\d+)(?:\s|$)/', $command, $matches)) {
+                return false;
+            }
+            if ((int)($matches[1] ?? 0) !== $ownerEpoch) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
