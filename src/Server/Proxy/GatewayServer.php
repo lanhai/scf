@@ -1816,6 +1816,11 @@ class GatewayServer {
         Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
         $params['request_id'] = $requestId;
         $token = $this->enqueueGatewayBusinessRuntimeCommand($command, $params);
+        if ($token === false) {
+            Runtime::instance()->delete($this->gatewayBusinessCommandResultKey($requestId));
+            Console::error("【Gateway】异步投递业务编排命令失败: command={$command}, request_id={$requestId}, reason=runtime_queue_write_failed");
+            return false;
+        }
         Console::info("【Gateway】异步投递业务编排命令: command={$command}, request_id={$requestId}, mode=runtime_queue, token={$token}");
         return $requestId;
     }
@@ -1829,9 +1834,9 @@ class GatewayServer {
      *
      * @param string $command 命令名
      * @param array<string, mixed> $params 命令参数
-     * @return string 本次队列投递 token
+     * @return string|false 本次队列投递 token，失败返回 false
      */
-    protected function enqueueGatewayBusinessRuntimeCommand(string $command, array $params = []): string {
+    protected function enqueueGatewayBusinessRuntimeCommand(string $command, array $params = []): string|false {
         $token = uniqid('gateway_business_runtime_', true);
         $queue = Runtime::instance()->get(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE);
         $items = (is_array($queue) && is_array($queue['items'] ?? null)) ? (array)$queue['items'] : [];
@@ -1846,10 +1851,17 @@ class GatewayServer {
         if (count($items) > 32) {
             $items = array_slice($items, -32);
         }
-        Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE, [
+        $written = Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE, [
             'items' => array_values($items),
             'updated_at' => time(),
         ]);
+        if (!$written) {
+            Console::error(
+                "【Gateway】业务编排命令入队失败: command={$command}, token={$token}, runtime_count="
+                . Runtime::instance()->count() . ", runtime_size=" . Runtime::instance()->size() . ", queued_items=" . count($items)
+            );
+            return false;
+        }
         return $token;
     }
 
@@ -2071,6 +2083,7 @@ class GatewayServer {
 
         $this->logUpdateStage($taskId, $type, $version, 'accepted', [
             'slaves' => count($slaveHosts),
+            'request_id' => $requestId,
         ]);
         return Result::success([
             'accepted' => true,
@@ -2680,7 +2693,10 @@ class GatewayServer {
      * @return string
      */
     protected function nodeLinuxCrontabSyncStateKey(string $host): string {
-        return 'linux_crontab_sync_state:' . $host;
+        // Swoole\Table 的 row key 长度有限制（常见上限 64 字节），
+        // 直接拼接较长 node_id 会触发 "key is too long" 并导致写入失败。
+        // 这里统一用定长 hash，保证 Runtime key 可写且跨进程读写一致。
+        return 'linux_crontab_sync_state:' . md5($host);
     }
 
     /**

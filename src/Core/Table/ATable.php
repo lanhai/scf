@@ -155,7 +155,9 @@ abstract class ATable {
      * @return bool
      */
     public function set($rowKey, $datas): bool {
-        if (!$this->exist($rowKey) && $this->count() > $this->size()) {
+        // Swoole\Table 满载时再写新 key 会直接失败。这里必须用 >=，
+        // 不能用 >，否则在“刚好满”这一档会静默走到 table->set(false)。
+        if (!$this->exist($rowKey) && $this->count() >= $this->size()) {
             Console::error("内存表:" . get_called_class() . "已满,请检查配置");
             return false;
         }
@@ -163,14 +165,22 @@ abstract class ATable {
             if (Arr::isArray($datas)) {
                 $datas = JsonHelper::toJson($datas);
             }
-            return $this->table->set($rowKey, ['_value' => $datas]);
+            $ok = $this->table->set($rowKey, ['_value' => $datas]);
+            if (!$ok) {
+                Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, count=" . $this->count() . ", size=" . $this->size());
+            }
+            return $ok;
         }
         foreach ($datas as &$value) {
             if (Arr::isArray($value)) {
                 $value = JsonHelper::toJson($value);
             }
         }
-        return $this->table->set($rowKey, $datas);
+        $ok = $this->table->set($rowKey, $datas);
+        if (!$ok) {
+            Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, count=" . $this->count() . ", size=" . $this->size());
+        }
+        return $ok;
     }
 
     /**
@@ -181,7 +191,8 @@ abstract class ATable {
      * @return int
      */
     public function incr(string $key, string $colum = '_value', int $incrby = 1): int {
-        if (!$this->exist($key) && $this->count() > $this->size()) {
+        // 与 set() 一致：满载时新增 key 必须立即拒绝，避免 silent failure。
+        if (!$this->exist($key) && $this->count() >= $this->size()) {
             Console::error("内存表:" . get_called_class() . "已满,请检查配置");
             return 0;
         }

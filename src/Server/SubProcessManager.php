@@ -754,7 +754,12 @@ class SubProcessManager {
 
         $items = array_values(array_filter((array)$queue['items'], 'is_array'));
         if (!$items) {
-            Runtime::instance()->delete(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE);
+            // 队列空时保留 key，避免 Runtime 表接近满载时下次入队因为“新建 key”
+            // 失败而出现“命令已 accepted 但实际未入队”。
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE, [
+                'items' => [],
+                'updated_at' => time(),
+            ]);
             return null;
         }
 
@@ -765,7 +770,10 @@ class SubProcessManager {
                 'updated_at' => time(),
             ]);
         } else {
-            Runtime::instance()->delete(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE);
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE, [
+                'items' => [],
+                'updated_at' => time(),
+            ]);
         }
 
         $command = trim((string)($item['command'] ?? ''));
