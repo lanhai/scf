@@ -1551,6 +1551,47 @@ class GatewayServer {
                     'internal_message' => 'redisqueue process restart started',
                     'after_write' => $restart,
                 ];
+            case 'subprocess_restart':
+                if (!$this->subProcessManager) {
+                    return [
+                        'result' => Result::error('SubProcessManager 未初始化'),
+                        'internal_error_status' => 409,
+                    ];
+                }
+                $target = trim((string)($params['name'] ?? ''));
+                $result = $this->subProcessManager->restartManagedProcesses($target === '' ? [] : [$target]);
+                return [
+                    'result' => $result['ok'] ? Result::success($result['message']) : Result::error($result['message']),
+                    'internal_error_status' => 409,
+                    'internal_success_status' => 200,
+                ];
+            case 'subprocess_stop':
+                if (!$this->subProcessManager) {
+                    return [
+                        'result' => Result::error('SubProcessManager 未初始化'),
+                        'internal_error_status' => 409,
+                    ];
+                }
+                $target = trim((string)($params['name'] ?? ''));
+                $result = $this->subProcessManager->stopManagedProcesses($target === '' ? [] : [$target]);
+                return [
+                    'result' => $result['ok'] ? Result::success($result['message']) : Result::error($result['message']),
+                    'internal_error_status' => 409,
+                    'internal_success_status' => 200,
+                ];
+            case 'subprocess_restart_all':
+                if (!$this->subProcessManager) {
+                    return [
+                        'result' => Result::error('SubProcessManager 未初始化'),
+                        'internal_error_status' => 409,
+                    ];
+                }
+                $result = $this->subProcessManager->restartAllManagedProcesses();
+                return [
+                    'result' => $result['ok'] ? Result::success($result['message']) : Result::error($result['message']),
+                    'internal_error_status' => 409,
+                    'internal_success_status' => 200,
+                ];
             case 'restart':
                 if ($this->gatewayShutdownScheduled) {
                     return [
@@ -3615,6 +3656,32 @@ class GatewayServer {
                 $this->restartGatewayRedisQueueProcess();
                 $socket->push("【" . SERVER_HOST . "】start redisqueue restart");
                 return true;
+            case 'subprocess_restart':
+                if (!$this->subProcessManager) {
+                    $socket->push("【" . SERVER_HOST . "】SubProcessManager unavailable");
+                    return true;
+                }
+                $target = trim((string)($params['name'] ?? ''));
+                $result = $this->subProcessManager->restartManagedProcesses($target === '' ? [] : [$target]);
+                $socket->push("【" . SERVER_HOST . "】" . $result['message']);
+                return true;
+            case 'subprocess_stop':
+                if (!$this->subProcessManager) {
+                    $socket->push("【" . SERVER_HOST . "】SubProcessManager unavailable");
+                    return true;
+                }
+                $target = trim((string)($params['name'] ?? ''));
+                $result = $this->subProcessManager->stopManagedProcesses($target === '' ? [] : [$target]);
+                $socket->push("【" . SERVER_HOST . "】" . $result['message']);
+                return true;
+            case 'subprocess_restart_all':
+                if (!$this->subProcessManager) {
+                    $socket->push("【" . SERVER_HOST . "】SubProcessManager unavailable");
+                    return true;
+                }
+                $result = $this->subProcessManager->restartAllManagedProcesses();
+                $socket->push("【" . SERVER_HOST . "】" . $result['message']);
+                return true;
             case 'restart':
                 if ($this->gatewayShutdownScheduled) {
                     $socket->push("【" . SERVER_HOST . "】gateway restart failed: gateway shutting down");
@@ -4677,6 +4744,12 @@ class GatewayServer {
         $appVersion = $this->resolveAppVersion($appInfo);
         $publicVersion = $this->resolvePublicVersion($appInfo);
         $stats = isset($this->server) ? $this->server->stats() : [];
+        $subprocesses = $this->subProcessManager?->managedProcessDashboardSnapshot() ?: [
+            'signature' => '--',
+            'updated_at' => time(),
+            'summary' => ['total' => 0, 'running' => 0, 'stale' => 0, 'offline' => 0, 'stopped' => 0],
+            'items' => [],
+        ];
         $node = [
             'host' => 'localhost',
             'name' => 'Gateway',
@@ -4717,6 +4790,8 @@ class GatewayServer {
             'threads' => (int)($stats['worker_num'] ?? 0),
             'tables' => [],
             'tasks' => [],
+            'subprocesses' => $subprocesses,
+            'subprocess_signature' => (string)($subprocesses['signature'] ?? '--'),
             'fingerprint' => APP_FINGERPRINT . ':gateway',
         ];
         $heartbeatStatus = ServerNodeStatusTable::instance()->get('localhost');

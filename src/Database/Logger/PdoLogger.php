@@ -44,9 +44,14 @@ class PdoLogger implements ILogger {
                 $executeSql = str_replace($field, $bindings[trim(str_replace(':', '', $field))] ?? '', $executeSql);
             }
         }
-        $countKey = Key::COUNTER_MYSQL_PROCESSING . time();
+        $now = time();
+        $countKey = Key::COUNTER_MYSQL_PROCESSING . $now;
+        // 每次 SQL trace 都先尝试回收过期秒桶，确保即使“本秒首次 incr 失败”
+        // 也不会因为清理逻辑未触发而长期卡在满表状态。
+        Counter::instance()->delete(Key::COUNTER_MYSQL_PROCESSING . ($now - 3));
         $count = Counter::instance()->incr($countKey);
         if ($count == 1) {
+            // Timer 正常时本秒 key 会在 2 秒后自动清理。
             Timer::after(2000, function () use ($countKey) {
                 Counter::instance()->delete($countKey);
             });

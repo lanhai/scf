@@ -60,6 +60,36 @@ class LinuxCrontabManager {
     private const CRONTAB_LOG_MAX_LINES = 1000;
 
     /**
+     * 互斥锁等待秒数。
+     *
+     * 旧实现使用 `flock -n`，一旦上一轮尚未释放锁就会立即退出，
+     * 在分钟级排程下会形成“长期看起来没执行”的假象。
+     */
+    private const LOCK_WAIT_SECONDS = 5;
+
+    /**
+     * 互斥锁冲突时的退出码。
+     *
+     * 使用显式退出码让日志能区分“业务脚本失败”和“锁竞争跳过”。
+     */
+    private const LOCK_BUSY_EXIT_CODE = 75;
+
+    /**
+     * 一次性 crontab 命令最大执行时长（秒）。
+     */
+    private const COMMAND_TIMEOUT_SECONDS = 180;
+
+    /**
+     * 超时后额外等待再强制终止的宽限时间（秒）。
+     */
+    private const COMMAND_TIMEOUT_KILL_AFTER_SECONDS = 5;
+
+    /**
+     * GNU timeout 超时退出码。
+     */
+    private const COMMAND_TIMEOUT_EXIT_CODE = 124;
+
+    /**
      * 支持的调度类型。
      *
      * - interval: 每 N 分钟执行一次
@@ -77,6 +107,13 @@ class LinuxCrontabManager {
      * @var string|null
      */
     protected ?string $flockPath = null;
+
+    /**
+     * `timeout` 命令解析结果缓存。
+     *
+     * @var string|null
+     */
+    protected ?string $timeoutPath = null;
 
     /**
      * 返回 dashboard 页面初始化所需的全部数据。
@@ -1326,6 +1363,10 @@ class LinuxCrontabManager {
         $binDir = SCF_ROOT . '/bin';
         $logDirectory = $this->crontabLogDirectory();
         $logFile = $this->crontabLogFile();
+        $logFileEscaped = escapeshellarg($logFile);
+        $entryIdForLog = preg_replace('/[^a-z0-9_:\\.-]+/i', '_', (string)($entry['id'] ?? ''));
+        $entryIdForLog = $entryIdForLog !== '' ? $entryIdForLog : 'unknown';
+
         // flock 直接执行后续 command argv，而不会像 shell 那样解释前置的环境变量赋值。
         // 这里统一改成显式走 `/usr/bin/env`，让“设置 SCF_PHP_BIN + 执行 bash 脚本”
         // 在有无 flock 两种路径下都保持同样语义。
@@ -1345,11 +1386,21 @@ class LinuxCrontabManager {
         $command .= ' -namespace=' . escapeshellarg((string)$entry['namespace']);
         $command .= ' -entry_id=' . escapeshellarg((string)$entry['id']);
 
+        $timeoutPath = $this->resolveTimeoutPath();
+        if ($timeoutPath !== '') {
+            // 给一次性命令增加硬超时，避免异常阻塞导致锁长时间不释放。
+            $command = escapeshellarg($timeoutPath)
+                . ' -k ' . self::COMMAND_TIMEOUT_KILL_AFTER_SECONDS . 's '
+                . self::COMMAND_TIMEOUT_SECONDS . 's '
+                . $command;
+        }
+
         $flockPath = $this->resolveFlockPath();
         $lockFile = '/tmp/' . APP_DIR_NAME . '_' . preg_replace('/[^a-z0-9_]+/i', '_', (string)$entry['id']) . '.lock';
         if ((int)($entry['lock_enabled'] ?? 1) === 1 && $flockPath !== '') {
             $command = escapeshellarg($flockPath)
-                . ' -n '
+                . ' -w ' . self::LOCK_WAIT_SECONDS
+                . ' -E ' . self::LOCK_BUSY_EXIT_CODE
                 . escapeshellarg($lockFile)
                 . ' '
                 . $command;
@@ -1357,17 +1408,26 @@ class LinuxCrontabManager {
 
         // Linux crontab 没有交互终端，这里统一把标准输出与错误输出写入固定文件，
         // 并在每次执行后裁剪日志，仅保留最新 N 行，方便实时 tail 且避免日志无限增长。
-        $runCommand = $command . ' >> ' . escapeshellarg($logFile) . ' 2>&1';
+        $startLogCommand = '/bin/echo "$(/bin/date \'+%F %T\') [CRON_TRIGGER] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped;
+        $runCommand = $command . ' >> ' . $logFileEscaped . ' 2>&1';
+        $statusLogCommand = 'rc=$?; '
+            . '[ "$rc" -eq ' . self::LOCK_BUSY_EXIT_CODE . ' ]'
+            . ' && /bin/echo "$(/bin/date \'+%F %T\') [CRON_LOCK_BUSY] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped . '; '
+            . '[ "$rc" -eq ' . self::COMMAND_TIMEOUT_EXIT_CODE . ' ]'
+            . ' && /bin/echo "$(/bin/date \'+%F %T\') [CRON_TIMEOUT] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped . '; '
+            . '/bin/echo "$(/bin/date \'+%F %T\') [CRON_FINISH] entry=' . $entryIdForLog . ' rc=$rc" >> ' . $logFileEscaped;
         $trimCommand = 'log_tmp=' . escapeshellarg($logFile . '.tmp') . '.$$; '
             . '/usr/bin/env tail -n ' . self::CRONTAB_LOG_MAX_LINES
-            . ' ' . escapeshellarg($logFile)
+            . ' ' . $logFileEscaped
             . ' > "$log_tmp"'
-            . ' && /bin/mv "$log_tmp" ' . escapeshellarg($logFile)
+            . ' && /bin/mv "$log_tmp" ' . $logFileEscaped
             . '; /bin/rm -f "$log_tmp"';
 
         return 'cd ' . escapeshellarg($binDir)
             . ' && /bin/mkdir -p ' . escapeshellarg($logDirectory)
+            . ' && ' . $startLogCommand
             . ' && ' . $runCommand
+            . '; ' . $statusLogCommand
             . '; ' . $trimCommand;
     }
 
@@ -1721,6 +1781,52 @@ class LinuxCrontabManager {
 
         $this->flockPath = '';
         return $this->flockPath;
+    }
+
+    /**
+     * 解析当前节点上的 `timeout` 命令路径。
+     *
+     * @return string
+     */
+    protected function resolveTimeoutPath(): string {
+        if (!is_null($this->timeoutPath)) {
+            return $this->timeoutPath;
+        }
+
+        $resolved = trim((string)@shell_exec('command -v timeout 2>/dev/null'));
+        if ($resolved !== '' && is_executable($resolved)) {
+            $this->timeoutPath = $resolved;
+            return $this->timeoutPath;
+        }
+
+        $candidates = [];
+        $pathEnv = (string)(getenv('PATH') ?: '');
+        if ($pathEnv !== '') {
+            foreach (explode(PATH_SEPARATOR, $pathEnv) as $directory) {
+                $directory = trim($directory);
+                if ($directory === '') {
+                    continue;
+                }
+                $candidates[] = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'timeout';
+            }
+        }
+
+        // 兼容守护进程 PATH 精简场景下的常见 timeout 安装位置。
+        $candidates = array_merge($candidates, [
+            '/usr/local/bin/timeout',
+            '/usr/bin/timeout',
+            '/bin/timeout',
+        ]);
+
+        foreach (array_unique($candidates) as $candidate) {
+            if (is_executable($candidate)) {
+                $this->timeoutPath = $candidate;
+                return $this->timeoutPath;
+            }
+        }
+
+        $this->timeoutPath = '';
+        return $this->timeoutPath;
     }
 
     /**

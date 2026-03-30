@@ -26,11 +26,18 @@ class Key {
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID = 'gateway_cluster_coordinator_pid';
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT = 'gateway_cluster_coordinator_heartbeat_at';
     public const RUNTIME_MEMORY_MONITOR_PID = 'memory_monitor_pid';
+    public const RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT = 'memory_monitor_heartbeat_at';
     public const RUNTIME_HEARTBEAT_PID = 'heartbeat_pid';
+    public const RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT = 'heartbeat_process_heartbeat_at';
     public const RUNTIME_LOG_BACKUP_PID = 'log_backup_pid';
+    public const RUNTIME_LOG_BACKUP_HEARTBEAT_AT = 'log_backup_heartbeat_at';
+    public const RUNTIME_CRONTAB_MANAGER_PID = 'crontab_manager_pid';
+    public const RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT = 'crontab_manager_heartbeat_at';
     public const RUNTIME_REDIS_QUEUE_MANAGER_PID = 'redis_queue_manager_pid';
+    public const RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT = 'redis_queue_manager_heartbeat_at';
     public const RUNTIME_REDIS_QUEUE_WORKER_PID = 'redis_queue_worker_pid';
     public const RUNTIME_FILE_WATCHER_PID = 'file_watcher_pid';
+    public const RUNTIME_FILE_WATCHER_HEARTBEAT_AT = 'file_watcher_heartbeat_at';
     public const RUNTIME_GATEWAY_INSTALL_TAKEOVER = 'gateway_install_takeover';
     public const RUNTIME_GATEWAY_INSTALL_UPDATING = 'gateway_install_updating';
     public const RUNTIME_GATEWAY_STARTUP_READY_INSTANCES = 'gw_boot_i';
@@ -42,6 +49,7 @@ class Key {
     public const RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT = 'subprocess_manager_heartbeat_at';
     public const RUNTIME_SUBPROCESS_ALIVE_COUNT = 'subprocess_alive_count';
     public const RUNTIME_SUBPROCESS_SHUTTING_DOWN = 'subprocess_shutting_down';
+    public const RUNTIME_SUBPROCESS_CONTROL_STATE = 'subprocess_control_state';
     public const COUNTER_CRONTAB_PROCESS = 'crontab_manager_process';
     public const COUNTER_REDIS_QUEUE_PROCESS = 'redis_queue_manager_process';
     public const COUNTER_REQUEST = '_REQUEST_TOTAL_';

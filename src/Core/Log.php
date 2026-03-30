@@ -444,10 +444,16 @@ class Log extends Component {
         $fileName = $dir . $day . '.log';
         $success = File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
         if ($success && $day == date('Y-m-d')) {
-            if (Counter::instance()->exist(md5($fileName))) {
-                Counter::instance()->incr(md5($fileName));
+            $taskName = is_array($message) ? ($message['task'] ?? null) : null;
+            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
+            $todayStamp = (int)date('Ymd');
+            $savedStamp = (int)(Counter::instance()->get($todayStampKey) ?: 0);
+            // 日切时复用同一组 key 并重置计数，避免“按日期扩张 key”把 Counter 表打满。
+            if ($savedStamp !== $todayStamp || !Counter::instance()->exist($todayCountKey)) {
+                Counter::instance()->set($todayCountKey, $this->countFileLines($fileName));
+                Counter::instance()->set($todayStampKey, $todayStamp);
             } else {
-                Counter::instance()->set(md5($fileName), $this->count($type, $day, $message['task'] ?? null));
+                Counter::instance()->incr($todayCountKey);
             }
         }
         return $success;
@@ -467,12 +473,39 @@ class Log extends Component {
             $dir = APP_LOG_PATH . '/' . $type . '/';
         }
         $fileName = $dir . $day . '.log';
-        if ($day == date('Y-m-d') && Counter::instance()->exist(md5($fileName))) {
-            return Counter::instance()->get(md5($fileName));
+        $today = date('Y-m-d');
+        if ($day === $today) {
+            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
+            $todayStamp = (int)date('Ymd');
+            $savedStamp = (int)(Counter::instance()->get($todayStampKey) ?: 0);
+            if ($savedStamp === $todayStamp && Counter::instance()->exist($todayCountKey)) {
+                return (int)(Counter::instance()->get($todayCountKey) ?: 0);
+            }
         }
         $count = $this->countFileLines($fileName);
-        $day == date('Y-m-d') and Counter::instance()->set(md5($fileName), $count);
+        if ($day === $today) {
+            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
+            Counter::instance()->set($todayCountKey, $count);
+            Counter::instance()->set($todayStampKey, (int)date('Ymd'));
+        }
         return $count;
+    }
+
+    /**
+     * 获取“今日日志行数缓存”对应的 Counter key。
+     *
+     * 设计说明：
+     * 1. key 按日志域（type + task）固定，不随日期扩张；
+     * 2. 通过 day-stamp key 判断是否跨天，跨天后原 key 直接复用并重置。
+     *
+     * @param string $type
+     * @param string|null $taskName
+     * @return array{string,string}
+     */
+    protected function todayLogCounterKeys(string $type, ?string $taskName = null): array {
+        $scope = $taskName ? ($type . ':' . $taskName) : $type;
+        $hash = md5('LOG_TODAY_COUNTER:' . $scope);
+        return ['LCNT_' . $hash, 'LCNT_DAY_' . $hash];
     }
 
     /**

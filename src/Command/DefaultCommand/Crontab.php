@@ -289,7 +289,7 @@ class Crontab implements CommandInterface {
         // 或手工停服导致离线节点仍继续跑一次性任务。
         if (!$this->isApplicationOnline()) {
             return Color::warning(
-                '应用未在线, 已跳过本次任务: app=' . APP_DIR_NAME
+                '【Crontab】应用未在线，已跳过本次任务: app=' . APP_DIR_NAME
                 . ', role=' . SERVER_ROLE
                 . ', port=' . $this->resolveExpectedPort()
             );
@@ -298,16 +298,16 @@ class Crontab implements CommandInterface {
         $task = $this->resolveTask($identifier);
         if (is_null($task)) {
             $message = $this->resolveError ?: '未匹配到指定 crontab 脚本';
-            return Color::danger($message);
+            return Color::danger('【Crontab】任务解析失败: ' . $message);
         }
 
         $taskInstance = TaskCrontab::factory($task);
         if (!$taskInstance->validate()) {
-            return Color::danger('任务配置校验失败: ' . $taskInstance->getError());
+            return Color::danger('【Crontab】任务配置校验失败: ' . $taskInstance->getError());
         }
 
         if (!method_exists(ltrim((string)$task['namespace'], '\\'), 'run')) {
-            return Color::danger('任务脚本必须实现 run 方法: ' . $task['namespace']);
+            return Color::danger('【Crontab】任务脚本必须实现 run 方法: ' . $task['namespace']);
         }
 
         $entryId = trim((string)Manager::instance()->getOpt('entry_id', ''));
@@ -316,10 +316,10 @@ class Crontab implements CommandInterface {
         try {
             $this->executeTaskInCoroutine($taskInstance);
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, true, '任务执行完成');
-            return Color::success('任务执行完成: ' . $task['namespace']);
+            return Color::success('【Crontab】任务执行完成: namespace=' . $task['namespace']);
         } catch (Throwable $throwable) {
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, false, $throwable->getMessage());
-            return Color::danger('任务执行失败: ' . $throwable->getMessage());
+            return Color::danger('【Crontab】任务执行失败: ' . $throwable->getMessage());
         }
     }
 

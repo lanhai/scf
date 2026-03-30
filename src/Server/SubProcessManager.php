@@ -44,6 +44,10 @@ class SubProcessManager {
     protected const MANAGER_COMMAND_RETRY_INTERVAL_US = 50000;
     protected const MANAGER_HEARTBEAT_FRESH_SECONDS = 3;
     protected const MANAGER_HEARTBEAT_SHUTDOWN_STALE_GRACE_SECONDS = 20;
+    protected const PROCESS_RESPAWN_RETRY_SECONDS = 2;
+    protected const PROCESS_HEARTBEAT_STALE_SECONDS = 120;
+    protected const PROCESS_HEARTBEAT_FORCE_KILL_SECONDS = 300;
+    protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
 
     /**
      * Server 托管的总控子进程。
@@ -67,6 +71,9 @@ class SubProcessManager {
     protected $gatewayBusinessTickHandler = null;
     protected $gatewayHealthTickHandler = null;
     protected $gatewayBusinessCommandHandler = null;
+    protected array $processLastRespawnAttemptAt = [];
+    protected array $processLastStaleHandleAt = [];
+    protected array $manualStoppedProcesses = [];
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
@@ -186,14 +193,24 @@ class SubProcessManager {
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, time());
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, 0);
+        $this->manualStoppedProcesses = [];
+        $this->flushSubprocessControlState();
         try {
             if ($this->consolePushProcess) {
-                $this->consolePushProcess->start();
+                try {
+                    $consolePushPid = (int)($this->consolePushProcess->start() ?: 0);
+                    if ($consolePushPid <= 0 || !@Process::kill($consolePushPid, 0)) {
+                        Console::warning('【ConsolePush】子进程启动失败，后续仅保留本地日志输出');
+                    }
+                } catch (Throwable $throwable) {
+                    Console::warning('【ConsolePush】子进程启动异常: ' . $throwable->getMessage());
+                }
             }
             foreach ($this->processList as $name => $process) {
                 /** @var Process $process */
-                $process->start();
-                $this->pidList[$process->pid] = $name;
+                if (!$this->startManagedProcess($name, $process, false)) {
+                    Console::warning("【{$name}】子进程首次拉起失败，进入保活重试");
+                }
             }
             while (true) {
                 // worker 侧可能先把“关停意图”写入共享表，再把命令投递到 manager pipe。
@@ -221,6 +238,13 @@ class SubProcessManager {
                     Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, 0);
                     Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
                     break;
+                }
+
+                if (!$shutdownRequested) {
+                    // wait(false) 只能回收“已经退出并被内核上报”的子进程。这里额外做一层保活巡检：
+                    // 1) 首次 start 失败或 pid 丢失时，主动补拉；
+                    // 2) 进程存活但心跳长期不更新时，视为卡死并回收重拉。
+                    $this->reconcileManagedProcessesHealth();
                 }
 
                 if (!Runtime::instance()->serverIsAlive()) {
@@ -262,6 +286,10 @@ class SubProcessManager {
                         if ($managerShuttingDown) {
                             continue;
                         }
+                        if ($this->isManagedProcessManuallyStopped($oldProcessName)) {
+                            $this->clearManagedProcessRuntimeState($oldProcessName);
+                            continue;
+                        }
                         Console::warning("【{$oldProcessName}】子进程#{$pid}退出，准备重启");
                         if (!$this->recreateManagedProcess($oldProcessName)) {
                             Console::warning("子进程 {$pid} 退出，未知进程");
@@ -275,6 +303,8 @@ class SubProcessManager {
             Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
             Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, 0);
             Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_PID, 0);
+            $this->manualStoppedProcesses = [];
+            $this->flushSubprocessControlState();
         }
     }
 
@@ -320,12 +350,160 @@ class SubProcessManager {
                     Console::warning("【SubProcessManager】命令转发失败: command={$forwardCommand}, targets=" . implode(',', $targets ?? []));
                 }
                 return false;
+            case 'restart_named_processes':
+                $restartTargets = $this->sanitizeManagedProcessTargets((array)($params['targets'] ?? []));
+                if (!$restartTargets) {
+                    return false;
+                }
+                $this->restartManagedProcessesDirect($restartTargets);
+                return false;
+            case 'stop_named_processes':
+                $stopTargets = $this->sanitizeManagedProcessTargets((array)($params['targets'] ?? []));
+                if (!$stopTargets) {
+                    return false;
+                }
+                $this->stopManagedProcessesDirect($stopTargets);
+                return false;
             case 'shutdown_processes':
                 $this->shutdownManagedProcessesDirect((bool)($params['graceful_business'] ?? false));
                 return true;
             default:
                 return false;
         }
+    }
+
+    /**
+     * 归一化并过滤子进程控制目标。
+     *
+     * 子进程控制命令来自 dashboard/cluster socket，必须做白名单过滤，
+     * 避免误传不存在的进程名导致 manager 状态漂移。
+     *
+     * @param array<int, mixed> $targets 原始目标列表
+     * @param bool $controllableOnly 是否限制为可控制进程（排除根 manager）
+     * @return array<int, string>
+     */
+    protected function sanitizeManagedProcessTargets(array $targets, bool $controllableOnly = false): array {
+        $lookup = [];
+        foreach ($targets as $target) {
+            if (!is_string($target)) {
+                continue;
+            }
+            $name = trim($target);
+            if ($name === '') {
+                continue;
+            }
+            if (!$this->hasProcess($name)) {
+                continue;
+            }
+            if ($controllableOnly && !in_array($name, $this->controllableManagedProcesses(), true)) {
+                continue;
+            }
+            $lookup[$name] = true;
+        }
+        return array_keys($lookup);
+    }
+
+    /**
+     * 返回允许 dashboard 执行 stop/restart 的受管子进程名。
+     *
+     * 控制面根进程 SubProcessManager 自身不在可控名单里，避免误操作导致
+     * 命令通道中断；其余 addProcess 子进程均可被显式停启用于排障。
+     *
+     * @return array<int, string>
+     */
+    protected function controllableManagedProcesses(): array {
+        $names = [];
+        foreach (array_keys($this->processList) as $name) {
+            $names[] = $name;
+        }
+        return $names;
+    }
+
+    /**
+     * 在 manager 进程内执行“重启指定子进程”。
+     *
+     * 重启语义分两步：
+     * 1. 清除手动停用标记，允许后续自动拉起；
+     * 2. 对存活进程发送 SIGTERM，wait(false) 分支会自动重拉。
+     *
+     * @param array<int, string> $targets 目标子进程名
+     * @return void
+     */
+    protected function restartManagedProcessesDirect(array $targets): void {
+        foreach ($targets as $name) {
+            $this->setManagedProcessManualStopped($name, false);
+            $process = $this->processList[$name] ?? null;
+            if (!$process instanceof Process) {
+                continue;
+            }
+            $pid = (int)($process->pid ?? 0);
+            if ($pid > 0 && @Process::kill($pid, 0)) {
+                @Process::kill($pid, SIGTERM);
+                continue;
+            }
+            $this->recreateManagedProcess($name);
+        }
+    }
+
+    /**
+     * 在 manager 进程内执行“停止指定子进程”。
+     *
+     * 停止语义会先设置手动停用标记，再触发进程退出。这样 wait(false) 与
+     * 健康巡检分支都不会把该进程自动拉回。
+     *
+     * @param array<int, string> $targets 目标子进程名
+     * @return void
+     */
+    protected function stopManagedProcessesDirect(array $targets): void {
+        foreach ($targets as $name) {
+            $this->setManagedProcessManualStopped($name, true);
+            $process = $this->processList[$name] ?? null;
+            if (!$process instanceof Process) {
+                continue;
+            }
+            $pid = (int)($process->pid ?? 0);
+            if ($pid > 0 && @Process::kill($pid, 0)) {
+                @Process::kill($pid, SIGTERM);
+            }
+        }
+    }
+
+    /**
+     * 设置单个子进程的手动停用状态，并同步到 Runtime。
+     *
+     * @param string $name 子进程名
+     * @param bool $stopped 是否手动停用
+     * @return void
+     */
+    protected function setManagedProcessManualStopped(string $name, bool $stopped): void {
+        if ($stopped) {
+            $this->manualStoppedProcesses[$name] = true;
+        } else {
+            unset($this->manualStoppedProcesses[$name]);
+        }
+        $this->flushSubprocessControlState();
+    }
+
+    /**
+     * 判断指定子进程是否处于“手动停用”状态。
+     *
+     * @param string $name 子进程名
+     * @return bool
+     */
+    protected function isManagedProcessManuallyStopped(string $name): bool {
+        return isset($this->manualStoppedProcesses[$name]);
+    }
+
+    /**
+     * 将当前手动停用状态刷新到 Runtime，供 dashboard 节点状态展示使用。
+     *
+     * @return void
+     */
+    protected function flushSubprocessControlState(): void {
+        Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_CONTROL_STATE, [
+            'manual_stopped' => array_values(array_keys($this->manualStoppedProcesses)),
+            'updated_at' => time(),
+        ]);
     }
 
     /**
@@ -373,13 +551,156 @@ class SubProcessManager {
             return false;
         }
         $this->processList[$name] = $newProcess;
-        $newProcess->start();
-        $pid = (int)($newProcess->pid ?? 0);
-        if ($pid > 0) {
-            $this->pidList[$pid] = $name;
+        if (!$this->startManagedProcess($name, $newProcess, true)) {
+            $this->clearManagedProcessRuntimeState($name);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 启动一个受管子进程并注册 pid 映射。
+     *
+     * 这里必须显式校验 `Process::start()` 的返回值。若启动失败却继续把对象留在
+     * processList，wait(false) 不会再收到该 pid 的退出事件，子进程就会永久缺席。
+     *
+     * @param string $name 子进程名
+     * @param Process $process 子进程对象
+     * @param bool $recreated 是否属于重拉场景
+     * @return bool
+     */
+    protected function startManagedProcess(string $name, Process $process, bool $recreated): bool {
+        try {
+            $startedPid = (int)($process->start() ?: 0);
+        } catch (Throwable $throwable) {
+            Console::warning("【{$name}】子进程启动异常: " . $throwable->getMessage());
+            return false;
+        }
+        $pid = $startedPid > 0 ? $startedPid : (int)($process->pid ?? 0);
+        if ($pid <= 0 || !@Process::kill($pid, 0)) {
+            Console::warning("【{$name}】子进程启动失败: pid=0");
+            return false;
+        }
+        $this->pidList[$pid] = $name;
+        unset($this->processLastRespawnAttemptAt[$name], $this->processLastStaleHandleAt[$name]);
+        if ($recreated) {
             Console::warning("【{$name}】子进程已重拉，PID:{$pid}");
         }
         return true;
+    }
+
+    /**
+     * 周期巡检受管子进程健康状态。
+     *
+     * manager 不仅要依赖 wait(false) 的退出事件，还要处理两类现实故障：
+     * 1) start 失败导致 pid=0；
+     * 2) 进程仍存活但业务循环卡死（心跳不再推进）。
+     *
+     * @return void
+     */
+    protected function reconcileManagedProcessesHealth(): void {
+        $now = time();
+        foreach (array_keys($this->processList) as $name) {
+            if ($this->isManagedProcessManuallyStopped($name)) {
+                continue;
+            }
+            /** @var Process|null $process */
+            $process = $this->processList[$name] ?? null;
+            if (!$process instanceof Process) {
+                continue;
+            }
+            $pid = (int)($process->pid ?? 0);
+            if ($pid <= 0 || !@Process::kill($pid, 0)) {
+                if ($pid > 0) {
+                    unset($this->pidList[$pid]);
+                }
+                $lastAttemptAt = (int)($this->processLastRespawnAttemptAt[$name] ?? 0);
+                if (($now - $lastAttemptAt) < self::PROCESS_RESPAWN_RETRY_SECONDS) {
+                    continue;
+                }
+                $this->processLastRespawnAttemptAt[$name] = $now;
+                Console::warning("【{$name}】检测到子进程不在线，准备重拉");
+                if (!$this->recreateManagedProcess($name)) {
+                    Console::warning("【{$name}】子进程重拉失败，等待下轮重试");
+                }
+                continue;
+            }
+
+            $heartbeatKey = $this->managedProcessHeartbeatRuntimeKey($name);
+            if ($heartbeatKey === '') {
+                continue;
+            }
+            $heartbeatAt = (int)(Runtime::instance()->get($heartbeatKey) ?? 0);
+            if ($heartbeatAt <= 0) {
+                continue;
+            }
+            $staleSeconds = $now - $heartbeatAt;
+            if ($staleSeconds <= self::PROCESS_HEARTBEAT_STALE_SECONDS) {
+                continue;
+            }
+            if (!Runtime::instance()->serverIsReady() || Runtime::instance()->serverIsDraining()) {
+                continue;
+            }
+            $lastHandledAt = (int)($this->processLastStaleHandleAt[$name] ?? 0);
+            if (($now - $lastHandledAt) < self::PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS) {
+                continue;
+            }
+            $this->processLastStaleHandleAt[$name] = $now;
+            Console::warning("【{$name}】子进程心跳超时({$staleSeconds}s)，发送 SIGTERM 回收");
+            @Process::kill($pid, SIGTERM);
+            if ($staleSeconds >= self::PROCESS_HEARTBEAT_FORCE_KILL_SECONDS) {
+                usleep(200000);
+                if (@Process::kill($pid, 0)) {
+                    Console::warning("【{$name}】子进程心跳持续超时({$staleSeconds}s)，升级 SIGKILL");
+                    @Process::kill($pid, SIGKILL);
+                }
+            }
+        }
+    }
+
+    /**
+     * 返回受管子进程对应的 runtime 心跳 key。
+     *
+     * @param string $name
+     * @return string
+     */
+    protected function managedProcessHeartbeatRuntimeKey(string $name): string {
+        return match ($name) {
+            'GatewayClusterCoordinator' => Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+            'GatewayBusinessCoordinator' => Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT,
+            'GatewayHealthMonitor' => Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT,
+            'MemoryUsageCount' => Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT,
+            'Heartbeat' => Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+            'LogBackup' => Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT,
+            'CrontabManager' => Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT,
+            'RedisQueue' => Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT,
+            'FileWatch' => Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT,
+            default => '',
+        };
+    }
+
+    /**
+     * 清理指定子进程的 runtime pid/heartbeat 状态，避免残留值误导后续健康判定。
+     *
+     * @param string $name 子进程名
+     * @return void
+     */
+    protected function clearManagedProcessRuntimeState(string $name): void {
+        $pidKey = match ($name) {
+            'GatewayClusterCoordinator' => Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+            'GatewayBusinessCoordinator' => Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID,
+            'GatewayHealthMonitor' => Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+            'MemoryUsageCount' => Key::RUNTIME_MEMORY_MONITOR_PID,
+            'Heartbeat' => Key::RUNTIME_HEARTBEAT_PID,
+            'LogBackup' => Key::RUNTIME_LOG_BACKUP_PID,
+            'CrontabManager' => Key::RUNTIME_CRONTAB_MANAGER_PID,
+            'RedisQueue' => Key::RUNTIME_REDIS_QUEUE_MANAGER_PID,
+            'FileWatch' => Key::RUNTIME_FILE_WATCHER_PID,
+            default => '',
+        };
+        $heartbeatKey = $this->managedProcessHeartbeatRuntimeKey($name);
+        $pidKey !== '' && Runtime::instance()->set($pidKey, 0);
+        $heartbeatKey !== '' && Runtime::instance()->set($heartbeatKey, 0);
     }
 
     protected function drainManagedProcesses(int $graceSeconds = self::PROCESS_EXIT_GRACE_SECONDS): void {
@@ -534,6 +855,20 @@ class SubProcessManager {
                     return true;
                 }
                 return false;
+            case 'subprocess_restart':
+                $name = trim((string)($params['name'] ?? ''));
+                $restartResult = $this->restartManagedProcesses($name === '' ? [] : [$name]);
+                $socket->push("【" . SERVER_HOST . "】" . $restartResult['message']);
+                return true;
+            case 'subprocess_stop':
+                $name = trim((string)($params['name'] ?? ''));
+                $stopResult = $this->stopManagedProcesses($name === '' ? [] : [$name]);
+                $socket->push("【" . SERVER_HOST . "】" . $stopResult['message']);
+                return true;
+            case 'subprocess_restart_all':
+                $restartAllResult = $this->restartAllManagedProcesses();
+                $socket->push("【" . SERVER_HOST . "】" . $restartAllResult['message']);
+                return true;
             case 'linux_crontab_sync':
                 try {
                     $result = LinuxCrontabManager::applyReplicationPayload((array)($params['config'] ?? []));
@@ -714,6 +1049,9 @@ class SubProcessManager {
 
     protected function buildNodeStatusPayload(Node $node): array {
         $status = $node->asArray();
+        $subprocesses = $this->managedProcessDashboardSnapshot();
+        $status['subprocesses'] = $subprocesses;
+        $status['subprocess_signature'] = (string)($subprocesses['signature'] ?? '');
         if (is_callable($this->nodeStatusBuilder)) {
             $customized = ($this->nodeStatusBuilder)($status, $node);
             if (is_array($customized) && $customized) {
@@ -1794,6 +2132,309 @@ class SubProcessManager {
         $this->iterateProcesses(['RedisQueue']);
     }
 
+    /**
+     * 重启指定子进程。
+     *
+     * dashboard/cluster 命令都走这条入口，统一通过 manager pipe 下发，避免
+     * worker 持有旧子进程句柄时把命令写到失效 pipe。
+     *
+     * @param array<int, string> $targets 目标子进程名
+     * @return array{ok:bool,message:string,targets:array<int,string>}
+     */
+    public function restartManagedProcesses(array $targets): array {
+        $targets = $this->sanitizeManagedProcessTargets($targets, true);
+        if (!$targets) {
+            return [
+                'ok' => false,
+                'message' => '未匹配到可重启的子进程',
+                'targets' => [],
+            ];
+        }
+        if (!$this->managerProcessAvailableForDispatch()) {
+            return [
+                'ok' => false,
+                'message' => '子进程管理通道不可用，请稍后重试',
+                'targets' => $targets,
+            ];
+        }
+        $ok = $this->dispatchManagerProcessCommand('restart_named_processes', ['targets' => $targets]);
+        return [
+            'ok' => $ok,
+            'message' => $ok
+                ? ('子进程重启指令已投递: ' . implode(',', $targets))
+                : ('子进程重启指令投递失败: ' . implode(',', $targets)),
+            'targets' => $targets,
+        ];
+    }
+
+    /**
+     * 停止指定子进程。
+     *
+     * stop 与 restart 不同：stop 会写入“手动停用”标记，后续健康巡检不会自动重拉。
+     *
+     * @param array<int, string> $targets 目标子进程名
+     * @return array{ok:bool,message:string,targets:array<int,string>}
+     */
+    public function stopManagedProcesses(array $targets): array {
+        $targets = $this->sanitizeManagedProcessTargets($targets, true);
+        if (!$targets) {
+            return [
+                'ok' => false,
+                'message' => '未匹配到可停止的子进程',
+                'targets' => [],
+            ];
+        }
+        if (!$this->managerProcessAvailableForDispatch()) {
+            return [
+                'ok' => false,
+                'message' => '子进程管理通道不可用，请稍后重试',
+                'targets' => $targets,
+            ];
+        }
+        $ok = $this->dispatchManagerProcessCommand('stop_named_processes', ['targets' => $targets]);
+        return [
+            'ok' => $ok,
+            'message' => $ok
+                ? ('子进程停止指令已投递: ' . implode(',', $targets))
+                : ('子进程停止指令投递失败: ' . implode(',', $targets)),
+            'targets' => $targets,
+        ];
+    }
+
+    /**
+     * 一键重启当前节点全部可控子进程。
+     *
+     * @return array{ok:bool,message:string,targets:array<int,string>}
+     */
+    public function restartAllManagedProcesses(): array {
+        return $this->restartManagedProcesses($this->controllableManagedProcesses());
+    }
+
+    /**
+     * 生成 dashboard 节点页所需的子进程运行态快照。
+     *
+     * @return array{
+     *     signature:string,
+     *     updated_at:int,
+     *     summary:array<string,int>,
+     *     items:array<int,array<string,mixed>>
+     * }
+     */
+    public function managedProcessDashboardSnapshot(): array {
+        $now = time();
+        $state = Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_CONTROL_STATE);
+        $manualStoppedLookup = [];
+        if (is_array($state)) {
+            foreach ((array)($state['manual_stopped'] ?? []) as $name) {
+                if (is_string($name) && $name !== '') {
+                    $manualStoppedLookup[$name] = true;
+                }
+            }
+        }
+
+        $items = [];
+        $summary = [
+            'total' => 0,
+            'running' => 0,
+            'stale' => 0,
+            'offline' => 0,
+            'stopped' => 0,
+        ];
+        foreach ($this->managedProcessDashboardDefinitions() as $definition) {
+            $name = (string)$definition['name'];
+            $enabled = (bool)$definition['enabled'];
+            if (!$enabled) {
+                continue;
+            }
+            $pid = (int)(Runtime::instance()->get((string)$definition['pid_key']) ?? 0);
+            $lastActiveAt = (int)(Runtime::instance()->get((string)$definition['heartbeat_key']) ?? 0);
+            $alive = $pid > 0 && @Process::kill($pid, 0);
+            $activeAge = $lastActiveAt > 0 ? max(0, $now - $lastActiveAt) : -1;
+            $staleAfter = (int)$definition['stale_after'];
+            $manualStopped = isset($manualStoppedLookup[$name]);
+            $stale = !$manualStopped && $alive && $lastActiveAt > 0 && $activeAge > $staleAfter;
+
+            $status = 'running';
+            if ($manualStopped) {
+                $status = $alive ? 'stopping' : 'stopped';
+            } elseif (!$alive) {
+                $status = 'offline';
+            } elseif ($stale) {
+                $status = 'stale';
+            }
+
+            $summary['total']++;
+            if ($status === 'running') {
+                $summary['running']++;
+            } elseif ($status === 'stale') {
+                $summary['stale']++;
+            } elseif ($status === 'offline') {
+                $summary['offline']++;
+            } elseif ($status === 'stopped' || $status === 'stopping') {
+                $summary['stopped']++;
+            }
+
+            $items[] = [
+                'name' => $name,
+                'label' => (string)$definition['label'],
+                'pid' => $pid,
+                'status' => $status,
+                'enabled' => true,
+                'alive' => $alive,
+                'manual_stopped' => $manualStopped,
+                'last_active_at' => $lastActiveAt,
+                'last_active_age' => $activeAge,
+                'stale_after' => $staleAfter,
+                'restart_supported' => (bool)$definition['restart_supported'],
+                'stop_supported' => (bool)$definition['stop_supported'],
+                'generation' => $this->managedProcessGeneration($name),
+            ];
+        }
+
+        $signaturePayload = array_map(static function (array $item): array {
+            return [
+                'name' => $item['name'],
+                'pid' => $item['pid'],
+                'status' => $item['status'],
+                'last_active_at' => $item['last_active_at'],
+                'generation' => $item['generation'],
+            ];
+        }, $items);
+
+        return [
+            'signature' => substr(md5(JsonHelper::toJson($signaturePayload)), 0, 12),
+            'updated_at' => $now,
+            'summary' => $summary,
+            'items' => $items,
+        ];
+    }
+
+    /**
+     * 返回 dashboard 子进程展示的静态定义。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function managedProcessDashboardDefinitions(): array {
+        $definitions = [
+            [
+                'name' => 'SubProcessManager',
+                'label' => 'SubProcessManager',
+                'pid_key' => Key::RUNTIME_SUBPROCESS_MANAGER_PID,
+                'heartbeat_key' => Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT,
+                'stale_after' => self::MANAGER_HEARTBEAT_SHUTDOWN_STALE_GRACE_SECONDS,
+                'enabled' => true,
+                'restart_supported' => false,
+                'stop_supported' => false,
+            ],
+            [
+                'name' => 'GatewayClusterCoordinator',
+                'label' => 'GatewayCluster',
+                'pid_key' => Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                'heartbeat_key' => Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('GatewayClusterCoordinator'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'GatewayBusinessCoordinator',
+                'label' => 'GatewayBusiness',
+                'pid_key' => Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID,
+                'heartbeat_key' => Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('GatewayBusinessCoordinator'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'GatewayHealthMonitor',
+                'label' => 'GatewayHealth',
+                'pid_key' => Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+                'heartbeat_key' => Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('GatewayHealthMonitor'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'MemoryUsageCount',
+                'label' => 'MemoryMonitor',
+                'pid_key' => Key::RUNTIME_MEMORY_MONITOR_PID,
+                'heartbeat_key' => Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('MemoryUsageCount'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'Heartbeat',
+                'label' => 'Heartbeat',
+                'pid_key' => Key::RUNTIME_HEARTBEAT_PID,
+                'heartbeat_key' => Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('Heartbeat'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'LogBackup',
+                'label' => 'LogBackup',
+                'pid_key' => Key::RUNTIME_LOG_BACKUP_PID,
+                'heartbeat_key' => Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('LogBackup'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'CrontabManager',
+                'label' => 'Crontab',
+                'pid_key' => Key::RUNTIME_CRONTAB_MANAGER_PID,
+                'heartbeat_key' => Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('CrontabManager'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'RedisQueue',
+                'label' => 'RedisQueue',
+                'pid_key' => Key::RUNTIME_REDIS_QUEUE_MANAGER_PID,
+                'heartbeat_key' => Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('RedisQueue'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+            [
+                'name' => 'FileWatch',
+                'label' => 'FileWatcher',
+                'pid_key' => Key::RUNTIME_FILE_WATCHER_PID,
+                'heartbeat_key' => Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT,
+                'stale_after' => self::PROCESS_HEARTBEAT_STALE_SECONDS,
+                'enabled' => $this->hasProcess('FileWatch'),
+                'restart_supported' => true,
+                'stop_supported' => true,
+            ],
+        ];
+
+        return array_values(array_filter($definitions, static fn(array $item): bool => (bool)($item['enabled'] ?? false)));
+    }
+
+    /**
+     * 返回子进程代际编号，便于 dashboard 识别 manager 轮换。
+     *
+     * @param string $name 子进程名
+     * @return int
+     */
+    protected function managedProcessGeneration(string $name): int {
+        return match ($name) {
+            'CrontabManager' => (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0),
+            'RedisQueue' => (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS) ?: 0),
+            default => 0,
+        };
+    }
+
     public function iterateProcesses(array $targets): void {
         $targets = array_values(array_filter($targets, fn(string $target): bool => $this->hasProcess($target)));
         if (!$targets) {
@@ -2083,6 +2724,7 @@ class SubProcessManager {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
             Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID, (int)$process->pid);
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, time());
             if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                 Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
             }
@@ -2095,6 +2737,7 @@ class SubProcessManager {
             $quiescing = false;
             $queueWorkerPid = 0;
             while (true) {
+                Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, time());
                 // manager 自己负责以非阻塞方式回收队列消费子进程，避免内部 wait() 把升级控制链阻塞住。
                 while ($ret = Process::wait(false)) {
                     $pid = (int)($ret['pid'] ?? 0);
@@ -2151,6 +2794,8 @@ class SubProcessManager {
                 }
                 sleep(1);
             }
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, 0);
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID, 0);
             is_resource($commandPipe) and fclose($commandPipe);
         });
     }
@@ -2165,6 +2810,8 @@ class SubProcessManager {
             if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
+            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_PID, (int)$process->pid);
+            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, time());
             Console::info("【Crontab】排程任务管理PID:" . $process->pid, false);
             define('IS_CRONTAB_PROCESS', true);
             // 升级/关停时 manager 需要持续 wait(false) 回收任务子进程，不能被 pipe read 闷住。
@@ -2174,6 +2821,7 @@ class SubProcessManager {
             $managerId = (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0);
             $quiescing = false;
             while (true) {
+                Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, time());
                 // Crontab manager 需要在整个生命周期里持续回收任务子进程。
                 // 否则排空阶段虽然任务进程已经退出，但 CrontabTable 里的旧行还在，
                 // manager 会误判“仍有存量任务未收完”而一直不退出，最终拖住 gateway 监听 FD。
@@ -2298,6 +2946,8 @@ class SubProcessManager {
                 }
                 sleep(1);
             }
+            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, 0);
+            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_PID, 0);
             is_resource($commandPipe) and fclose($commandPipe);
         });
     }
@@ -2315,12 +2965,14 @@ class SubProcessManager {
             $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
             is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
             Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, (int)$process->pid);
+            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
             if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                 Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
             }
             MemoryMonitor::start('MemoryMonitor');
             $nextTickAt = 0.0;
             while (true) {
+                Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
                 $msg = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
                 if ($msg === false) {
                     $msg = '';
@@ -2389,6 +3041,8 @@ class SubProcessManager {
 
                 usleep(200000);
             }
+            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, 0);
+            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, 0);
             is_resource($commandPipe) and fclose($commandPipe);
         }, false, SOCK_DGRAM);
     }
@@ -2405,6 +3059,7 @@ class SubProcessManager {
                 }
                 App::mount();
                 Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, (int)$process->pid);
+                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
                 }
@@ -2416,17 +3071,22 @@ class SubProcessManager {
                     MemoryMonitor::start('Heatbeat');
                     $processSocket = $process->exportSocket();
                     while (true) {
+                        Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
                         $cmd = $processSocket->recv(timeout: 0.1);
                         if ($cmd == 'shutdown') {
                             Timer::clearAll();
                             Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
                             MemoryMonitor::stop();
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
                             $this->exitCoroutineRuntime();
                             return;
                         }
                         if (!Runtime::instance()->serverIsAlive()) {
                             Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
                             MemoryMonitor::stop();
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
                             $this->exitCoroutineRuntime();
                             return;
                         }
@@ -2456,6 +3116,7 @@ class SubProcessManager {
                 // 因共享 IP 产生 host 键冲突，导致命令目标与心跳覆盖错位。
                 $nodeHost = $this->isProxyGatewayMode() ? APP_NODE_ID : SERVER_HOST;
                 while (true) {
+                    Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
                     $socket = Manager::instance()->getMasterSocketConnection();
                     $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => [
                         'host' => $nodeHost,
@@ -2507,6 +3168,7 @@ class SubProcessManager {
                         MemoryMonitor::updateUsage('Heatbeat');
                     });
                     while (true) {
+                        Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
                         $processSocket = $process->exportSocket();
                         $cmd = $processSocket->recv(timeout: 0.1);
                         if ($cmd == 'shutdown') {
@@ -2514,6 +3176,8 @@ class SubProcessManager {
                             Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
                             $socket->close();
                             MemoryMonitor::stop();
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
+                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
                             $this->exitCoroutineRuntime();
                             return;
                         }
@@ -2576,6 +3240,7 @@ class SubProcessManager {
                 define('IS_GATEWAY_SUB_PROCESS', true);
             }
             Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, (int)$process->pid);
+            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
             if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                 Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
             }
@@ -2594,6 +3259,7 @@ class SubProcessManager {
             }
 
             while (true) {
+                Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
                 $cmd = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
                 if ($cmd === false) {
                     $cmd = '';
@@ -2620,6 +3286,8 @@ class SubProcessManager {
                 }
                 usleep(200000);
             }
+            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, 0);
+            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, 0);
             is_resource($commandPipe) and fclose($commandPipe);
         }, false, SOCK_DGRAM);
     }
@@ -2635,6 +3303,7 @@ class SubProcessManager {
             }
             run(function () use ($process) {
                 Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, (int)$process->pid);
+                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
                 }
@@ -2656,12 +3325,15 @@ class SubProcessManager {
                     $meta && $fileList[$path] = $meta;
                 }
                 while (true) {
+                    Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
                     $socket = $process->exportSocket();
                     $msg = $socket->recv(timeout: 0.1);
                     if ($msg == 'shutdown') {
                         Timer::clearAll();
                         MemoryMonitor::stop();
                         Console::warning("【FileWatcher】管理进程退出,结束监听", false);
+                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
+                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
                         $this->exitCoroutineRuntime();
                         return;
                     }
@@ -2707,6 +3379,8 @@ class SubProcessManager {
                             $this->triggerRestart();
                             MemoryMonitor::stop();
                             Console::warning("【FileWatcher】管理进程退出,结束监听", false);
+                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
+                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
                             $this->exitCoroutineRuntime();
                             return;
                         }

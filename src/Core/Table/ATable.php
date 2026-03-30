@@ -7,6 +7,17 @@ use Scf\Helper\JsonHelper;
 use Scf\Util\Arr;
 use Swoole\Table;
 
+/**
+ * Swoole\Table 的统一抽象层。
+ *
+ * 责任边界：
+ * 1. 统一封装行读写、计数、原子增减等基础能力；
+ * 2. 在运行期提供容量保护，避免表满/冲突切片耗尽时 warning 直达全局错误处理；
+ * 3. 作为各业务内存表的公共父类，保证调用方行为一致。
+ *
+ * 架构位置：
+ * 位于 Core 层，为日志、请求计数、运行时状态等所有共享内存表提供底座。
+ */
 abstract class ATable {
 
     public static array $_instances;
@@ -155,9 +166,7 @@ abstract class ATable {
      * @return bool
      */
     public function set($rowKey, $datas): bool {
-        // Swoole\Table 满载时再写新 key 会直接失败。这里必须用 >=，
-        // 不能用 >，否则在“刚好满”这一档会静默走到 table->set(false)。
-        if (!$this->exist($rowKey) && $this->count() >= $this->size()) {
+        if (!$this->exist($rowKey) && !$this->canInsertNewRow()) {
             Console::error("内存表:" . get_called_class() . "已满,请检查配置");
             return false;
         }
@@ -165,9 +174,11 @@ abstract class ATable {
             if (Arr::isArray($datas)) {
                 $datas = JsonHelper::toJson($datas);
             }
-            $ok = $this->table->set($rowKey, ['_value' => $datas]);
+            // Swoole\Table 在内存不足时会抛 warning，这里使用 @ 抑制 warning，
+            // 统一走返回值判定并记录结构化错误，避免业务请求被 warning 中断。
+            $ok = @$this->table->set($rowKey, ['_value' => $datas]);
             if (!$ok) {
-                Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, count=" . $this->count() . ", size=" . $this->size());
+                Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, " . $this->tablePressureSummary());
             }
             return $ok;
         }
@@ -176,9 +187,9 @@ abstract class ATable {
                 $value = JsonHelper::toJson($value);
             }
         }
-        $ok = $this->table->set($rowKey, $datas);
+        $ok = @$this->table->set($rowKey, $datas);
         if (!$ok) {
-            Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, count=" . $this->count() . ", size=" . $this->size());
+            Console::error("内存表写入失败:" . get_called_class() . ", key={$rowKey}, " . $this->tablePressureSummary());
         }
         return $ok;
     }
@@ -191,12 +202,23 @@ abstract class ATable {
      * @return int
      */
     public function incr(string $key, string $colum = '_value', int $incrby = 1): int {
-        // 与 set() 一致：满载时新增 key 必须立即拒绝，避免 silent failure。
-        if (!$this->exist($key) && $this->count() >= $this->size()) {
-            Console::error("内存表:" . get_called_class() . "已满,请检查配置");
+        if (!$this->exist($key)) {
+            if (!$this->canInsertNewRow()) {
+                Console::error("内存表:" . get_called_class() . "已满,请检查配置");
+                return 0;
+            }
+            // 先显式建行，再执行 incr，避免 Swoole 在 incr 的“隐式建行”路径触发 warning。
+            $seedData = $colum === '_value' ? 0 : [$colum => 0];
+            if (!$this->set($key, $seedData)) {
+                return 0;
+            }
+        }
+        $value = @$this->table->incr($key, $colum, $incrby);
+        if ($value === false) {
+            Console::error("内存表自增失败:" . get_called_class() . ", key={$key}, colum={$colum}, " . $this->tablePressureSummary());
             return 0;
         }
-        return $this->table->incr($key, $colum, $incrby);
+        return (int)$value;
     }
 
     /**
@@ -207,7 +229,12 @@ abstract class ATable {
      * @return int
      */
     public function decr(string $key, string $colum = '_value', int $decrby = 1): int {
-        return $this->table->decr($key, $colum, $decrby);
+        $value = @$this->table->decr($key, $colum, $decrby);
+        if ($value === false) {
+            Console::error("内存表自减失败:" . get_called_class() . ", key={$key}, colum={$colum}, " . $this->tablePressureSummary());
+            return 0;
+        }
+        return (int)$value;
     }
 
     /**
@@ -234,6 +261,44 @@ abstract class ATable {
      */
     public function count(): int {
         return $this->table->count();
+    }
+
+    /**
+     * 判断当前内存表是否还能安全插入新 key。
+     *
+     * 说明：
+     * 1. 不能只看 count/size。Swoole\Table 在冲突切片耗尽时会提前“无法分配内存”；
+     * 2. 因此优先读取 stats.available_slice_num，再结合 count/size 双重判断。
+     *
+     * @return bool
+     */
+    protected function canInsertNewRow(): bool {
+        if ($this->count() >= $this->size()) {
+            return false;
+        }
+        $stats = $this->stats();
+        if (is_array($stats) && array_key_exists('available_slice_num', $stats)) {
+            return ((int)$stats['available_slice_num']) > 0;
+        }
+        return true;
+    }
+
+    /**
+     * 生成容量/冲突快照，便于线上定位表容量问题。
+     *
+     * @return string
+     */
+    protected function tablePressureSummary(): string {
+        $stats = $this->stats();
+        if (!is_array($stats)) {
+            return "count=" . $this->count() . ", size=" . $this->size();
+        }
+        return "count=" . $this->count()
+            . ", size=" . $this->size()
+            . ", available_slice_num=" . ($stats['available_slice_num'] ?? '--')
+            . ", total_slice_num=" . ($stats['total_slice_num'] ?? '--')
+            . ", conflict_count=" . ($stats['conflict_count'] ?? '--')
+            . ", conflict_max_level=" . ($stats['conflict_max_level'] ?? '--');
     }
 
 }

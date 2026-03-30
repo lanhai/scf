@@ -267,7 +267,9 @@ class CrontabManager {
      * @return void
      */
     public static function errorReport($processTask): void {
-        $errorInfo = Runtime::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR_INFO') ?: "未知错误";
+        $errorKey = 'CRONTAB_' . $processTask['id'] . '_ERROR';
+        $errorInfoKey = 'CRONTAB_' . $processTask['id'] . '_ERROR_INFO';
+        $errorInfo = Runtime::instance()->get($errorInfoKey) ?: "未知错误";
         static::updateTaskTable($processTask['id'], [
             'process_is_alive' => STATUS_OFF,
             'remark' => "致命错误",
@@ -279,7 +281,12 @@ class CrontabManager {
         });
         $sendError->start();
         Process::wait();
-        Counter::instance()->decr('CRONTAB_' . $processTask['id'] . '_ERROR');
+        $left = Counter::instance()->decr($errorKey);
+        // 任务恢复后清理归零计数 key，避免历史 task id 长期占用 Counter 行。
+        if ($left <= 0) {
+            Counter::instance()->delete($errorKey);
+            Runtime::instance()->delete($errorInfoKey);
+        }
     }
 
     /**
