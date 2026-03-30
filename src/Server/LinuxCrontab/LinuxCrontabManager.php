@@ -60,14 +60,6 @@ class LinuxCrontabManager {
     private const CRONTAB_LOG_MAX_LINES = 1000;
 
     /**
-     * 互斥锁等待秒数。
-     *
-     * 旧实现使用 `flock -n`，一旦上一轮尚未释放锁就会立即退出，
-     * 在分钟级排程下会形成“长期看起来没执行”的假象。
-     */
-    private const LOCK_WAIT_SECONDS = 5;
-
-    /**
      * 互斥锁冲突时的退出码。
      *
      * 使用显式退出码让日志能区分“业务脚本失败”和“锁竞争跳过”。
@@ -1399,7 +1391,7 @@ class LinuxCrontabManager {
         $lockFile = '/tmp/' . APP_DIR_NAME . '_' . preg_replace('/[^a-z0-9_]+/i', '_', (string)$entry['id']) . '.lock';
         if ((int)($entry['lock_enabled'] ?? 1) === 1 && $flockPath !== '') {
             $command = escapeshellarg($flockPath)
-                . ' -w ' . self::LOCK_WAIT_SECONDS
+                . ' -n'
                 . ' -E ' . self::LOCK_BUSY_EXIT_CODE
                 . escapeshellarg($lockFile)
                 . ' '
