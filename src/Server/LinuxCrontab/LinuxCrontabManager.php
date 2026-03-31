@@ -55,18 +55,6 @@ class LinuxCrontabManager {
     private const CRONTAB_LOG_FILE_NAME = 'inst.log';
 
     /**
-     * Linux crontab 执行日志保留的最大行数。
-     */
-    private const CRONTAB_LOG_MAX_LINES = 1000;
-
-    /**
-     * 互斥锁冲突时的退出码。
-     *
-     * 使用显式退出码让日志能区分“业务脚本失败”和“锁竞争跳过”。
-     */
-    private const LOCK_BUSY_EXIT_CODE = 75;
-
-    /**
      * 一次性 crontab 命令最大执行时长（秒）。
      */
     private const COMMAND_TIMEOUT_SECONDS = 180;
@@ -75,11 +63,6 @@ class LinuxCrontabManager {
      * 超时后额外等待再强制终止的宽限时间（秒）。
      */
     private const COMMAND_TIMEOUT_KILL_AFTER_SECONDS = 5;
-
-    /**
-     * GNU timeout 超时退出码。
-     */
-    private const COMMAND_TIMEOUT_EXIT_CODE = 124;
 
     /**
      * 支持的调度类型。
@@ -484,6 +467,36 @@ class LinuxCrontabManager {
             'last_run_status' => $success ? 'success' : 'failed',
             'last_run_message' => trim($message),
         ]);
+    }
+
+    /**
+     * 根据 Linux 排程条目 id 解析对应的任务命名空间。
+     *
+     * 该方法用于系统 crontab 的“短命令”执行链路：排程行只保存 entry_id，
+     * 真正执行时再从配置中回查 namespace，避免 crontab 行超长导致安装失败。
+     *
+     * @param string $entryId 排程条目 id
+     * @return string 命名空间；未找到时返回空字符串
+     */
+    public static function resolveNamespaceByEntryId(string $entryId): string {
+        $entryId = trim($entryId);
+        if ($entryId === '') {
+            return '';
+        }
+
+        $payload = self::readConfigPayloadFromFile(self::resolveReadableConfigFile());
+        if (!is_array($payload)) {
+            return '';
+        }
+
+        foreach (array_values((array)($payload['items'] ?? [])) as $item) {
+            if ((string)($item['id'] ?? '') !== $entryId) {
+                continue;
+            }
+            return '\\' . ltrim(trim((string)($item['namespace'] ?? '')), '\\');
+        }
+
+        return '';
     }
 
     /**
@@ -1352,19 +1365,7 @@ class LinuxCrontabManager {
      * @return string
      */
     protected function buildCommand(array $entry): string {
-        $binDir = SCF_ROOT . '/bin';
-        $logDirectory = $this->crontabLogDirectory();
-        $logFile = $this->crontabLogFile();
-        $logFileEscaped = escapeshellarg($logFile);
-        $entryIdForLog = preg_replace('/[^a-z0-9_:\\.-]+/i', '_', (string)($entry['id'] ?? ''));
-        $entryIdForLog = $entryIdForLog !== '' ? $entryIdForLog : 'unknown';
-
-        // flock 直接执行后续 command argv，而不会像 shell 那样解释前置的环境变量赋值。
-        // 这里统一改成显式走 `/usr/bin/env`，让“设置 SCF_PHP_BIN + 执行 bash 脚本”
-        // 在有无 flock 两种路径下都保持同样语义。
-        $command = escapeshellarg('/usr/bin/env')
-            . ' SCF_PHP_BIN=' . escapeshellarg(PHP_BINARY)
-            . ' /bin/bash ./crontab'
+        $command = escapeshellarg(SCF_ROOT . '/bin/crontab')
             . ' -app=' . escapeshellarg(APP_DIR_NAME)
             . ' -env=' . escapeshellarg((string)$entry['env'])
             . ' -role=' . escapeshellarg((string)$entry['role']);
@@ -1375,8 +1376,8 @@ class LinuxCrontabManager {
             $command .= ' -phar';
         }
 
-        $command .= ' -namespace=' . escapeshellarg((string)$entry['namespace']);
         $command .= ' -entry_id=' . escapeshellarg((string)$entry['id']);
+        $command .= ' ' . escapeshellarg($this->shortClassName((string)$entry['namespace']));
 
         $timeoutPath = $this->resolveTimeoutPath();
         if ($timeoutPath !== '') {
@@ -1391,36 +1392,13 @@ class LinuxCrontabManager {
         $lockFile = '/tmp/' . APP_DIR_NAME . '_' . preg_replace('/[^a-z0-9_]+/i', '_', (string)$entry['id']) . '.lock';
         if ((int)($entry['lock_enabled'] ?? 1) === 1 && $flockPath !== '') {
             $command = escapeshellarg($flockPath)
-                . ' -n'
-                . ' -E ' . self::LOCK_BUSY_EXIT_CODE
+                . ' -n '
                 . escapeshellarg($lockFile)
                 . ' '
                 . $command;
         }
 
-        // Linux crontab 没有交互终端，这里统一把标准输出与错误输出写入固定文件，
-        // 并在每次执行后裁剪日志，仅保留最新 N 行，方便实时 tail 且避免日志无限增长。
-        $startLogCommand = '/bin/echo "$(/bin/date \'+%F %T\') [CRON_TRIGGER] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped;
-        $runCommand = $command . ' >> ' . $logFileEscaped . ' 2>&1';
-        $statusLogCommand = 'rc=$?; '
-            . '[ "$rc" -eq ' . self::LOCK_BUSY_EXIT_CODE . ' ]'
-            . ' && /bin/echo "$(/bin/date \'+%F %T\') [CRON_LOCK_BUSY] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped . '; '
-            . '[ "$rc" -eq ' . self::COMMAND_TIMEOUT_EXIT_CODE . ' ]'
-            . ' && /bin/echo "$(/bin/date \'+%F %T\') [CRON_TIMEOUT] entry=' . $entryIdForLog . '" >> ' . $logFileEscaped . '; '
-            . '/bin/echo "$(/bin/date \'+%F %T\') [CRON_FINISH] entry=' . $entryIdForLog . ' rc=$rc" >> ' . $logFileEscaped;
-        $trimCommand = 'log_tmp=' . escapeshellarg($logFile . '.tmp') . '.$$; '
-            . '/usr/bin/env tail -n ' . self::CRONTAB_LOG_MAX_LINES
-            . ' ' . $logFileEscaped
-            . ' > "$log_tmp"'
-            . ' && /bin/mv "$log_tmp" ' . $logFileEscaped
-            . '; /bin/rm -f "$log_tmp"';
-
-        return 'cd ' . escapeshellarg($binDir)
-            . ' && /bin/mkdir -p ' . escapeshellarg($logDirectory)
-            . ' && ' . $startLogCommand
-            . ' && ' . $runCommand
-            . '; ' . $statusLogCommand
-            . '; ' . $trimCommand;
+        return $command;
     }
 
     /**

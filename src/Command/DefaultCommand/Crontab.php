@@ -91,6 +91,7 @@ class Crontab implements CommandInterface {
      */
     public function exec(): ?string {
         $namespace = trim((string)Manager::instance()->getOpt('namespace', ''));
+        $entryId = trim((string)Manager::instance()->getOpt('entry_id', ''));
         $action = trim((string)Manager::instance()->getArg(0, ''));
 
         // `log` 只需要读取文件，不依赖应用运行时常量和模块装载。
@@ -106,19 +107,29 @@ class Crontab implements CommandInterface {
             return $this->runTask($namespace);
         }
 
-        if ($action === '') {
-            return Manager::instance()->displayCommandHelp($this->commandName());
+        if ($action !== '') {
+            if (strcasecmp($action, 'list') === 0) {
+                return $this->listTasks();
+            }
+
+            if (strcasecmp($action, 'log') === 0) {
+                return $this->showLog();
+            }
+
+            return $this->runTask($action);
         }
 
-        if (strcasecmp($action, 'list') === 0) {
-            return $this->listTasks();
+        // Linux 系统 crontab 入口在没有位置参数时，允许仅携带 entry_id。
+        // 这样系统排程行可以更短；回退到 entry_id 回查 namespace 仍可执行。
+        if ($entryId !== '') {
+            $resolvedNamespace = LinuxCrontabManager::resolveNamespaceByEntryId($entryId);
+            if ($resolvedNamespace === '') {
+                return Color::danger('【Crontab】未找到 entry_id 对应的任务: ' . $entryId);
+            }
+            return $this->runTask($resolvedNamespace);
         }
 
-        if (strcasecmp($action, 'log') === 0) {
-            return $this->showLog();
-        }
-
-        return $this->runTask($action);
+        return Manager::instance()->displayCommandHelp($this->commandName());
     }
 
     /**
