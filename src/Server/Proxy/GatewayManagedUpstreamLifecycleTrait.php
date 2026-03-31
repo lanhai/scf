@@ -1851,6 +1851,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
                         "【Gateway】回收窗口命中但仍有在途，继续等待: waiting={$elapsed}s, window={$currentWindowElapsed}s"
                         . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
                         . ", inflight=" . ($runtimeStatusAvailable ? (string)$inflightTotal : 'n/a')
+                        . " (http={$httpProcessing}, rpc={$rpcProcessing}, mysql={$mysqlInflight}, redis={$redisInflight}, outbound_http={$outboundHttpInflight})"
                         . ", queue={$queueProcessing}, crontab={$crontabBusy}",
                         $port
                     );
@@ -1869,6 +1870,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
                         "【Gateway】回收等待中: waiting={$elapsed}s, deadline={$forceAfter}s, next_window={$nextWindowElapsed}s, quarantine_after={$quarantineAfter}s"
                         . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
                         . ", inflight=" . ($runtimeStatusAvailable ? (string)$inflightTotal : 'n/a')
+                        . " (http={$httpProcessing}, rpc={$rpcProcessing}, mysql={$mysqlInflight}, redis={$redisInflight}, outbound_http={$outboundHttpInflight})"
                         . ", queue={$queueProcessing}, crontab={$crontabBusy}"
                         . ", http=" . ($httpAlive ? 'listening' : 'closed')
                         . ", rpc=" . ($rpcAlive ? 'listening' : 'closed')

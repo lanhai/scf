@@ -50,6 +50,7 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
     protected const GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS = 3;
     protected const GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS = 30;
+    protected const GATEWAY_NODE_TASKS_CACHE_SECONDS = 5;
     protected const HEARTBEAT_COUNTER_PREFIX = '__hb__:';
     protected const HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS = 30;
     protected const TEMP_HEARTBEAT_TRACE_ENABLED = false;
@@ -80,6 +81,8 @@ class SubProcessManager {
     protected array $processLastStaleHandleAt = [];
     protected array $manualStoppedProcesses = [];
     protected array $heartbeatWriteFailWarnAt = [];
+    protected int $gatewayNodeTasksCachedAt = 0;
+    protected array $gatewayNodeTasksCached = [];
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
@@ -1504,9 +1507,19 @@ class SubProcessManager {
             }
             $message = '';
             if (is_resource($commandPipe)) {
-                $pipePayload = @stream_get_contents($commandPipe);
-                if (is_string($pipePayload) && $pipePayload !== '') {
-                    $message = $pipePayload;
+                $chunks = '';
+                while (true) {
+                    $part = @fread($commandPipe, 8192);
+                    if (!is_string($part) || $part === '') {
+                        break;
+                    }
+                    $chunks .= $part;
+                    if (strlen($part) < 8192) {
+                        break;
+                    }
+                }
+                if ($chunks !== '') {
+                    $message = $chunks;
                 }
             } else {
                 // command pipe 异常时退回 socket 短轮询，避免 recv 阻塞拖住心跳主循环。
@@ -1742,6 +1755,7 @@ class SubProcessManager {
      */
     protected function buildGatewayClusterStatusPayload(): array {
         $buildStartedAt = microtime(true);
+        $stepStartedAt = $buildStartedAt;
         $node = Node::factory();
         $node->appid = APP_ID;
         $node->id = APP_NODE_ID;
@@ -1766,9 +1780,18 @@ class SubProcessManager {
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
         $node->heart_beat = time();
         $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
+        $baseBuildCostMs = round((microtime(true) - $stepStartedAt) * 1000, 2);
+
+        $tablesStartedAt = microtime(true);
         $node->tables = ATable::list();
-        $node->threads = count(Coroutine::list());
-        $node->thread_status = Coroutine::stats();
+        $tablesCostMs = round((microtime(true) - $tablesStartedAt) * 1000, 2);
+
+        $threadStatsStartedAt = microtime(true);
+        $threadStats = Coroutine::stats();
+        $node->threads = (int)($threadStats['coroutine_num'] ?? 0);
+        $node->thread_status = $threadStats;
+        $threadStatsCostMs = round((microtime(true) - $threadStatsStartedAt) * 1000, 2);
+
         $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: [];
         $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
         $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
@@ -1780,20 +1803,53 @@ class SubProcessManager {
         $node->memory_usage = MemoryMonitor::sum();
         // gateway 模式下节点详情页需要直接看到当前节点本地 Linux 排程；
         // 非 gateway 模式继续保持原有常驻 CrontabManager 状态。
+        $tasksStartedAt = microtime(true);
         $node->tasks = $this->isProxyGatewayMode()
-            ? LinuxCrontabManager::nodeTasks(false)
+            ? $this->cachedGatewayNodeTasks()
             : CrontabManager::allStatus();
+        $tasksCostMs = round((microtime(true) - $tasksStartedAt) * 1000, 2);
+
+        $payloadStartedAt = microtime(true);
         $payload = $this->buildNodeStatusPayload($node);
+        $payloadCostMs = round((microtime(true) - $payloadStartedAt) * 1000, 2);
         $elapsed = microtime(true) - $buildStartedAt;
         if ($elapsed >= self::GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS) {
             static $lastWarnAt = 0;
             $now = time();
             if (($now - $lastWarnAt) >= self::GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS) {
                 $lastWarnAt = $now;
-                Console::warning("【GatewayCluster】状态构建耗时过长:" . round($elapsed, 2) . "s", false);
+                Console::warning(
+                    "【GatewayCluster】状态构建耗时过长:" . round($elapsed, 2) . "s"
+                    . ", base=" . $baseBuildCostMs . "ms"
+                    . ", tables=" . $tablesCostMs . "ms"
+                    . ", thread_stats=" . $threadStatsCostMs . "ms"
+                    . ", tasks=" . $tasksCostMs . "ms"
+                    . ", payload=" . $payloadCostMs . "ms",
+                    false
+                );
             }
         }
         return $payload;
+    }
+
+    /**
+     * 返回 gateway 心跳链路可复用的 Linux 排程任务缓存。
+     *
+     * 心跳状态每秒构建一次，直接逐轮读配置+状态文件会带来不必要 I/O。
+     * 这里用短 TTL 缓存任务列表，既保持分钟级可观测性，也避免把排程读取开销
+     * 叠加到 GatewayCluster 主循环里。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function cachedGatewayNodeTasks(): array {
+        $now = time();
+        if ($this->gatewayNodeTasksCachedAt > 0 && ($now - $this->gatewayNodeTasksCachedAt) < self::GATEWAY_NODE_TASKS_CACHE_SECONDS) {
+            return $this->gatewayNodeTasksCached;
+        }
+        $tasks = LinuxCrontabManager::nodeTasks(false);
+        $this->gatewayNodeTasksCachedAt = $now;
+        $this->gatewayNodeTasksCached = is_array($tasks) ? $tasks : [];
+        return $this->gatewayNodeTasksCached;
     }
 
     /**

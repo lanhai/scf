@@ -3944,7 +3944,9 @@ class GatewayServer {
                 'fingerprint' => APP_FINGERPRINT . ':gateway',
             ]);
         }
-        $status = $this->composeGatewayNodeRuntimeStatus($status, $this->dashboardUpstreams());
+        // GatewayClusterCoordinator 的心跳主循环必须避免实时 IPC 抓取，
+        // 这里仅复用 instanceManager 的运行态缓存，防止状态拼装阻塞心跳线程。
+        $status = $this->composeGatewayNodeRuntimeStatus($status, $this->dashboardUpstreams(false));
         return array_replace_recursive($status, [
             'name' => 'Gateway',
             'script' => 'gateway',
@@ -4560,16 +4562,57 @@ class GatewayServer {
         ];
     }
 
-    protected function dashboardUpstreams(): array {
+    /**
+     * 构建 dashboard 视角下的业务实例列表。
+     *
+     * @param bool $fetchLiveRuntime true=实时抓取 upstream.status；false=仅使用 instanceManager 缓存
+     * @return array<int, array<string, mixed>>
+     */
+    protected function dashboardUpstreams(bool $fetchLiveRuntime = true): array {
         $snapshot = $this->currentGatewayStateSnapshot();
-        $instances = [];
+        $plans = [];
         foreach ($snapshot['generations'] ?? [] as $generation) {
             foreach (($generation['instances'] ?? []) as $instance) {
-                $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
-                $instances[] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus);
+                $plans[] = [
+                    'generation' => (array)$generation,
+                    'instance' => (array)$instance,
+                ];
             }
         }
-        return $instances;
+        if (!$plans) {
+            return [];
+        }
+
+        if (!$fetchLiveRuntime) {
+            $instances = [];
+            foreach ($plans as $plan) {
+                $generation = (array)($plan['generation'] ?? []);
+                $instance = (array)($plan['instance'] ?? []);
+                $host = (string)($instance['host'] ?? '127.0.0.1');
+                $port = (int)($instance['port'] ?? 0);
+                $runtimeStatus = $this->instanceManager->instanceRuntimeStatus($host, $port, 30);
+                $instances[] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus, true);
+            }
+            return $instances;
+        }
+
+        $instances = array_fill(0, count($plans), null);
+        $barrier = Barrier::make();
+        foreach ($plans as $index => $plan) {
+            Coroutine::create(function () use ($barrier, &$instances, $index, $plan): void {
+                $generation = (array)($plan['generation'] ?? []);
+                $instance = (array)($plan['instance'] ?? []);
+                $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
+                $instances[$index] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus, false);
+            });
+        }
+        try {
+            Barrier::wait($barrier);
+        } catch (Throwable) {
+            // dashboard 状态链路里并发探测异常时，降级为已完成分支结果，避免整包状态失败。
+        }
+
+        return array_values(array_filter($instances, static fn($item): bool => is_array($item)));
     }
 
     protected function refreshManagedUpstreamRuntimeStates(): void {
@@ -5213,7 +5256,16 @@ class GatewayServer {
         return array_values($tasks);
     }
 
-    protected function buildUpstreamNode(array $generation, array $instance, array $runtimeStatus = []): array {
+    /**
+     * 组装单个 upstream 节点状态。
+     *
+     * @param array<string, mixed> $generation
+     * @param array<string, mixed> $instance
+     * @param array<string, mixed> $runtimeStatus
+     * @param bool $skipLivePortProbe 是否跳过实时端口探测
+     * @return array<string, mixed>
+     */
+    protected function buildUpstreamNode(array $generation, array $instance, array $runtimeStatus = [], bool $skipLivePortProbe = false): array {
         $appInfo = App::info()?->toArray() ?: [];
         $appVersion = $this->resolveAppVersion($appInfo);
         $publicVersion = $this->resolvePublicVersion($appInfo);
@@ -5222,13 +5274,24 @@ class GatewayServer {
         $metadata = (array)($instance['metadata'] ?? []);
         $status = (string)($generation['status'] ?? ($instance['status'] ?? 'prepared'));
         $displayVersion = (string)($metadata['display_version'] ?? $generation['version'] ?? $instance['version'] ?? 'unknown');
+        $runtimeOnline = array_key_exists('server_is_alive', $runtimeStatus)
+            ? ((bool)$runtimeStatus['server_is_alive'])
+            : null;
+        $online = $runtimeOnline;
+        if (is_null($online)) {
+            if (!$skipLivePortProbe && $this->launcher) {
+                $online = $this->launcher->isListening($host, $port, 0.2);
+            } else {
+                $online = true;
+            }
+        }
 
         $node = [
             'name' => '业务实例',
             'script' => $displayVersion,
             'ip' => $host,
             'port' => $port,
-            'online' => $this->launcher ? $this->launcher->isListening($host, $port, 0.2) : true,
+            'online' => $online,
             'role' => (string)($metadata['role'] ?? SERVER_ROLE),
             'started' => (int)($metadata['started_at'] ?? time()),
             'server_run_mode' => APP_SRC_TYPE,
@@ -5267,7 +5330,7 @@ class GatewayServer {
             'script' => $displayVersion,
             'ip' => $host,
             'port' => $port,
-            'online' => $this->launcher ? $this->launcher->isListening($host, $port, 0.2) : true,
+            'online' => $online,
             'role' => (string)($metadata['role'] ?? ($runtimeStatus['role'] ?? SERVER_ROLE)),
             'server_run_mode' => (string)($runtimeStatus['server_run_mode'] ?? APP_SRC_TYPE),
             'proxy_mode_label' => 'gateway_upstream/' . $status,
