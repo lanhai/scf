@@ -48,6 +48,8 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_STALE_SECONDS = 120;
     protected const PROCESS_HEARTBEAT_FORCE_KILL_SECONDS = 300;
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
+    protected const GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS = 3;
+    protected const GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS = 30;
 
     /**
      * Server 托管的总控子进程。
@@ -1571,6 +1573,7 @@ class SubProcessManager {
      * @return array<string, mixed>
      */
     protected function buildGatewayClusterStatusPayload(): array {
+        $buildStartedAt = microtime(true);
         $node = Node::factory();
         $node->appid = APP_ID;
         $node->id = APP_NODE_ID;
@@ -1610,9 +1613,19 @@ class SubProcessManager {
         // gateway 模式下节点详情页需要直接看到当前节点本地 Linux 排程；
         // 非 gateway 模式继续保持原有常驻 CrontabManager 状态。
         $node->tasks = $this->isProxyGatewayMode()
-            ? LinuxCrontabManager::nodeTasks()
+            ? LinuxCrontabManager::nodeTasks(false)
             : CrontabManager::allStatus();
-        return $this->buildNodeStatusPayload($node);
+        $payload = $this->buildNodeStatusPayload($node);
+        $elapsed = microtime(true) - $buildStartedAt;
+        if ($elapsed >= self::GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS) {
+            static $lastWarnAt = 0;
+            $now = time();
+            if (($now - $lastWarnAt) >= self::GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS) {
+                $lastWarnAt = $now;
+                Console::warning("【GatewayCluster】状态构建耗时过长:" . round($elapsed, 2) . "s", false);
+            }
+        }
+        return $payload;
     }
 
     /**
@@ -3153,7 +3166,7 @@ class SubProcessManager {
                         // 与 gateway cluster 状态保持一致：proxy gateway 节点改为上报
                         // 当前节点本地 Linux 排程；非 gateway 模式保留原有常驻排程。
                         $node->tasks = $this->isProxyGatewayMode()
-                            ? LinuxCrontabManager::nodeTasks()
+                            ? LinuxCrontabManager::nodeTasks(false)
                             : CrontabManager::allStatus();
                         $payload = $this->buildNodeStatusPayload($node);
                         if ($node->role == NODE_ROLE_MASTER) {

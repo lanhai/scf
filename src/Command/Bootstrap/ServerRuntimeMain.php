@@ -49,6 +49,7 @@ function scf_define_runtime_constants(array $argv, array $overrides = []): void 
         'server_role' => getenv('SERVER_ROLE') ?: '',
         'static_handler' => getenv('STATIC_HANDLER') ?: '',
         'host_ip' => getenv('HOST_IP') ?: '',
+        'from_cron' => getenv('SCF_FROM_CRON') ?: '',
         'os_name' => getenv('OS_NAME') ?: '',
         'network_mode' => getenv('NETWORK_MODE') ?: '',
         'scf_update_server' => getenv('SCF_UPDATE_SERVER') ?: 'https://lky-chengdu.oss-cn-chengdu.aliyuncs.com/scf/version.json',

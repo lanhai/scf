@@ -1175,7 +1175,7 @@ class Http extends \Scf\Core\Server {
         $mysqlInflight = InflightCounter::mysqlInflight();
         $redisInflight = InflightCounter::redisInflight();
         $outboundHttpInflight = InflightCounter::outboundHttpInflight();
-        $stats = $this->server ? (array)$this->server->stats() : (array)(Runtime::instance()->get('SERVER_STATS') ?: []);
+        $stats = $this->server->stats();
         $connectionNum = max(0, (int)($stats['connection_num'] ?? 0));
 
         return [

@@ -2064,6 +2064,18 @@ class GatewayServer {
                 'success_count' => 0,
                 'failed_nodes' => [],
             ]);
+            $upstreamRollout = (array)($localData['upstream_rollout'] ?? [
+                'attempted' => $type !== 'public',
+                'success' => count((array)($restartSummary['failed_nodes'] ?? [])) === 0,
+                'success_count' => (int)($restartSummary['success_count'] ?? 0),
+                'failed_count' => count((array)($restartSummary['failed_nodes'] ?? [])),
+                'failed_nodes' => (array)($restartSummary['failed_nodes'] ?? []),
+            ]);
+            $upstreamRollout['failed_nodes'] = array_values((array)($upstreamRollout['failed_nodes'] ?? []));
+            $upstreamRollout['failed_count'] = (int)($upstreamRollout['failed_count'] ?? count($upstreamRollout['failed_nodes']));
+            $upstreamRollout['success_count'] = (int)($upstreamRollout['success_count'] ?? 0);
+            $upstreamRollout['attempted'] = (bool)($upstreamRollout['attempted'] ?? ($type !== 'public'));
+            $upstreamRollout['success'] = (bool)($upstreamRollout['success'] ?? ($upstreamRollout['failed_count'] === 0));
             if (!empty($localData['iterate_business_processes']) && !$localResult->hasError()) {
                 $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
                 $this->iterateGatewayBusinessProcesses();
@@ -2078,6 +2090,7 @@ class GatewayServer {
             if ($masterState === 'pending') {
                 $pendingHosts[] = SERVER_HOST;
             }
+            $gatewayPendingRestart = (bool)($localData['gateway_pending_restart'] ?? ($type === 'framework' && $masterState === 'pending'));
 
             $payload = [
                 'task_id' => $taskId,
@@ -2094,6 +2107,8 @@ class GatewayServer {
                     'state' => $masterState,
                     'error' => $masterError,
                 ],
+                'upstream_rollout' => $upstreamRollout,
+                'gateway_pending_restart' => $gatewayPendingRestart,
             ];
             $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
             $this->pushDashboardStatus();
@@ -2110,16 +2125,49 @@ class GatewayServer {
 
             if ($payload['failed_nodes']) {
                 $error = $masterError !== '' ? $masterError : '部分节点升级失败';
-                $this->emitLocalNodeUpdateState($taskId, $type, $version, 'failed', "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}", $error);
+                $this->emitLocalNodeUpdateState(
+                    $taskId,
+                    $type,
+                    $version,
+                    'failed',
+                    "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}",
+                    $error,
+                    [
+                        'upstream_rollout' => $upstreamRollout,
+                        'gateway_pending_restart' => $gatewayPendingRestart,
+                    ]
+                );
                 return;
             }
 
             if ($masterState === 'pending') {
-                $this->emitLocalNodeUpdateState($taskId, $type, $version, 'pending', "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}");
+                $this->emitLocalNodeUpdateState(
+                    $taskId,
+                    $type,
+                    $version,
+                    'pending',
+                    "【" . SERVER_HOST . "】业务实例升级结果:成功{$upstreamRollout['success_count']},失败{$upstreamRollout['failed_count']}，Gateway等待重启生效:{$type} => {$version}",
+                    '',
+                    [
+                        'upstream_rollout' => $upstreamRollout,
+                        'gateway_pending_restart' => $gatewayPendingRestart,
+                    ]
+                );
                 return;
             }
 
-            $this->emitLocalNodeUpdateState($taskId, $type, $version, 'success', "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}");
+            $this->emitLocalNodeUpdateState(
+                $taskId,
+                $type,
+                $version,
+                'success',
+                "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}",
+                '',
+                [
+                    'upstream_rollout' => $upstreamRollout,
+                    'gateway_pending_restart' => $gatewayPendingRestart,
+                ]
+            );
         });
 
         $this->logUpdateStage($taskId, $type, $version, 'accepted', [
@@ -2149,9 +2197,10 @@ class GatewayServer {
      * @param string $state running/success/failed/pending
      * @param string $message 展示给 dashboard 的消息
      * @param string $error 失败时的错误文案
+     * @param array $extra 追加回传给 dashboard 的扩展字段
      * @return void
      */
-    protected function emitLocalNodeUpdateState(string $taskId, string $type, string $version, string $state, string $message, string $error = ''): void {
+    protected function emitLocalNodeUpdateState(string $taskId, string $type, string $version, string $state, string $message, string $error = '', array $extra = []): void {
         $payload = [
             'task_id' => $taskId,
             'host' => APP_NODE_ID,
@@ -2162,6 +2211,9 @@ class GatewayServer {
             'error' => $error,
             'updated_at' => time(),
         ];
+        if ($extra) {
+            $payload = array_merge($payload, $extra);
+        }
         Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, APP_NODE_ID), $payload);
         Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
             'event' => 'node_update_state',
@@ -2232,10 +2284,20 @@ class GatewayServer {
                 ? 'Gateway 需重启后才会加载新框架版本'
                 : ($restartSummary['failed_nodes'] ? '部分业务实例升级失败' : ''),
         ];
+        $upstreamFailedNodes = array_values((array)($restartSummary['failed_nodes'] ?? []));
+        $upstreamRollout = [
+            'attempted' => $type !== 'public',
+            'success' => $type === 'public' ? true : count($upstreamFailedNodes) === 0,
+            'success_count' => (int)($restartSummary['success_count'] ?? 0),
+            'failed_count' => count($upstreamFailedNodes),
+            'failed_nodes' => $upstreamFailedNodes,
+        ];
         $payload = [
             'restart_summary' => $restartSummary,
             'master' => $master,
             'iterate_business_processes' => $iterateBusinessProcesses,
+            'upstream_rollout' => $upstreamRollout,
+            'gateway_pending_restart' => $type === 'framework',
         ];
         if ($restartSummary['failed_nodes']) {
             return Result::error('部分业务实例升级失败', 'SERVICE_ERROR', $payload);

@@ -45,6 +45,11 @@ class LinuxCrontabManager {
     private const STORAGE_DIRECTORY = '/db/';
 
     /**
+     * 单任务运行态持久化目录（相对 APP_PATH）。
+     */
+    private const TASK_STATE_DIRECTORY = '/db/crontab_state/';
+
+    /**
      * Linux crontab 执行日志目录（相对 APP_LOG_PATH）。
      */
     private const CRONTAB_LOG_SUB_DIRECTORY = '/crontab';
@@ -115,10 +120,11 @@ class LinuxCrontabManager {
 
         foreach (($config['items'] ?? []) as $item) {
             $normalized = $this->normalizeEntry($item, false);
+            $normalized = $this->mergeEntryRuntimeState($normalized, $this->readTaskState($normalized));
             $localApplicable = $this->shouldInstallOnCurrentNode($normalized);
             $lockRequested = $this->isLockRequested($normalized);
             $expectedLineCount = $localApplicable && (int)($normalized['enabled'] ?? 0) === 1
-                ? count($this->buildCronLines($normalized))
+                ? count($this->buildExpressions($normalized))
                 : 0;
             $actualLineCount = $localApplicable ? (int)($installedLineCount[$normalized['id']] ?? 0) : 0;
             $normalized['cron_expression'] = $this->buildCronExpressionPreview($normalized);
@@ -356,10 +362,6 @@ class LinuxCrontabManager {
             }
             $previousEntry = $this->normalizeEntry((array)$item, false);
             $entry['created_at'] = (int)($item['created_at'] ?? $entry['created_at']);
-            $entry['last_run_at'] = (int)($item['last_run_at'] ?? 0);
-            $entry['last_finish_at'] = (int)($item['last_finish_at'] ?? 0);
-            $entry['last_run_status'] = trim((string)($item['last_run_status'] ?? ''));
-            $entry['last_run_message'] = trim((string)($item['last_run_message'] ?? ''));
             $items[$index] = $entry;
             $matched = true;
             break;
@@ -411,8 +413,8 @@ class LinuxCrontabManager {
     /**
      * 将 master 下发的 Linux 排程配置应用到当前节点。
      *
-     * slave 侧需要保留自己的运行态字段，因此这里会在覆盖配置定义时
-     * 尽量保留本地 `last_run_*` 结果，再按当前节点 env/role 重新同步系统排程。
+     * slave 侧运行态落在任务独立状态文件里，这里只覆盖排程定义，
+     * 然后按当前节点 env/role 重新同步系统排程。
      *
      * @param array<string, mixed> $payload master 下发的配置包
      * @return array<string, mixed>
@@ -426,14 +428,15 @@ class LinuxCrontabManager {
     /**
      * 返回可直接挂到节点心跳 `tasks` 字段里的 Linux 排程状态。
      *
-     * 节点页已经有现成的排程抽屉与日志入口，这里把 Linux 排程映射成旧任务表
-     * 能识别的结构，尽量复用当前展示逻辑，而不再为节点详情页单独造一套列表协议。
+     * 心跳链路默认只读取本地任务状态文件，不执行系统命令；
+     * 仅在低频管理链路需要时，才显式开启系统安装态探测。
      *
+     * @param bool $includeSystemState 是否包含系统 crontab 安装态探测
      * @return array<int, array<string, mixed>>
      */
-    public static function nodeTasks(): array {
+    public static function nodeTasks(bool $includeSystemState = false): array {
         $manager = new self();
-        return $manager->buildNodeTasks();
+        return $manager->buildNodeTasks($includeSystemState);
     }
 
     /**
@@ -502,9 +505,8 @@ class LinuxCrontabManager {
     /**
      * 更新某条排程的运行态字段。
      *
-     * 运行记录是 Linux 系统 cron 回写回应用配置的唯一来源，因此这里采用
-     * “读整个配置 -> 定位单条记录 -> 回写整个文件”的方式，避免和 dashboard
-     * 页面读取逻辑分叉成两套存储。
+     * 运行记录会回写到任务自己的状态文件（`className_state.json`），
+     * 不再写回 `crontabs*.json`，避免多任务并发时彼此覆盖。
      *
      * @param string $entryId 排程条目 id
      * @param array<string, mixed> $state 需要回写的运行态字段
@@ -516,42 +518,43 @@ class LinuxCrontabManager {
             return;
         }
 
-        $file = self::resolveReadableConfigFile();
-        if (!is_file($file)) {
+        $payload = self::readConfigPayloadFromFile(self::resolveReadableConfigFile());
+        if (!is_array($payload)) {
             return;
         }
 
-        $json = File::readJson($file);
-        if (!is_array($json)) {
-            return;
-        }
-
-        $items = array_values(is_array($json['items'] ?? null) ? $json['items'] : $json);
-        $updated = false;
-        foreach ($items as &$item) {
+        $matchedEntry = null;
+        foreach (array_values((array)($payload['items'] ?? [])) as $item) {
             if ((string)($item['id'] ?? '') !== $entryId) {
                 continue;
             }
-            foreach ($state as $key => $value) {
-                $item[$key] = $value;
-            }
-            $item['updated_at'] = (int)($item['updated_at'] ?? time());
-            $updated = true;
+            $matchedEntry = (array)$item;
             break;
         }
-        unset($item);
-
-        if (!$updated) {
+        if (!$matchedEntry) {
             return;
         }
 
-        $payload = [
-            'items' => $items,
-            'updated_at' => (int)($json['updated_at'] ?? time()),
-        ];
-        if (!self::persistConfigPayload($payload)) {
-            return;
-        }
+        $manager = new self();
+        $entry = $manager->normalizeEntry($matchedEntry, false);
+        $stateFile = $manager->taskStateFile($entry);
+        self::updateTaskStateFile($stateFile, static function (array $existingState) use ($state, $entry): array {
+            $now = time();
+            $nextState = $existingState;
+            if (!array_key_exists('run_count', $state) && array_key_exists('last_run_at', $state)) {
+                $nextState['run_count'] = max(0, (int)($nextState['run_count'] ?? 0)) + 1;
+            }
+            foreach ($state as $key => $value) {
+                $nextState[$key] = $value;
+            }
+            $nextState['entry_id'] = (string)($entry['id'] ?? '');
+            $nextState['name'] = (string)($entry['name'] ?? '');
+            $nextState['namespace'] = (string)($entry['namespace'] ?? '');
+            $nextState['env'] = (string)($entry['env'] ?? '');
+            $nextState['role'] = (string)($entry['role'] ?? '');
+            $nextState['updated_at'] = $now;
+            return $nextState;
+        });
     }
 
     /**
@@ -581,6 +584,9 @@ class LinuxCrontabManager {
         ));
 
         $this->writeConfig(['items' => $items]);
+        if ($deletedEntry) {
+            $this->removeTaskState($deletedEntry);
+        }
         $sync = [];
         if ($deletedEntry && $this->entryAffectsCurrentNode(null, $deletedEntry)) {
             $sync = $this->sync();
@@ -644,8 +650,16 @@ class LinuxCrontabManager {
             $config['items'] ?? [],
             static fn(array $item): bool => (int)($item['enabled'] ?? 0) === 1
         ));
+        $syncedAt = time();
 
         if (!$this->isSystemCrontabAvailable()) {
+            $this->persistNodeTaskStateFiles(
+                (array)($config['items'] ?? []),
+                false,
+                $this->isFlockAvailable(),
+                [],
+                $syncedAt
+            );
             return [
                 'managed_line_count' => 0,
                 'enabled_count' => $enabledCount,
@@ -687,10 +701,81 @@ class LinuxCrontabManager {
         }
 
         $this->writeSystemCrontab($content);
+        $this->persistNodeTaskStateFiles(
+            (array)($config['items'] ?? []),
+            true,
+            $this->isFlockAvailable(),
+            $this->extractInstalledLineCount($content),
+            $syncedAt
+        );
         return [
             'managed_line_count' => count($managedLines),
             'enabled_count' => $enabledCount,
         ];
+    }
+
+    /**
+     * 把当前节点可见的系统安装态快照回写到每个任务自己的状态文件。
+     *
+     * @param array<int, array<string, mixed>> $items 当前配置条目
+     * @param bool $systemAvailable 当前节点是否可用系统 crontab
+     * @param bool|null $flockAvailable 当前节点 flock 可用性
+     * @param array<string, int> $installedLineCount 条目实际安装行数映射
+     * @param int $syncedAt 快照更新时间
+     * @return void
+     */
+    protected function persistNodeTaskStateFiles(
+        array $items,
+        bool $systemAvailable,
+        ?bool $flockAvailable,
+        array $installedLineCount,
+        int $syncedAt
+    ): void {
+        foreach ($items as $item) {
+            $entry = $this->normalizeEntry((array)$item, false);
+            $localApplicable = $this->shouldInstallOnCurrentNode($entry);
+            $lockRequested = $this->isLockRequested($entry);
+            $expectedLineCount = $localApplicable && (int)($entry['enabled'] ?? 0) === 1
+                ? count($this->buildExpressions($entry))
+                : 0;
+            $actualLineCount = ($localApplicable && $systemAvailable)
+                ? (int)($installedLineCount[$entry['id']] ?? 0)
+                : 0;
+            $runtimeFlockAvailable = $localApplicable ? $flockAvailable : null;
+
+            self::updateTaskStateFile($this->taskStateFile($entry), function (array $existingState) use (
+                $entry,
+                $localApplicable,
+                $lockRequested,
+                $runtimeFlockAvailable,
+                $systemAvailable,
+                $expectedLineCount,
+                $actualLineCount,
+                $syncedAt
+            ): array {
+                $nextState = $existingState;
+                $nextState['entry_id'] = (string)($entry['id'] ?? '');
+                $nextState['name'] = (string)($entry['name'] ?? '');
+                $nextState['namespace'] = (string)($entry['namespace'] ?? '');
+                $nextState['env'] = (string)($entry['env'] ?? '');
+                $nextState['role'] = (string)($entry['role'] ?? '');
+                $nextState['local_applicable'] = $localApplicable;
+                $nextState['lock_requested'] = $lockRequested;
+                $nextState['lock_runtime_available'] = $runtimeFlockAvailable;
+                $nextState['lock_effective'] = $lockRequested && (!$localApplicable || $runtimeFlockAvailable === true);
+                $nextState['lock_warning'] = $this->lockWarningMessage($entry, $localApplicable, $runtimeFlockAvailable === true);
+                $nextState['schedule_summary'] = $this->buildScheduleSummaryWithRuntimeState($entry, $localApplicable, $runtimeFlockAvailable);
+                $nextState['system_available'] = $systemAvailable;
+                $nextState['expected_line_count'] = $expectedLineCount;
+                $nextState['actual_line_count'] = $actualLineCount;
+                $nextState['system_installed'] = $localApplicable && $systemAvailable && $expectedLineCount > 0 && $actualLineCount === $expectedLineCount;
+                $nextState['system_partial'] = $localApplicable && $systemAvailable && $actualLineCount > 0 && $actualLineCount < $expectedLineCount;
+                $nextState['system_stale'] = $localApplicable && $systemAvailable && $expectedLineCount === 0 && $actualLineCount > 0;
+                $nextState['sync_updated_at'] = $syncedAt;
+                $nextState['updated_at'] = $syncedAt;
+                return $nextState;
+            });
+        }
     }
 
     /**
@@ -943,32 +1028,75 @@ class LinuxCrontabManager {
     /**
      * 构建节点心跳里复用的排程任务列表。
      *
-     * 节点页现在需要直接显示 Linux 排程是否已经落进当前节点的系统 crontab，
-     * 因此这里除了本地配置与最近运行态，还会附带“预期安装行数 / 实际安装行数”
-     * 等字段。系统 crontab 内容只在本方法内读取一次，避免每条任务都重复执行系统命令。
+     * 心跳高频链路默认只读本地持久化文件，避免执行系统命令阻塞主循环；
+     * 仅在低频管理链路明确要求时，才允许即时探测系统 crontab 安装态。
      *
+     * @param bool $includeSystemState 是否实时探测系统安装态
      * @return array<int, array<string, mixed>>
      */
-    protected function buildNodeTasks(): array {
-        $systemAvailable = $this->isSystemCrontabAvailable();
-        $flockAvailable = $this->isFlockAvailable();
-        $installedLineCount = $systemAvailable
-            ? $this->extractInstalledLineCount($this->readSystemCrontab())
-            : [];
+    protected function buildNodeTasks(bool $includeSystemState = false): array {
+        $systemAvailable = null;
+        $flockAvailable = null;
+        $installedLineCount = [];
+        if ($includeSystemState) {
+            $systemAvailable = $this->isSystemCrontabAvailable();
+            $flockAvailable = $this->isFlockAvailable();
+            $installedLineCount = $systemAvailable
+                ? $this->extractInstalledLineCount($this->readSystemCrontab())
+                : [];
+        }
+
         $items = [];
         foreach (($this->readConfig()['items'] ?? []) as $item) {
             $entry = $this->normalizeEntry((array)$item, false);
+            $state = $this->readTaskState($entry);
+            $entry = $this->mergeEntryRuntimeState($entry, $state);
             if (!$this->shouldInstallOnCurrentNode($entry)) {
                 continue;
             }
+
             $lockRequested = $this->isLockRequested($entry);
-            $expectedLineCount = (int)($entry['enabled'] ?? 0) === 1
-                ? count($this->buildCronLines($entry))
-                : 0;
-            $actualLineCount = (int)($installedLineCount[$entry['id']] ?? 0);
-            $systemInstalled = $systemAvailable && $expectedLineCount > 0 && $actualLineCount === $expectedLineCount;
-            $systemPartial = $systemAvailable && $expectedLineCount > 0 && $actualLineCount > 0 && $actualLineCount < $expectedLineCount;
-            $systemStale = $systemAvailable && $expectedLineCount === 0 && $actualLineCount > 0;
+            if ($includeSystemState) {
+                $expectedLineCount = (int)($entry['enabled'] ?? 0) === 1
+                    ? count($this->buildExpressions($entry))
+                    : 0;
+                $actualLineCount = (int)($installedLineCount[$entry['id']] ?? 0);
+                $taskSystemAvailable = $systemAvailable === true;
+                $taskFlockAvailable = $flockAvailable;
+                $systemInstalled = $taskSystemAvailable && $expectedLineCount > 0 && $actualLineCount === $expectedLineCount;
+                $systemPartial = $taskSystemAvailable && $expectedLineCount > 0 && $actualLineCount > 0 && $actualLineCount < $expectedLineCount;
+                $systemStale = $taskSystemAvailable && $expectedLineCount === 0 && $actualLineCount > 0;
+                $lockEffective = $lockRequested && ($taskFlockAvailable === true);
+            } else {
+                $expectedLineCount = max(0, (int)($state['expected_line_count'] ?? 0));
+                $actualLineCount = max(0, (int)($state['actual_line_count'] ?? 0));
+                $taskSystemAvailable = (bool)($state['system_available'] ?? false);
+                $taskFlockAvailable = array_key_exists('lock_runtime_available', $state)
+                    ? (is_null($state['lock_runtime_available']) ? null : (bool)$state['lock_runtime_available'])
+                    : null;
+                $systemInstalled = (bool)($state['system_installed'] ?? ($taskSystemAvailable && $expectedLineCount > 0 && $actualLineCount === $expectedLineCount));
+                $systemPartial = (bool)($state['system_partial'] ?? ($taskSystemAvailable && $expectedLineCount > 0 && $actualLineCount > 0 && $actualLineCount < $expectedLineCount));
+                $systemStale = (bool)($state['system_stale'] ?? ($taskSystemAvailable && $expectedLineCount === 0 && $actualLineCount > 0));
+                $lockEffective = array_key_exists('lock_effective', $state)
+                    ? (bool)$state['lock_effective']
+                    : ($lockRequested && ($taskFlockAvailable === true));
+            }
+
+            $runCount = max(0, (int)($state['run_count'] ?? 0));
+            if ($runCount === 0 && (int)($entry['last_run_at'] ?? 0) > 0) {
+                $runCount = 1;
+            }
+
+            $scheduleSummary = trim((string)($state['schedule_summary'] ?? ''));
+            if ($scheduleSummary === '') {
+                $scheduleSummary = $this->buildScheduleSummaryWithRuntimeState($entry, true, $taskFlockAvailable);
+            }
+
+            $lockWarning = trim((string)($state['lock_warning'] ?? ''));
+            if ($lockWarning === '') {
+                $lockWarning = $this->lockWarningMessage($entry, true, $taskFlockAvailable === true);
+            }
+
             $items[] = [
                 'id' => $entry['id'],
                 'name' => $entry['name'],
@@ -986,7 +1114,7 @@ class LinuxCrontabManager {
                 'status' => (int)($entry['enabled'] ?? 0) === 1 ? 1 : 0,
                 'real_status' => (int)($entry['enabled'] ?? 0) === 1 ? 1 : 0,
                 'is_busy' => (string)($entry['last_run_status'] ?? '') === 'running' ? 1 : 0,
-                'run_count' => (int)($entry['last_run_at'] ?? 0) > 0 ? 1 : 0,
+                'run_count' => $runCount,
                 'last_run' => (int)($entry['last_run_at'] ?? 0),
                 'next_run' => 0,
                 'logs' => [],
@@ -994,18 +1122,19 @@ class LinuxCrontabManager {
                 'role' => $entry['role'],
                 'lock_enabled' => (int)($entry['lock_enabled'] ?? 1),
                 'lock_requested' => $lockRequested,
-                'lock_runtime_available' => $flockAvailable,
-                'lock_effective' => $lockRequested && $flockAvailable,
-                'lock_warning' => $this->lockWarningMessage($entry, true, $flockAvailable),
+                'lock_runtime_available' => $taskFlockAvailable,
+                'lock_effective' => $lockEffective,
+                'lock_warning' => $lockWarning,
                 'schedule_type' => $entry['schedule_type'],
-                'schedule_summary' => $this->buildScheduleSummary($entry),
+                'schedule_summary' => $scheduleSummary,
                 'remark' => $entry['remark'],
-                'system_available' => $systemAvailable,
+                'system_available' => $taskSystemAvailable,
                 'expected_line_count' => $expectedLineCount,
                 'actual_line_count' => $actualLineCount,
                 'system_installed' => $systemInstalled,
                 'system_partial' => $systemPartial,
                 'system_stale' => $systemStale,
+                'sync_updated_at' => (int)($state['sync_updated_at'] ?? 0),
             ];
         }
 
@@ -1025,25 +1154,10 @@ class LinuxCrontabManager {
      */
     protected function applyReplicatedConfig(array $payload): array {
         $incomingItems = array_values(is_array($payload['items'] ?? null) ? $payload['items'] : []);
-        $currentItems = [];
-        foreach (($this->readConfig()['items'] ?? []) as $item) {
-            $id = (string)($item['id'] ?? '');
-            if ($id === '') {
-                continue;
-            }
-            $currentItems[$id] = (array)$item;
-        }
 
         $nextItems = [];
         foreach ($incomingItems as $incomingItem) {
             $entry = $this->normalizeEntry((array)$incomingItem, false);
-            $current = (array)($currentItems[$entry['id']] ?? []);
-            if ($current) {
-                $entry['last_run_at'] = (int)($current['last_run_at'] ?? $entry['last_run_at']);
-                $entry['last_finish_at'] = (int)($current['last_finish_at'] ?? $entry['last_finish_at']);
-                $entry['last_run_status'] = trim((string)($current['last_run_status'] ?? $entry['last_run_status']));
-                $entry['last_run_message'] = trim((string)($current['last_run_message'] ?? $entry['last_run_message']));
-            }
             $nextItems[] = $entry;
         }
 
@@ -1102,7 +1216,7 @@ class LinuxCrontabManager {
             'role' => trim((string)($payload['role'] ?? SERVER_ROLE)) ?: SERVER_ROLE,
             'remark' => trim((string)($payload['remark'] ?? '')),
             'created_at' => (int)($payload['created_at'] ?? time()),
-            'updated_at' => time(),
+            'updated_at' => (int)($payload['updated_at'] ?? time()),
         ];
 
         if (!$validate) {
@@ -1172,6 +1286,25 @@ class LinuxCrontabManager {
      * @return string
      */
     protected function buildScheduleSummary(array $entry): string {
+        return $this->buildScheduleSummaryWithRuntimeState(
+            $entry,
+            $this->shouldInstallOnCurrentNode($entry),
+            $this->isFlockAvailable()
+        );
+    }
+
+    /**
+     * 基于已知运行态构建可读排程摘要。
+     *
+     * 心跳链路禁止主动探测系统命令，因此需要支持由调用方传入
+     * “是否作用于本机 / flock 可用性”后直接拼装摘要文本。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @param bool $localApplicable 是否作用于当前节点
+     * @param bool|null $flockAvailable 当前节点是否可用 flock；未知时传 null
+     * @return string
+     */
+    protected function buildScheduleSummaryWithRuntimeState(array $entry, bool $localApplicable, ?bool $flockAvailable): string {
         $summary = match ($entry['schedule_type']) {
             'interval' => '每隔 ' . $entry['interval_minutes'] . ' 分钟执行一次',
             'daily' => '每日 ' . implode('、', $entry['times']) . ' 执行',
@@ -1184,12 +1317,14 @@ class LinuxCrontabManager {
         }
 
         if ($this->isLockRequested($entry)) {
-            if (!$this->shouldInstallOnCurrentNode($entry)) {
+            if (!$localApplicable) {
                 $summary .= '，已开启互斥锁';
-            } elseif ($this->isFlockAvailable()) {
+            } elseif ($flockAvailable === true) {
                 $summary .= '，重入时跳过';
-            } else {
+            } elseif ($flockAvailable === false) {
                 $summary .= '，已开启互斥锁（当前节点未安装 flock，同步时会失败）';
+            } else {
+                $summary .= '，已开启互斥锁';
             }
         }
 
@@ -1365,7 +1500,21 @@ class LinuxCrontabManager {
      * @return string
      */
     protected function buildCommand(array $entry): string {
-        $command = escapeshellarg(SCF_ROOT . '/bin/crontab')
+        // `flock` 直接执行 command argv，不会解释前置变量赋值；
+        // 这里统一通过 `/usr/bin/env` 注入 cron 运行态标记与关键变量。
+        $runtimeEnv = [
+            'SCF_FROM_CRON=1',
+            'SCF_PHP_BIN=' . escapeshellarg(PHP_BINARY),
+        ];
+        $hostIp = trim((string)(ENV_VARIABLES['host_ip'] ?? ''));
+        if ($hostIp !== '') {
+            $runtimeEnv[] = 'HOST_IP=' . escapeshellarg($hostIp);
+        }
+
+        // 系统 cron 场景统一走 bash 调用脚本，避免依赖文件可执行位/宿主 shebang 差异。
+        $command = escapeshellarg('/usr/bin/env')
+            . ' ' . implode(' ', $runtimeEnv)
+            . ' /bin/bash ' . escapeshellarg(SCF_ROOT . '/bin/crontab')
             . ' -app=' . escapeshellarg(APP_DIR_NAME)
             . ' -env=' . escapeshellarg((string)$entry['env'])
             . ' -role=' . escapeshellarg((string)$entry['role']);
@@ -1392,7 +1541,8 @@ class LinuxCrontabManager {
         $lockFile = '/tmp/' . APP_DIR_NAME . '_' . preg_replace('/[^a-z0-9_]+/i', '_', (string)$entry['id']) . '.lock';
         if ((int)($entry['lock_enabled'] ?? 1) === 1 && $flockPath !== '') {
             $command = escapeshellarg($flockPath)
-                . ' -n '
+                . ' -n'
+                . ' '
                 . escapeshellarg($lockFile)
                 . ' '
                 . $command;
@@ -1626,6 +1776,168 @@ class LinuxCrontabManager {
         return [
             'items' => $items,
         ];
+    }
+
+    /**
+     * 把任务运行态字段合并到配置条目。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @param array<string, mixed> $state 任务运行态
+     * @return array<string, mixed>
+     */
+    protected function mergeEntryRuntimeState(array $entry, array $state): array {
+        $entry['last_run_at'] = max(0, (int)($state['last_run_at'] ?? 0));
+        $entry['last_finish_at'] = max(0, (int)($state['last_finish_at'] ?? 0));
+        $entry['last_run_status'] = trim((string)($state['last_run_status'] ?? ''));
+        $entry['last_run_message'] = trim((string)($state['last_run_message'] ?? ''));
+        $entry['run_count'] = max(0, (int)($state['run_count'] ?? 0));
+        $entry['updated_at'] = max((int)($entry['updated_at'] ?? 0), (int)($state['updated_at'] ?? 0));
+        return $entry;
+    }
+
+    /**
+     * 读取某条任务的独立运行态文件。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @return array<string, mixed>
+     */
+    protected function readTaskState(array $entry): array {
+        return self::readTaskStatePayload($this->taskStateFile($entry));
+    }
+
+    /**
+     * 删除某条任务的独立运行态文件。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @return void
+     */
+    protected function removeTaskState(array $entry): void {
+        $stateFile = $this->taskStateFile($entry);
+        if (is_file($stateFile)) {
+            @unlink($stateFile);
+        }
+        $lockFile = $stateFile . '.lock';
+        if (is_file($lockFile)) {
+            @unlink($lockFile);
+        }
+    }
+
+    /**
+     * 生成任务对应的独立状态文件路径。
+     *
+     * 规则是 `className_state.json`，其中 className 来自完整 namespace，
+     * 并转换为安全文件名；目录按 env/role 分片，避免同机多角色冲突。
+     *
+     * @param array<string, mixed> $entry 排程配置
+     * @return string
+     */
+    protected function taskStateFile(array $entry): string {
+        $env = strtolower(trim((string)($entry['env'] ?? 'production')) ?: 'production');
+        $role = strtolower(trim((string)($entry['role'] ?? NODE_ROLE_MASTER)) ?: NODE_ROLE_MASTER);
+        $namespace = trim((string)($entry['namespace'] ?? ''), '\\/');
+        if ($namespace === '') {
+            $namespace = (string)($entry['id'] ?? 'task');
+        }
+        $safeClassName = preg_replace('/[^a-z0-9_.-]+/i', '_', str_replace(['\\', '/'], '_', $namespace));
+        $safeClassName = trim((string)$safeClassName, '._-');
+        if ($safeClassName === '') {
+            $safeClassName = 'task';
+        }
+
+        $dir = APP_PATH . self::TASK_STATE_DIRECTORY . $env . '_' . $role;
+        return $dir . '/' . $safeClassName . '_state.json';
+    }
+
+    /**
+     * 读取任务状态文件内容。
+     *
+     * @param string $file 状态文件路径
+     * @return array<string, mixed>
+     */
+    protected static function readTaskStatePayload(string $file): array {
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $json = File::readJson($file);
+        if (!is_array($json)) {
+            $raw = File::read($file);
+            if (is_string($raw) && trim($raw) !== '') {
+                $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw) ?? $raw;
+                $raw = str_replace("\0", '', $raw);
+                $decoded = json_decode(trim($raw), true);
+                if (is_array($decoded)) {
+                    $json = $decoded;
+                }
+            }
+        }
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * 在单任务锁保护下读改写状态文件。
+     *
+     * @param string $stateFile 状态文件路径
+     * @param callable $mutator 读改写闭包
+     * @return void
+     */
+    protected static function updateTaskStateFile(string $stateFile, callable $mutator): void {
+        $dir = dirname($stateFile);
+        if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+            return;
+        }
+
+        $lockFile = $stateFile . '.lock';
+        $lockFp = @fopen($lockFile, 'c+');
+        if (!$lockFp) {
+            return;
+        }
+
+        try {
+            if (!@flock($lockFp, LOCK_EX)) {
+                return;
+            }
+            $currentState = self::readTaskStatePayload($stateFile);
+            $nextState = $mutator($currentState);
+            if (!is_array($nextState)) {
+                return;
+            }
+            self::writeTaskStatePayload($stateFile, $nextState);
+        } finally {
+            @flock($lockFp, LOCK_UN);
+            @fclose($lockFp);
+        }
+    }
+
+    /**
+     * 写入任务状态文件（原子替换）。
+     *
+     * @param string $stateFile 状态文件路径
+     * @param array<string, mixed> $payload 状态内容
+     * @return bool
+     */
+    protected static function writeTaskStatePayload(string $stateFile, array $payload): bool {
+        $dir = dirname($stateFile);
+        if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+            return false;
+        }
+
+        $encoded = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if ($encoded === false) {
+            return false;
+        }
+
+        $tmpFile = $stateFile . '.tmp.' . getmypid() . '.' . mt_rand(1000, 9999);
+        if (!File::write($tmpFile, $encoded . PHP_EOL)) {
+            return false;
+        }
+        if (!@rename($tmpFile, $stateFile)) {
+            @unlink($tmpFile);
+            return false;
+        }
+
+        return true;
     }
 
     /**

@@ -176,15 +176,52 @@ class Env {
      * @return ?string
      */
     public static function getIntranetIp(): ?string {
-        $intranetIp = null;
-        if (self::inDocker() || ENV_VARIABLES['network_mode'] == NETWORK_MODE_GROUP) {
-            $intranetIp = ENV_VARIABLES['host_ip'] ?: App::getServerIp()['intranet'];
-        } else {
-            foreach (swoole_get_local_ip() as $ip) {
-                $intranetIp = $ip;
-                break;
+        $hostIp = trim((string)(ENV_VARIABLES['host_ip'] ?? ''));
+        $networkMode = (string)(ENV_VARIABLES['network_mode'] ?? '');
+
+        if (self::inDocker() || $networkMode === NETWORK_MODE_GROUP) {
+            if ($hostIp !== '') {
+                return $hostIp;
+            }
+
+            // Linux cron 子进程运行时若缺少 HOST_IP，不再阻塞式依赖 myip 服务。
+            // 这里优先降级为容器内本机地址，保证一次性任务能继续执行。
+            if (self::isCronRuntime()) {
+                return self::resolveLocalIntranetIp() ?: '127.0.0.1';
+            }
+
+            $serverIp = (array)App::getServerIp();
+            $intranet = trim((string)($serverIp['intranet'] ?? ''));
+            if ($intranet !== '') {
+                return $intranet;
             }
         }
-        return $intranetIp;
+
+        return self::resolveLocalIntranetIp();
+    }
+
+    /**
+     * 判断当前是否由 Linux 系统 cron 链路触发。
+     *
+     * @return bool
+     */
+    protected static function isCronRuntime(): bool {
+        $flag = trim((string)(ENV_VARIABLES['from_cron'] ?? getenv('SCF_FROM_CRON') ?: ''));
+        return in_array(strtolower($flag), ['1', 'true', 'yes', 'on'], true);
+    }
+
+    /**
+     * 解析当前进程可见的本机内网地址。
+     *
+     * @return string|null
+     */
+    protected static function resolveLocalIntranetIp(): ?string {
+        foreach (swoole_get_local_ip() as $ip) {
+            $ip = trim((string)$ip);
+            if ($ip !== '') {
+                return $ip;
+            }
+        }
+        return null;
     }
 }
