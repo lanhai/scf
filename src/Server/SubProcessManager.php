@@ -50,7 +50,9 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
     protected const GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS = 3;
     protected const GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS = 30;
-    protected const GATEWAY_NODE_TASKS_CACHE_SECONDS = 5;
+    protected const GATEWAY_STATUS_PAYLOAD_CACHE_SECONDS = 2;
+    protected const GATEWAY_TABLES_CACHE_SECONDS = 10;
+    protected const GATEWAY_NODE_TASKS_CACHE_SECONDS = 30;
     protected const HEARTBEAT_COUNTER_PREFIX = '__hb__:';
     protected const HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS = 30;
     protected const TEMP_HEARTBEAT_TRACE_ENABLED = false;
@@ -81,8 +83,15 @@ class SubProcessManager {
     protected array $processLastStaleHandleAt = [];
     protected array $manualStoppedProcesses = [];
     protected array $heartbeatWriteFailWarnAt = [];
+    protected int $gatewayStatusPayloadCachedAt = 0;
+    protected array $gatewayStatusPayloadCached = [];
+    protected bool $gatewayStatusPayloadRefreshing = false;
+    protected int $gatewayTablesCachedAt = 0;
+    protected array $gatewayTablesCached = [];
+    protected bool $gatewayTablesRefreshing = false;
     protected int $gatewayNodeTasksCachedAt = 0;
     protected array $gatewayNodeTasksCached = [];
+    protected bool $gatewayNodeTasksRefreshing = false;
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
@@ -1499,7 +1508,7 @@ class SubProcessManager {
                 try {
                     // 控制面状态表由 cluster 子进程直接按秒刷新，避免只依赖 pipe 到 worker
                     // 时出现“push 没发出去但状态表也没更新”的双重丢失。
-                    ServerNodeStatusTable::instance()->set('localhost', $this->buildGatewayClusterStatusPayload());
+                    ServerNodeStatusTable::instance()->set('localhost', $this->cachedGatewayClusterStatusPayload());
                 } catch (Throwable $throwable) {
                     Console::warning('【GatewayCluster】刷新本地节点状态失败:' . $throwable->getMessage(), false);
                 }
@@ -1580,7 +1589,7 @@ class SubProcessManager {
                             'event' => 'node_heart_beat',
                             'data' => [
                                 'host' => APP_NODE_ID,
-                                'status' => $this->buildGatewayClusterStatusPayload(),
+                                'status' => $this->cachedGatewayClusterStatusPayload(),
                             ]
                         ], 'node_heart_beat');
                     } catch (Throwable) {
@@ -1783,7 +1792,7 @@ class SubProcessManager {
         $baseBuildCostMs = round((microtime(true) - $stepStartedAt) * 1000, 2);
 
         $tablesStartedAt = microtime(true);
-        $node->tables = ATable::list();
+        $node->tables = $this->cachedGatewayTableStats();
         $tablesCostMs = round((microtime(true) - $tablesStartedAt) * 1000, 2);
 
         $threadStatsStartedAt = microtime(true);
@@ -1833,6 +1842,119 @@ class SubProcessManager {
     }
 
     /**
+     * 返回 GatewayCluster 主循环可复用的状态快照缓存。
+     *
+     * 主循环每秒都要推进心跳，不能把整套状态构建串行阻塞在当前轮次。
+     * 这里采用“短 TTL + 异步刷新 + 过期兜底旧值”的策略，避免 heartbeat
+     * 被慢 I/O 拖死。
+     *
+     * @return array<string, mixed>
+     */
+    protected function cachedGatewayClusterStatusPayload(): array {
+        $now = time();
+        if (
+            $this->gatewayStatusPayloadCached
+            && $this->gatewayStatusPayloadCachedAt > 0
+            && ($now - $this->gatewayStatusPayloadCachedAt) < self::GATEWAY_STATUS_PAYLOAD_CACHE_SECONDS
+        ) {
+            return $this->gatewayStatusPayloadCached;
+        }
+
+        if (!$this->gatewayStatusPayloadCached) {
+            return $this->reloadGatewayClusterStatusPayloadCache();
+        }
+
+        if ($this->gatewayStatusPayloadRefreshing) {
+            return $this->gatewayStatusPayloadCached;
+        }
+
+        if (Coroutine::getCid() <= 0) {
+            return $this->reloadGatewayClusterStatusPayloadCache();
+        }
+
+        $this->gatewayStatusPayloadRefreshing = true;
+        Coroutine::create(function (): void {
+            try {
+                $this->reloadGatewayClusterStatusPayloadCache();
+            } finally {
+                $this->gatewayStatusPayloadRefreshing = false;
+            }
+        });
+
+        return $this->gatewayStatusPayloadCached;
+    }
+
+    /**
+     * 同步刷新 GatewayCluster 状态快照缓存。
+     *
+     * @return array<string, mixed>
+     */
+    protected function reloadGatewayClusterStatusPayloadCache(): array {
+        try {
+            $payload = $this->buildGatewayClusterStatusPayload();
+            if (is_array($payload) && $payload) {
+                $this->gatewayStatusPayloadCached = $payload;
+                $this->gatewayStatusPayloadCachedAt = time();
+            }
+        } catch (Throwable) {
+        }
+        return $this->gatewayStatusPayloadCached;
+    }
+
+    /**
+     * 返回内存表统计缓存。
+     *
+     * ATable::list() 会遍历所有共享表并读取 stats，频繁执行会放大状态构建开销。
+     * 这里采用短 TTL 缓存，并在缓存过期后异步刷新。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function cachedGatewayTableStats(): array {
+        $now = time();
+        if (
+            $this->gatewayTablesCachedAt > 0
+            && ($now - $this->gatewayTablesCachedAt) < self::GATEWAY_TABLES_CACHE_SECONDS
+        ) {
+            return $this->gatewayTablesCached;
+        }
+
+        if (!$this->gatewayTablesCached) {
+            return $this->reloadGatewayTableStatsCache();
+        }
+
+        if ($this->gatewayTablesRefreshing) {
+            return $this->gatewayTablesCached;
+        }
+
+        if (Coroutine::getCid() <= 0) {
+            return $this->reloadGatewayTableStatsCache();
+        }
+
+        $this->gatewayTablesRefreshing = true;
+        Coroutine::create(function (): void {
+            try {
+                $this->reloadGatewayTableStatsCache();
+            } finally {
+                $this->gatewayTablesRefreshing = false;
+            }
+        });
+
+        return $this->gatewayTablesCached;
+    }
+
+    /**
+     * 同步刷新内存表统计缓存。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function reloadGatewayTableStatsCache(): array {
+        $tables = ATable::list();
+        $this->gatewayTablesCached = is_array($tables) ? $tables : [];
+        $this->gatewayTablesCachedAt = time();
+        return $this->gatewayTablesCached;
+    }
+
+    /**
      * 返回 gateway 心跳链路可复用的 Linux 排程任务缓存。
      *
      * 心跳状态每秒构建一次，直接逐轮读配置+状态文件会带来不必要 I/O。
@@ -1843,12 +1965,46 @@ class SubProcessManager {
      */
     protected function cachedGatewayNodeTasks(): array {
         $now = time();
-        if ($this->gatewayNodeTasksCachedAt > 0 && ($now - $this->gatewayNodeTasksCachedAt) < self::GATEWAY_NODE_TASKS_CACHE_SECONDS) {
+        if (
+            $this->gatewayNodeTasksCachedAt > 0
+            && ($now - $this->gatewayNodeTasksCachedAt) < self::GATEWAY_NODE_TASKS_CACHE_SECONDS
+        ) {
             return $this->gatewayNodeTasksCached;
         }
+
+        if (!$this->gatewayNodeTasksCached) {
+            return $this->reloadGatewayNodeTasksCache();
+        }
+
+        if ($this->gatewayNodeTasksRefreshing) {
+            return $this->gatewayNodeTasksCached;
+        }
+
+        if (Coroutine::getCid() <= 0) {
+            return $this->reloadGatewayNodeTasksCache();
+        }
+
+        $this->gatewayNodeTasksRefreshing = true;
+        Coroutine::create(function (): void {
+            try {
+                $this->reloadGatewayNodeTasksCache();
+            } finally {
+                $this->gatewayNodeTasksRefreshing = false;
+            }
+        });
+
+        return $this->gatewayNodeTasksCached;
+    }
+
+    /**
+     * 同步刷新 Linux 排程任务缓存。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function reloadGatewayNodeTasksCache(): array {
         $tasks = LinuxCrontabManager::nodeTasks(false);
-        $this->gatewayNodeTasksCachedAt = $now;
         $this->gatewayNodeTasksCached = is_array($tasks) ? $tasks : [];
+        $this->gatewayNodeTasksCachedAt = time();
         return $this->gatewayNodeTasksCached;
     }
 
