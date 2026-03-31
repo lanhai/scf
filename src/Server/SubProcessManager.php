@@ -50,6 +50,9 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
     protected const GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS = 3;
     protected const GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS = 30;
+    protected const HEARTBEAT_COUNTER_PREFIX = '__hb__:';
+    protected const HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS = 30;
+    protected const TEMP_HEARTBEAT_TRACE_ENABLED = false;
 
     /**
      * Server 托管的总控子进程。
@@ -76,6 +79,7 @@ class SubProcessManager {
     protected array $processLastRespawnAttemptAt = [];
     protected array $processLastStaleHandleAt = [];
     protected array $manualStoppedProcesses = [];
+    protected array $heartbeatWriteFailWarnAt = [];
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
@@ -632,7 +636,9 @@ class SubProcessManager {
             if ($heartbeatKey === '') {
                 continue;
             }
-            $heartbeatAt = (int)(Runtime::instance()->get($heartbeatKey) ?? 0);
+            $runtimeHeartbeatAt = (int)(Runtime::instance()->get($heartbeatKey) ?? 0);
+            $fallbackHeartbeatAt = (int)(Counter::instance()->get($this->heartbeatCounterKey($heartbeatKey)) ?? 0);
+            $heartbeatAt = max($runtimeHeartbeatAt, $fallbackHeartbeatAt);
             if ($heartbeatAt <= 0) {
                 continue;
             }
@@ -648,7 +654,8 @@ class SubProcessManager {
                 continue;
             }
             $this->processLastStaleHandleAt[$name] = $now;
-            Console::warning("【{$name}】子进程心跳超时({$staleSeconds}s)，发送 SIGTERM 回收");
+            $this->dumpManagedProcessTimeoutTrace($name, $staleSeconds);
+            Console::warning("【{$name}】子进程心跳超时({$staleSeconds}s), runtime={$runtimeHeartbeatAt}, counter={$fallbackHeartbeatAt}, pid={$pid}，发送 SIGTERM 回收");
             @Process::kill($pid, SIGTERM);
             if ($staleSeconds >= self::PROCESS_HEARTBEAT_FORCE_KILL_SECONDS) {
                 usleep(200000);
@@ -682,6 +689,142 @@ class SubProcessManager {
     }
 
     /**
+     * 将子进程心跳写入 Runtime，并同步写入 Counter 兜底槽位。
+     *
+     * Runtime 行数较小且承载大量动态 key，极端情况下可能出现写入失败。
+     * 心跳链路额外写一份 Counter，可以避免“进程还活着但 Runtime 心跳断更”被误判超时。
+     *
+     * @param string $runtimeKey Runtime 心跳 key
+     * @param int $heartbeatAt 心跳时间戳
+     * @param string $processName 进程名（仅用于日志）
+     * @return void
+     */
+    protected function touchManagedHeartbeat(string $runtimeKey, int $heartbeatAt, string $processName = ''): void {
+        $written = Runtime::instance()->set($runtimeKey, $heartbeatAt);
+        Counter::instance()->set($this->heartbeatCounterKey($runtimeKey), $heartbeatAt);
+        if ($written) {
+            unset($this->heartbeatWriteFailWarnAt[$runtimeKey]);
+            return;
+        }
+        $now = time();
+        $lastWarnAt = (int)($this->heartbeatWriteFailWarnAt[$runtimeKey] ?? 0);
+        if (($now - $lastWarnAt) < self::HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS) {
+            return;
+        }
+        $this->heartbeatWriteFailWarnAt[$runtimeKey] = $now;
+        $label = $processName !== '' ? $processName : $runtimeKey;
+        Console::warning("【{$label}】Runtime 心跳写入失败，已回退 Counter 兜底");
+    }
+
+    /**
+     * 读取子进程心跳时间戳（Runtime 主读 + Counter 兜底）。
+     *
+     * @param string $runtimeKey Runtime 心跳 key
+     * @return int
+     */
+    protected function managedHeartbeatAt(string $runtimeKey): int {
+        $runtimeHeartbeat = (int)(Runtime::instance()->get($runtimeKey) ?? 0);
+        $fallbackHeartbeat = (int)(Counter::instance()->get($this->heartbeatCounterKey($runtimeKey)) ?? 0);
+        return max($runtimeHeartbeat, $fallbackHeartbeat);
+    }
+
+    /**
+     * 生成心跳在 Counter 表中的兜底 key。
+     *
+     * @param string $runtimeKey Runtime 心跳 key
+     * @return string
+     */
+    protected function heartbeatCounterKey(string $runtimeKey): string {
+        return self::HEARTBEAT_COUNTER_PREFIX . md5($runtimeKey);
+    }
+
+    /**
+     * 临时输出心跳链路步骤耗时。
+     *
+     * 该日志用于排查“子进程心跳超时”时，定位单轮循环到底阻塞在哪个步骤。
+     * 默认仅在临时排障期开启，问题确认后应关闭或移除。
+     *
+     * @param string $step 步骤名
+     * @param float $startedAt 步骤开始时间（microtime(true)）
+     * @param array<string, scalar|null> $context 追加上下文字段
+     * @return void
+     */
+    protected function traceHeartbeatStep(string $step, float $startedAt, array $context = []): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED) {
+            return;
+        }
+        $elapsedMs = round((microtime(true) - $startedAt) * 1000, 2);
+        $parts = [];
+        foreach ($context as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $parts[] = $key . '=' . (is_null($value) ? 'null' : (string)$value);
+            }
+        }
+        $suffix = $parts ? (', ' . implode(', ', $parts)) : '';
+        Console::info("【HeartbeatTrace】{$step}, cost={$elapsedMs}ms{$suffix}", false);
+    }
+
+    /**
+     * 在子进程心跳超时时输出对应进程的缓冲诊断信息。
+     *
+     * @param string $name 子进程名
+     * @param int $staleSeconds 心跳过期秒数
+     * @return void
+     */
+    protected function dumpManagedProcessTimeoutTrace(string $name, int $staleSeconds): void {
+        if ($name !== 'GatewayHealthMonitor') {
+            return;
+        }
+        $this->dumpGatewayHealthTimeoutTrace($staleSeconds);
+    }
+
+    /**
+     * 输出 GatewayHealthMonitor 最近单轮探测缓冲明细。
+     *
+     * 缓冲快照由 GatewayServer 在 health 子进程内持续覆盖写入 Runtime。
+     * 默认运行期不输出该明细，仅在心跳超时回收前一次性打印，避免常态日志噪声。
+     *
+     * @param int $staleSeconds 心跳过期秒数
+     * @return void
+     */
+    protected function dumpGatewayHealthTimeoutTrace(int $staleSeconds): void {
+        $snapshot = Runtime::instance()->get(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT);
+        if (!is_array($snapshot)) {
+            Console::warning("【GatewayHealthTrace】心跳超时({$staleSeconds}s)，无可用轮次缓冲快照");
+            return;
+        }
+
+        $entries = array_values(array_filter((array)($snapshot['entries'] ?? []), static function ($item): bool {
+            return is_string($item) && trim($item) !== '';
+        }));
+        $updatedAt = (float)($snapshot['updated_at'] ?? 0);
+        $roundStartedAt = (float)($snapshot['round_started_at'] ?? 0);
+        $roundElapsedMs = (float)($snapshot['round_elapsed_ms'] ?? 0);
+        $roundSequence = (int)($snapshot['round_sequence'] ?? 0);
+        $activeRound = !empty($snapshot['active']) ? 1 : 0;
+        $tracePid = (int)($snapshot['pid'] ?? 0);
+        $now = microtime(true);
+        $lastUpdateAgoMs = $updatedAt > 0 ? round(max(0, ($now - $updatedAt) * 1000), 2) : -1;
+        $startedAgoMs = $roundStartedAt > 0 ? round(max(0, ($now - $roundStartedAt) * 1000), 2) : -1;
+
+        Console::warning(
+            "【GatewayHealthTrace】心跳超时({$staleSeconds}s)触发单轮缓冲回放: "
+            . "pid={$tracePid}, active={$activeRound}, round_sequence={$roundSequence}, "
+            . "entries=" . count($entries) . ", round_elapsed_ms={$roundElapsedMs}, "
+            . "started_ago_ms={$startedAgoMs}, last_update_ago_ms={$lastUpdateAgoMs}"
+        );
+
+        if (!$entries) {
+            Console::warning('【GatewayHealthTrace】单轮缓冲为空');
+            return;
+        }
+        foreach ($entries as $index => $line) {
+            $no = $index + 1;
+            Console::warning("【GatewayHealthTrace】[{$no}] {$line}");
+        }
+    }
+
+    /**
      * 清理指定子进程的 runtime pid/heartbeat 状态，避免残留值误导后续健康判定。
      *
      * @param string $name 子进程名
@@ -702,7 +845,13 @@ class SubProcessManager {
         };
         $heartbeatKey = $this->managedProcessHeartbeatRuntimeKey($name);
         $pidKey !== '' && Runtime::instance()->set($pidKey, 0);
-        $heartbeatKey !== '' && Runtime::instance()->set($heartbeatKey, 0);
+        if ($heartbeatKey !== '') {
+            Runtime::instance()->set($heartbeatKey, 0);
+            Counter::instance()->set($this->heartbeatCounterKey($heartbeatKey), 0);
+        }
+        if ($name === 'GatewayHealthMonitor') {
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, '');
+        }
     }
 
     protected function drainManagedProcesses(int $graceSeconds = self::PROCESS_EXIT_GRACE_SECONDS): void {
@@ -1302,7 +1451,7 @@ class SubProcessManager {
                 }
                 App::mount();
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time());
+                $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【GatewayCluster】集群协调PID:" . $process->pid, false);
                 }
@@ -1327,16 +1476,21 @@ class SubProcessManager {
     protected function runGatewayMasterClusterLoop(Process $process): void {
         MemoryMonitor::start('GatewayCluster');
         $socket = $process->exportSocket();
+        $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
+        if (is_resource($commandPipe)) {
+            stream_set_blocking($commandPipe, false);
+        }
         $lastTickAt = 0;
         while (true) {
             if (!Runtime::instance()->serverIsAlive()) {
                 Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
                 MemoryMonitor::stop();
+                is_resource($commandPipe) and fclose($commandPipe);
                 $this->exitCoroutineRuntime();
                 return;
             }
             $now = time();
-            Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, $now);
+            $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, $now, 'GatewayClusterCoordinator');
             if ($now !== $lastTickAt && Runtime::instance()->serverIsReady()) {
                 $lastTickAt = $now;
                 try {
@@ -1348,13 +1502,27 @@ class SubProcessManager {
                 }
                 $this->sendGatewayPipeMessage('gateway_cluster_tick');
             }
-            $message = $socket->recv(timeout: 1);
-            if ($message === 'shutdown') {
+            $message = '';
+            if (is_resource($commandPipe)) {
+                $pipePayload = @stream_get_contents($commandPipe);
+                if (is_string($pipePayload) && $pipePayload !== '') {
+                    $message = $pipePayload;
+                }
+            } else {
+                // command pipe 异常时退回 socket 短轮询，避免 recv 阻塞拖住心跳主循环。
+                $socketPayload = $socket->recv(timeout: 0.1);
+                if (is_string($socketPayload) && $socketPayload !== '') {
+                    $message = $socketPayload;
+                }
+            }
+            if ($message !== '' && str_contains($message, 'shutdown')) {
                 Console::warning('【GatewayCluster】收到shutdown,安全退出', false);
                 MemoryMonitor::stop();
+                is_resource($commandPipe) and fclose($commandPipe);
                 $this->exitCoroutineRuntime();
                 return;
             }
+            Coroutine::sleep(0.1);
         }
     }
 
@@ -1433,7 +1601,7 @@ class SubProcessManager {
                         $this->exitCoroutineRuntime();
                         return;
                     }
-                    Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time());
+                    $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
                     $message = $processSocket->recv(timeout: 0.1);
                     if ($message === 'shutdown') {
                         $clearHeartbeatTimer();
@@ -1761,26 +1929,54 @@ class SubProcessManager {
                 }
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID, (int)$process->pid);
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time());
+                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, '');
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【GatewayHealth】健康检查PID:" . $process->pid, false);
                 }
                 $socket = $process->exportSocket();
                 while (true) {
-                    if (!Runtime::instance()->serverIsAlive()) {
+                    $loopStartedAt = microtime(true);
+
+                    $aliveCheckStartedAt = microtime(true);
+                    $serverAlive = Runtime::instance()->serverIsAlive();
+                    $this->traceHeartbeatStep('GatewayHealth.loop.server_alive', $aliveCheckStartedAt, [
+                        'alive' => $serverAlive ? 1 : 0,
+                    ]);
+                    if (!$serverAlive) {
                         Console::warning('【GatewayHealth】服务器已关闭,结束运行');
                         $this->exitCoroutineRuntime();
                         break;
                     }
-                    Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time());
-                    if (Runtime::instance()->serverIsReady() && App::isReady()) {
+
+                    $touchStartedAt = microtime(true);
+                    $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time(), 'GatewayHealthMonitor');
+                    $this->traceHeartbeatStep('GatewayHealth.loop.touch_heartbeat', $touchStartedAt);
+
+                    $readyCheckStartedAt = microtime(true);
+                    $serverReady = Runtime::instance()->serverIsReady();
+                    $appReady = App::isReady();
+                    $this->traceHeartbeatStep('GatewayHealth.loop.ready_check', $readyCheckStartedAt, [
+                        'server_ready' => $serverReady ? 1 : 0,
+                        'app_ready' => $appReady ? 1 : 0,
+                    ]);
+                    if ($serverReady && $appReady) {
+                        $healthTickStartedAt = microtime(true);
                         $this->runGatewayHealthTick();
+                        $this->traceHeartbeatStep('GatewayHealth.loop.run_health_tick', $healthTickStartedAt);
                     }
+
+                    $recvStartedAt = microtime(true);
                     $message = $socket->recv(timeout: 1);
+                    $this->traceHeartbeatStep('GatewayHealth.loop.pipe_recv', $recvStartedAt, [
+                        'is_shutdown' => $message === 'shutdown' ? 1 : 0,
+                        'has_message' => is_string($message) && $message !== '' ? 1 : 0,
+                    ]);
                     if ($message === 'shutdown') {
                         Console::warning('【GatewayHealth】收到shutdown,安全退出');
                         $this->exitCoroutineRuntime();
                         break;
                     }
+                    $this->traceHeartbeatStep('GatewayHealth.loop.total', $loopStartedAt);
                 }
             });
         });
@@ -2260,7 +2456,7 @@ class SubProcessManager {
                 continue;
             }
             $pid = (int)(Runtime::instance()->get((string)$definition['pid_key']) ?? 0);
-            $lastActiveAt = (int)(Runtime::instance()->get((string)$definition['heartbeat_key']) ?? 0);
+            $lastActiveAt = $this->managedHeartbeatAt((string)$definition['heartbeat_key']);
             $alive = $pid > 0 && @Process::kill($pid, 0);
             $activeAge = $lastActiveAt > 0 ? max(0, $now - $lastActiveAt) : -1;
             $staleAfter = (int)$definition['stale_after'];

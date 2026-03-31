@@ -44,13 +44,28 @@ class AppServerLauncher {
         }
         $host = $this->normalizeProbeHost($host);
 
-        // 本机 managed upstream 的“是否在监听”必须使用真实 LISTEN 语义。
-        // 仅用 socket_bind 在 macOS 上会出现误判（TIME_WAIT/SO_REUSEPORT 场景），
-        // 导致旧实例回收卡住、端口不断上抬，最终把不可用端口分配给新实例。
+        // 健康检查高频路径先走一次快速 connect 探活，成功即认为监听存在；
+        // connect 失败时再回落到 LISTEN 级 PID 扫描，避免在 macOS 下的
+        // TIME_WAIT/SO_REUSEPORT 边界场景把端口状态误判成可用。
         if ($this->isLocalProbeHost($host)) {
+            if ($this->probeTcpConnectivity('127.0.0.1', $port, min(0.05, max(0.01, $timeoutSeconds)))) {
+                return true;
+            }
             return CoreServer::isListeningPortInUse($port);
         }
 
+        return $this->probeTcpConnectivity($host, $port, $timeoutSeconds);
+    }
+
+    /**
+     * 用 TCP connect 快速判断端口是否可达。
+     *
+     * @param string $host
+     * @param int $port
+     * @param float $timeoutSeconds
+     * @return bool
+     */
+    protected function probeTcpConnectivity(string $host, int $port, float $timeoutSeconds): bool {
         $errno = 0;
         $errstr = '';
         $socket = @stream_socket_client(
@@ -60,11 +75,11 @@ class AppServerLauncher {
             $timeoutSeconds,
             STREAM_CLIENT_CONNECT
         );
-        if (is_resource($socket)) {
-            fclose($socket);
-            return true;
+        if (!is_resource($socket)) {
+            return false;
         }
-        return false;
+        fclose($socket);
+        return true;
     }
 
     /**

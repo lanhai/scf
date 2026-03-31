@@ -1548,7 +1548,15 @@ class LinuxCrontabManager {
                 . $command;
         }
 
-        return $command;
+        $logDirectory = $this->crontabLogDirectory();
+        $logFile = escapeshellarg($this->crontabLogFile());
+
+        // 保留最小日志链路：仅重定向 stdout/stderr 到统一日志文件。
+        // 不再附加状态标记与日志裁剪，避免系统 crontab 单行命令超长。
+        return '/bin/mkdir -p ' . escapeshellarg($logDirectory)
+            . ' && ' . $command
+            . ' >> ' . $logFile
+            . ' 2>&1';
     }
 
     /**

@@ -27,6 +27,7 @@ use Scf\Server\Manager;
 use Scf\Server\SubProcessManager;
 use Scf\Util\File;
 use RuntimeException;
+use Swoole\Coroutine\Barrier;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
 use Swoole\Coroutine\Client as TcpClient;
@@ -90,6 +91,8 @@ class GatewayServer {
     protected const FRAMEWORK_VERSION_CACHE_TTL_SECONDS = 30;
     protected const REMOTE_VERSION_REQUEST_TIMEOUT_SECONDS = 3;
     protected const GATEWAY_LEASE_RENEW_INTERVAL_SECONDS = 2;
+    protected const TEMP_HEARTBEAT_TRACE_ENABLED = true;
+    protected const GATEWAY_HEALTH_TRACE_BUFFER_MAX_LINES = 120;
 
     protected Server $server;
     protected array $dashboardClients = [];
@@ -148,6 +151,11 @@ class GatewayServer {
     protected bool $gatewayLeaseReusedEpoch = false;
     protected ?int $gatewayLeaseRenewTimerId = null;
     protected array $lastDisconnectedClientSummary = [];
+    protected bool $gatewayHealthTraceActive = false;
+    protected float $gatewayHealthTraceRoundStartedAt = 0.0;
+    protected float $gatewayHealthTraceRoundUpdatedAt = 0.0;
+    protected int $gatewayHealthTraceRoundSequence = 0;
+    protected array $gatewayHealthTraceRoundBuffer = [];
 
     /**
      * 创建并初始化 gateway 主服务实例。
@@ -2394,7 +2402,155 @@ class GatewayServer {
      * @return void
      */
     protected function runGatewayHealthMonitorTick(): void {
-        $this->maintainManagedUpstreamHealth();
+        $this->gatewayHealthTraceActive = true;
+        $this->beginGatewayHealthTraceRound();
+        try {
+            $this->maintainManagedUpstreamHealth();
+        } finally {
+            $this->finishGatewayHealthTraceRound();
+            $this->gatewayHealthTraceActive = false;
+        }
+    }
+
+    /**
+     * 记录 Gateway 健康检查链路步骤耗时到“单轮缓冲池”。
+     *
+     * 默认不直接打印，只有当 SubProcessManager 检测到 GatewayHealthMonitor
+     * 心跳超时时，才会读取该缓冲快照并一次性输出整轮明细。
+     *
+     * @param string $step 步骤名
+     * @param float $startedAt 步骤开始时间（microtime(true)）
+     * @param array<string, scalar|null> $context 追加上下文
+     * @return void
+     */
+    protected function traceGatewayHealthStep(string $step, float $startedAt, array $context = []): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED || !$this->gatewayHealthTraceActive) {
+            return;
+        }
+        $elapsedMs = round((microtime(true) - $startedAt) * 1000, 2);
+        $stepLabel = $this->gatewayHealthStepLabel($step);
+        $parts = [];
+        foreach ($context as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $parts[] = $key . '=' . (is_null($value) ? 'null' : (string)$value);
+            }
+        }
+        $suffix = $parts ? (', ' . implode(', ', $parts)) : '';
+        $this->appendGatewayHealthTraceEntry("{$stepLabel}, step={$step}, cost={$elapsedMs}ms{$suffix}");
+    }
+
+    /**
+     * 开始一轮 GatewayHealthMonitor 探测缓冲。
+     *
+     * @return void
+     */
+    protected function beginGatewayHealthTraceRound(): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED) {
+            return;
+        }
+        $now = microtime(true);
+        $this->gatewayHealthTraceRoundStartedAt = $now;
+        $this->gatewayHealthTraceRoundUpdatedAt = $now;
+        $this->gatewayHealthTraceRoundSequence++;
+        $this->gatewayHealthTraceRoundBuffer = [];
+        $this->persistGatewayHealthTraceSnapshot(true);
+    }
+
+    /**
+     * 结束一轮 GatewayHealthMonitor 探测缓冲。
+     *
+     * @return void
+     */
+    protected function finishGatewayHealthTraceRound(): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED) {
+            return;
+        }
+        $this->gatewayHealthTraceRoundUpdatedAt = microtime(true);
+        $this->persistGatewayHealthTraceSnapshot(false);
+    }
+
+    /**
+     * 追加单条步骤日志到当前轮次缓冲并同步快照。
+     *
+     * @param string $entry
+     * @return void
+     */
+    protected function appendGatewayHealthTraceEntry(string $entry): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED) {
+            return;
+        }
+        $this->gatewayHealthTraceRoundUpdatedAt = microtime(true);
+        $this->gatewayHealthTraceRoundBuffer[] = $entry;
+        if (count($this->gatewayHealthTraceRoundBuffer) > self::GATEWAY_HEALTH_TRACE_BUFFER_MAX_LINES) {
+            $this->gatewayHealthTraceRoundBuffer = array_slice($this->gatewayHealthTraceRoundBuffer, -self::GATEWAY_HEALTH_TRACE_BUFFER_MAX_LINES);
+        }
+        $this->persistGatewayHealthTraceSnapshot(true);
+    }
+
+    /**
+     * 将当前轮次缓冲快照写入 Runtime，供超时侧读取。
+     *
+     * @param bool $activeRound true 表示轮次仍在执行；false 表示轮次已结束
+     * @return void
+     */
+    protected function persistGatewayHealthTraceSnapshot(bool $activeRound): void {
+        if (!self::TEMP_HEARTBEAT_TRACE_ENABLED) {
+            return;
+        }
+        $roundStartedAt = $this->gatewayHealthTraceRoundStartedAt > 0 ? $this->gatewayHealthTraceRoundStartedAt : microtime(true);
+        $updatedAt = $this->gatewayHealthTraceRoundUpdatedAt > 0 ? $this->gatewayHealthTraceRoundUpdatedAt : microtime(true);
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, [
+            'pid' => (int)(getmypid() ?: 0),
+            'active' => $activeRound ? 1 : 0,
+            'round_sequence' => $this->gatewayHealthTraceRoundSequence,
+            'round_started_at' => round($roundStartedAt, 6),
+            'updated_at' => round($updatedAt, 6),
+            'round_elapsed_ms' => round(max(0, ($updatedAt - $roundStartedAt) * 1000), 2),
+            'entries' => $this->gatewayHealthTraceRoundBuffer,
+        ]);
+    }
+
+    /**
+     * 将健康探测步骤 key 转为中文描述，便于直接从日志读出执行动作。
+     *
+     * @param string $step 健康探测步骤 key
+     * @return string
+     */
+    protected function gatewayHealthStepLabel(string $step): string {
+        $map = [
+            'maintain.health.guard_flags' => '维护链路-前置标志检查',
+            'maintain.health.guard_runtime' => '维护链路-运行模式检查',
+            'maintain.health.guard_rolling_cooldown' => '维护链路-滚动发布冷却检查',
+            'maintain.health.resolve_interval' => '维护链路-解析探测间隔',
+            'maintain.health.guard_interval' => '维护链路-探测间隔未到直接返回',
+            'maintain.health.guard_pending_recycles' => '维护链路-待回收进程检查',
+            'maintain.health.instance_reload' => '维护链路-重载实例配置',
+            'maintain.health.instance_snapshot' => '维护链路-读取实例快照',
+            'maintain.health.active_version_empty' => '维护链路-无活跃版本',
+            'maintain.health.generation_iterated' => '维护链路-版本已进入迭代阶段',
+            'maintain.health.collect_active_plans' => '维护链路-收集活跃计划',
+            'maintain.health.active_plans_empty' => '维护链路-无可用计划',
+            'maintain.health.plan_skip' => '维护链路-跳过计划探测',
+            'maintain.health.plan_probe' => '维护链路-执行计划探测',
+            'maintain.health.finish_without_unhealthy' => '维护链路-本轮无异常结束',
+            'maintain.health.guard_selfheal_cooldown' => '维护链路-自愈冷却检查',
+            'maintain.health.trigger_selfheal' => '维护链路-触发自愈',
+            'probe.health.invalid_port' => '探测链路-端口参数非法',
+            'probe.health.http_listening' => '探测链路-HTTP 监听检查',
+            'probe.health.rpc_listening' => '探测链路-RPC 监听检查',
+            'probe.health.fetch_internal_status' => '探测链路-拉取内部状态',
+            'probe.health.http_probe' => '探测链路-HTTP 探活',
+            'probe.health.barrier_wait_exception' => '探测链路-并发栅栏等待异常',
+            'probe.health.total' => '探测链路-单计划总耗时',
+            'fetch.internal.invalid_target' => '内部拉取-目标地址非法',
+            'fetch.internal.listen_check' => '内部拉取-监听检查',
+            'fetch.internal.ipc_request' => '内部拉取-IPC 请求',
+            'fetch.internal.success' => '内部拉取-请求成功',
+            'fetch.internal.non_200' => '内部拉取-非 200 响应',
+            'fetch.internal.no_ipc_action' => '内部拉取-无可用 IPC 动作',
+            'fetch.internal.exception' => '内部拉取-请求异常',
+        ];
+        return $map[$step] ?? ('未知步骤(' . $step . ')');
     }
 
     /**
@@ -4564,48 +4720,88 @@ class GatewayServer {
      * @return void
      */
     protected function maintainManagedUpstreamHealth(): void {
+        $maintainStartedAt = microtime(true);
         if ($this->managedUpstreamSelfHealing || $this->managedUpstreamRolling || !$this->launcher || !$this->upstreamSupervisor) {
+            $this->traceGatewayHealthStep('maintain.health.guard_flags', $maintainStartedAt, [
+                'return' => 'self_healing_or_rolling_or_dependency_missing',
+            ]);
             return;
         }
         if (!App::isReady() || $this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+            $this->traceGatewayHealthStep('maintain.health.guard_runtime', $maintainStartedAt, [
+                'return' => 'app_not_ready_or_shutdown_or_server_down',
+            ]);
             return;
         }
         $now = time();
         if ($this->lastManagedUpstreamRollingAt > 0 && ($now - $this->lastManagedUpstreamRollingAt) < self::ACTIVE_UPSTREAM_HEALTH_ROLLING_COOLDOWN_SECONDS) {
+            $this->traceGatewayHealthStep('maintain.health.guard_rolling_cooldown', $maintainStartedAt, [
+                'return' => 'rolling_cooldown',
+            ]);
             return;
         }
+        $intervalResolveStartedAt = microtime(true);
         $healthCheckInterval = $this->resolveManagedUpstreamHealthCheckIntervalSeconds($now);
-        if ($this->lastManagedUpstreamHealthCheckAt > 0 && ($now - $this->lastManagedUpstreamHealthCheckAt) < $healthCheckInterval) {
+        $elapsedSinceLastRound = $this->lastManagedUpstreamHealthCheckAt > 0
+            ? ($now - $this->lastManagedUpstreamHealthCheckAt)
+            : -1;
+        if ($elapsedSinceLastRound >= 0 && $elapsedSinceLastRound < $healthCheckInterval) {
             return;
         }
+        $this->traceGatewayHealthStep('maintain.health.resolve_interval', $intervalResolveStartedAt, [
+            'interval' => $healthCheckInterval,
+            'elapsed' => $elapsedSinceLastRound >= 0 ? $elapsedSinceLastRound : 'first_round',
+        ]);
         $this->lastManagedUpstreamHealthCheckAt = $now;
         if ($this->pendingManagedRecycles) {
+            $this->traceGatewayHealthStep('maintain.health.guard_pending_recycles', $maintainStartedAt, [
+                'return' => 'pending_recycles',
+                'pending_count' => count($this->pendingManagedRecycles),
+            ]);
             return;
         }
 
         // 健康检测统一以 registry 持久化状态为准。
         // rolling / recycle / self-heal 期间有多条协程在推进 instanceManager 内存态，
         // 这里先 reload 一次，避免使用到尚未收敛的旧代 in-memory 视图。
+        $reloadStartedAt = microtime(true);
         $this->instanceManager->reload();
+        $this->traceGatewayHealthStep('maintain.health.instance_reload', $reloadStartedAt);
+        $snapshotStartedAt = microtime(true);
         $snapshot = $this->instanceManager->snapshot();
+        $this->traceGatewayHealthStep('maintain.health.instance_snapshot', $snapshotStartedAt);
         $activeVersion = (string)($snapshot['active_version'] ?? '');
         if ($activeVersion === '') {
             $this->lastManagedHealthActiveVersion = '';
             $this->managedUpstreamHealthState = [];
             $this->managedUpstreamHealthStableRounds = 0;
             $this->managedUpstreamHealthLastFailureAt = 0;
+            $this->traceGatewayHealthStep('maintain.health.active_version_empty', $maintainStartedAt, [
+                'return' => 'active_version_empty',
+            ]);
             return;
         }
         if ($activeVersion !== $this->lastManagedHealthActiveVersion) {
             // active generation 一变，历史失败计数就没有参考意义了，需要对新代重新观察。
             $this->notifyManagedUpstreamGenerationIterated($activeVersion);
+            $this->traceGatewayHealthStep('maintain.health.generation_iterated', $maintainStartedAt, [
+                'return' => 'generation_iterated',
+                'active_version' => $activeVersion,
+            ]);
             return;
         }
+        $plansStartedAt = microtime(true);
         $activePlans = $this->managedPlansFromSnapshot();
+        $this->traceGatewayHealthStep('maintain.health.collect_active_plans', $plansStartedAt, [
+            'plan_count' => count($activePlans),
+        ]);
         if (!$activePlans) {
             $this->managedUpstreamHealthState = [];
             $this->managedUpstreamHealthStableRounds = 0;
             $this->managedUpstreamHealthLastFailureAt = 0;
+            $this->traceGatewayHealthStep('maintain.health.active_plans_empty', $maintainStartedAt, [
+                'return' => 'active_plans_empty',
+            ]);
             return;
         }
 
@@ -4618,11 +4814,21 @@ class GatewayServer {
 
             if ($this->shouldSkipManagedUpstreamHealthCheck($plan, $now)) {
                 unset($this->managedUpstreamHealthState[$key]);
+                $this->traceGatewayHealthStep('maintain.health.plan_skip', $maintainStartedAt, [
+                    'plan' => $this->managedPlanDescriptor($plan),
+                    'reason' => 'startup_grace_or_pending_recycle',
+                ]);
                 continue;
             }
 
             // 健康检查采用“端口 + internal health”双重标准，避免只看 listen 就过早判定 ready。
+            $probeStartedAt = microtime(true);
             $probe = $this->probeManagedUpstreamHealth($plan);
+            $this->traceGatewayHealthStep('maintain.health.plan_probe', $probeStartedAt, [
+                'plan' => $this->managedPlanDescriptor($plan),
+                'healthy' => !empty($probe['healthy']) ? 1 : 0,
+                'reason' => (string)($probe['reason'] ?? 'unknown'),
+            ]);
             if ($probe['healthy']) {
                 $previous = $this->managedUpstreamHealthState[$key] ?? null;
                 if (is_array($previous) && (int)($previous['failures'] ?? 0) > 0) {
@@ -4668,9 +4874,17 @@ class GatewayServer {
         }
 
         if (!$unhealthyPlans) {
+            $this->traceGatewayHealthStep('maintain.health.finish_without_unhealthy', $maintainStartedAt, [
+                'active_plan_count' => count($activePlans),
+                'stable_rounds' => $this->managedUpstreamHealthStableRounds,
+            ]);
             return;
         }
         if ($this->lastManagedUpstreamSelfHealAt > 0 && ($now - $this->lastManagedUpstreamSelfHealAt) < self::ACTIVE_UPSTREAM_HEALTH_COOLDOWN_SECONDS) {
+            $this->traceGatewayHealthStep('maintain.health.guard_selfheal_cooldown', $maintainStartedAt, [
+                'return' => 'selfheal_cooldown',
+                'unhealthy_count' => count($unhealthyPlans),
+            ]);
             return;
         }
 
@@ -4678,6 +4892,10 @@ class GatewayServer {
         $descriptors = array_map(fn(array $plan) => $this->managedPlanDescriptor($plan), $unhealthyPlans);
         $recoveryPlans = $activePlans;
         Console::warning("【Gateway】检测到active业务实例连续异常，开始自动自愈: " . implode(' | ', $descriptors));
+        $this->traceGatewayHealthStep('maintain.health.trigger_selfheal', $maintainStartedAt, [
+            'unhealthy_count' => count($unhealthyPlans),
+            'recovery_plan_count' => count($recoveryPlans),
+        ]);
         Coroutine::create(function () use ($unhealthyPlans, $recoveryPlans) {
             try {
                 // 自愈直接复用 rolling restart，确保切流、回滚、回收语义完全一致。
@@ -4708,43 +4926,84 @@ class GatewayServer {
         return $this->isManagedPlanRecyclePending($plan);
     }
 
+    /**
+     * 探测托管 upstream 的健康状态。
+     *
+     * 以 HTTP 探针命中 worker 的结果作为唯一健康判定标准，确保判定依据直接对应
+     * 实例实际请求吞吐能力；RPC 监听状态仅用于诊断观测，不参与本轮判死逻辑。
+     *
+     * @param array<string, mixed> $plan 托管实例计划。
+     * @return array{healthy: bool, reason: string}
+     */
     protected function probeManagedUpstreamHealth(array $plan): array {
+        $probeStartedAt = microtime(true);
         $host = (string)($plan['host'] ?? '127.0.0.1');
         $port = (int)($plan['port'] ?? 0);
         $rpcPort = (int)($plan['rpc_port'] ?? 0);
+        $planLabel = $host . ':' . $port;
         if ($port <= 0) {
+            $this->traceGatewayHealthStep('probe.health.invalid_port', $probeStartedAt, [
+                'plan' => $planLabel,
+            ]);
             return ['healthy' => false, 'reason' => 'invalid_port'];
         }
 
-        $httpListening = $this->launcher->isListening($host, $port, 0.2) || $this->launcher->isListening('0.0.0.0', $port, 0.2);
-        if (!$httpListening) {
-            return ['healthy' => false, 'reason' => 'http_port_down'];
-        }
+        // 不同类型探测并发执行并在 Barrier 收口；健康判定以 HTTP 探活为准。
+        // 用 Barrier 栅栏收口，避免串行探测累积拉长心跳周期。
+        $rpcListening = $rpcPort <= 0;
+        $httpProbeOk = false;
+        $barrier = Barrier::make();
 
         if ($rpcPort > 0) {
-            $rpcListening = $this->launcher->isListening($host, $rpcPort, 0.2) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2);
-            if (!$rpcListening) {
-                return ['healthy' => false, 'reason' => 'rpc_port_down'];
-            }
+            Coroutine::create(function () use ($barrier, &$rpcListening, $host, $rpcPort, $planLabel): void {
+                $rpcListeningStartedAt = microtime(true);
+                $rpcListening = $this->launcher
+                    && ($this->launcher->isListening($host, $rpcPort, 0.2) || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2));
+                $this->traceGatewayHealthStep('probe.health.rpc_listening', $rpcListeningStartedAt, [
+                    'plan' => $planLabel,
+                    'rpc_port' => $rpcPort,
+                    'listening' => $rpcListening ? 1 : 0,
+                ]);
+            });
         }
 
-        $status = $this->fetchUpstreamHealthStatus($plan);
-        if (!$status) {
-            return ['healthy' => false, 'reason' => 'health_status_unreachable'];
+        Coroutine::create(function () use ($barrier, &$httpProbeOk, $host, $port, $planLabel): void {
+            $httpProbeStartedAt = microtime(true);
+            $httpProbeOk = $this->launcher
+                && $this->launcher->probeHttpConnectivity($host, $port, self::INTERNAL_UPSTREAM_HTTP_PROBE_PATH, 0.5);
+            $this->traceGatewayHealthStep('probe.health.http_probe', $httpProbeStartedAt, [
+                'plan' => $planLabel,
+                'ok' => $httpProbeOk ? 1 : 0,
+            ]);
+        });
+
+        try {
+            Barrier::wait($barrier);
+        } catch (Throwable $throwable) {
+            $this->traceGatewayHealthStep('probe.health.barrier_wait_exception', $probeStartedAt, [
+                'plan' => $planLabel,
+                'error' => $throwable->getMessage(),
+            ]);
+            return ['healthy' => false, 'reason' => 'probe_barrier_exception'];
         }
-        if (!$this->launcher || !$this->launcher->probeHttpConnectivity($host, $port, self::INTERNAL_UPSTREAM_HTTP_PROBE_PATH, 0.5)) {
+
+        if ($rpcPort > 0 && !$rpcListening) {
+            $this->traceGatewayHealthStep('probe.health.rpc_listening', $probeStartedAt, [
+                'plan' => $planLabel,
+                'rpc_port' => $rpcPort,
+                'soft_fail' => 1,
+            ]);
+        }
+        if (!$httpProbeOk) {
             return ['healthy' => false, 'reason' => 'http_probe_failed'];
         }
-        if (!(bool)($status['server_is_alive'] ?? false)) {
-            return ['healthy' => false, 'reason' => 'server_not_alive'];
-        }
-        if (!(bool)($status['server_is_ready'] ?? false)) {
-            return ['healthy' => false, 'reason' => 'server_not_ready'];
-        }
-        if ((bool)($status['server_is_draining'] ?? false)) {
-            return ['healthy' => false, 'reason' => 'server_draining'];
-        }
 
+        $this->traceGatewayHealthStep('probe.health.total', $probeStartedAt, [
+            'plan' => $planLabel,
+            'healthy' => 1,
+            'by' => 'http_probe',
+            'rpc_listening' => ($rpcPort <= 0 || $rpcListening) ? 1 : 0,
+        ]);
         return ['healthy' => true, 'reason' => 'ok'];
     }
 
@@ -4764,35 +5023,18 @@ class GatewayServer {
     /**
      * 计算当前周期应使用的健康探测间隔。
      *
-     * 策略：
-     * - 最近出现失败时升频探测，尽快确认故障是否持续；
-     * - 长时间稳定时降频探测，减少对 upstream worker 的 http_probe 干扰。
+     * 当前按固定间隔探测，便于统一观测窗口与排障节奏。
      *
      * @param int $now 当前时间戳。
      * @return int
      */
     protected function resolveManagedUpstreamHealthCheckIntervalSeconds(int $now): int {
+        unset($now);
         $serverConfig = Config::server();
-        $baseInterval = max(
-            2,
+        return max(
+            5,
             (int)($serverConfig['gateway_upstream_health_check_interval'] ?? self::ACTIVE_UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS)
         );
-        $maxInterval = max(
-            $baseInterval,
-            (int)($serverConfig['gateway_upstream_health_check_interval_max'] ?? max(15, $baseInterval * 3))
-        );
-        $failureBoostInterval = max(2, min($baseInterval, (int)floor($baseInterval / 2)));
-
-        if ($this->managedUpstreamHealthLastFailureAt > 0 && ($now - $this->managedUpstreamHealthLastFailureAt) <= 60) {
-            return $failureBoostInterval;
-        }
-        if ($this->managedUpstreamHealthStableRounds >= 24) {
-            return min($maxInterval, $baseInterval * 3);
-        }
-        if ($this->managedUpstreamHealthStableRounds >= 8) {
-            return min($maxInterval, $baseInterval * 2);
-        }
-        return $baseInterval;
     }
 
     protected function managedPlanKey(array $plan): string {
@@ -5045,28 +5287,69 @@ class GatewayServer {
     }
 
     protected function fetchUpstreamInternalStatus(array $instance, string $path): array {
+        $fetchStartedAt = microtime(true);
         $host = (string)($instance['host'] ?? '127.0.0.1');
         $port = (int)($instance['port'] ?? 0);
         $timeoutSeconds = $path === self::INTERNAL_UPSTREAM_STATUS_PATH ? 5.0 : 1.0;
+        $planLabel = $host . ':' . $port;
         if ($host === '' || $port <= 0) {
+            $this->traceGatewayHealthStep('fetch.internal.invalid_target', $fetchStartedAt, [
+                'path' => $path,
+                'plan' => $planLabel,
+            ]);
             return [];
         }
+        $listenCheckStartedAt = microtime(true);
         if ($this->launcher && !$this->launcher->isListening($host, $port, 0.2)) {
+            $this->traceGatewayHealthStep('fetch.internal.listen_check', $listenCheckStartedAt, [
+                'path' => $path,
+                'plan' => $planLabel,
+                'listening' => 0,
+            ]);
             return [];
         }
+        $this->traceGatewayHealthStep('fetch.internal.listen_check', $listenCheckStartedAt, [
+            'path' => $path,
+            'plan' => $planLabel,
+            'listening' => 1,
+        ]);
 
         try {
             $ipcAction = $this->mapUpstreamStatusPathToIpcAction($path);
             if ($ipcAction !== '') {
+                $ipcRequestStartedAt = microtime(true);
                 $ipcResponse = LocalIpc::request(LocalIpc::upstreamSocketPath($port), $ipcAction, [], $timeoutSeconds);
+                $this->traceGatewayHealthStep('fetch.internal.ipc_request', $ipcRequestStartedAt, [
+                    'path' => $path,
+                    'plan' => $planLabel,
+                    'action' => $ipcAction,
+                    'timeout' => $timeoutSeconds,
+                    'status' => (int)($ipcResponse['status'] ?? 0),
+                ]);
                 if (is_array($ipcResponse) && (int)($ipcResponse['status'] ?? 0) === 200) {
                     $data = $ipcResponse['data'] ?? null;
+                    $this->traceGatewayHealthStep('fetch.internal.success', $fetchStartedAt, [
+                        'path' => $path,
+                        'plan' => $planLabel,
+                    ]);
                     return is_array($data) ? $data : [];
                 }
+                $this->traceGatewayHealthStep('fetch.internal.non_200', $fetchStartedAt, [
+                    'path' => $path,
+                    'plan' => $planLabel,
+                ]);
                 return [];
             }
+            $this->traceGatewayHealthStep('fetch.internal.no_ipc_action', $fetchStartedAt, [
+                'path' => $path,
+                'plan' => $planLabel,
+            ]);
             return [];
         } catch (Throwable) {
+            $this->traceGatewayHealthStep('fetch.internal.exception', $fetchStartedAt, [
+                'path' => $path,
+                'plan' => $planLabel,
+            ]);
             return [];
         }
     }
