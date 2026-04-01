@@ -30,9 +30,6 @@ class Console {
     }
 
     protected static function shouldPushConsole(): bool {
-        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-            return true;
-        }
         if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
             return true;
         }

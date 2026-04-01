@@ -26,6 +26,7 @@ class Key {
     public const RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT = 'r_ghmts';
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID = 'r_gccp';
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT = 'r_gccha';
+    public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT = 'r_gccts';
     public const RUNTIME_MEMORY_MONITOR_PID = 'r_mmp';
     public const RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT = 'r_mmha';
     public const RUNTIME_HEARTBEAT_PID = 'r_hbp';

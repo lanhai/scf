@@ -17,10 +17,10 @@ use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Core\Table\SocketConnectionTable;
 use Scf\Server\Listener\Listener;
-use Scf\Server\Proxy\ConsoleRelay;
-use Scf\Server\Proxy\GatewayLease;
-use Scf\Server\Proxy\LocalIpc;
-use Scf\Server\Proxy\LocalIpcServer;
+use Scf\Server\Gateway\ConsoleRelay;
+use Scf\Server\Gateway\GatewayLease;
+use Scf\Server\Gateway\LocalIpc;
+use Scf\Server\Gateway\LocalIpcServer;
 use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
@@ -73,7 +73,6 @@ class Http extends \Scf\Core\Server {
      */
     protected int $started = 0;
 
-    protected SubProcessManager $subProcessManager;
     protected ?int $reloadDiagnosticTimerId = null;
     protected int $reloadDiagnosticStartedAt = 0;
     protected ?LocalIpcServer $localIpcServer = null;
@@ -88,10 +87,6 @@ class Http extends \Scf\Core\Server {
     protected ?int $upstreamGatewayLeaseWatcherTimerId = null;
     protected bool $upstreamGatewayLeaseWatcherRunning = false;
     protected int $upstreamLeasePeerScanSkippedWarnAt = 0;
-
-    protected function isProxyUpstreamMode(): bool {
-        return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
-    }
 
     /**
      * 初始化 upstream 对 gateway lease 的 owner 绑定参数。
@@ -113,12 +108,10 @@ class Http extends \Scf\Core\Server {
         $this->upstreamGatewayRestartGraceSeconds = max($this->upstreamGatewayLeaseGraceSeconds, $configuredRestartGrace);
 
         if ($this->upstreamGatewayPort <= 0 || $this->upstreamOwnerEpoch <= 0) {
-            Console::warning(
-                '【Server】当前 upstream 未绑定有效 gateway lease 参数，孤儿自回收保护未启用: '
-                . "gateway_port={$this->upstreamGatewayPort}, owner_epoch={$this->upstreamOwnerEpoch}",
-                false
+            throw new RuntimeException(
+                'upstream 启动缺少 gateway lease 参数: '
+                . "gateway_port={$this->upstreamGatewayPort}, owner_epoch={$this->upstreamOwnerEpoch}"
             );
-            return;
         }
 
         Console::info(
@@ -141,7 +134,7 @@ class Http extends \Scf\Core\Server {
         if ($this->upstreamGatewayLeaseWatcherRunning || $this->upstreamGatewayLeaseWatcherTimerId !== null) {
             return;
         }
-        if (!$this->isProxyUpstreamMode() || $this->upstreamGatewayPort <= 0 || $this->upstreamOwnerEpoch <= 0) {
+        if ($this->upstreamGatewayPort <= 0 || $this->upstreamOwnerEpoch <= 0) {
             return;
         }
         $this->upstreamGatewayLeaseLastHealthyAt = time();
@@ -486,6 +479,9 @@ class Http extends \Scf\Core\Server {
      * @return void
      */
     public function start(): void {
+        if (!defined('PROXY_UPSTREAM_MODE') || PROXY_UPSTREAM_MODE !== true) {
+            throw new RuntimeException('Http server 仅支持 gateway upstream 模式启动');
+        }
         // 一键协程化:
         // 这里统一禁用 FILE hook，而不是只在 proxy 模式禁用。
         //
@@ -524,15 +520,9 @@ class Http extends \Scf\Core\Server {
         Runtime::instance()->serverIsDraining(false);
         Runtime::instance()->serverIsAlive(true);
         Runtime::instance()->set(Key::RUNTIME_SERVER_STARTED_AT, $this->started);
-        //启动master节点管理面板服务器
-        if (!$this->isProxyUpstreamMode()) {
-            Dashboard::start();
-        }
         //加载服务器配置
         $serverConfig = Config::server();
-        if ($this->isProxyUpstreamMode()) {
-            $this->initializeUpstreamGatewayLeaseBinding($serverConfig);
-        }
+        $this->initializeUpstreamGatewayLeaseBinding($serverConfig);
         if (defined('APP_MODULE_STYLE') === false) {
             define('APP_MODULE_STYLE', $serverConfig['module_style'] ?? APP_MODULE_STYLE_MULTI);
         }
@@ -570,18 +560,16 @@ class Http extends \Scf\Core\Server {
         define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
         //开启日志推送
         Console::enablePush($serverConfig['enable_log_push'] ?? STATUS_ON);
-        if ($this->isProxyUpstreamMode()) {
-            ConsoleRelay::setGatewayPort((int)(Manager::instance()->getOpt('gateway_port') ?: 0));
-            Console::setPushHandler(static function (string $time, string $message): void {
-                $gatewayPort = ConsoleRelay::gatewayPort();
-                ConsoleRelay::reportToLocalGateway(
-                    $time,
-                    $message,
-                    'upstream',
-                    SERVER_HOST . ':' . ($gatewayPort > 0 ? $gatewayPort : Runtime::instance()->httpPort())
-                );
-            });
-        }
+        ConsoleRelay::setGatewayPort((int)(Manager::instance()->getOpt('gateway_port') ?: 0));
+        Console::setPushHandler(static function (string $time, string $message): void {
+            $gatewayPort = ConsoleRelay::gatewayPort();
+            ConsoleRelay::reportToLocalGateway(
+                $time,
+                $message,
+                'upstream',
+                SERVER_HOST . ':' . ($gatewayPort > 0 ? $gatewayPort : Runtime::instance()->httpPort())
+            );
+        });
         //实例化服务器
         $this->server = new Server($this->bindHost, mode: SWOOLE_PROCESS);
         $setting = [
@@ -611,19 +599,9 @@ class Http extends \Scf\Core\Server {
         try {
             // gateway 分配 upstream 端口时使用的是“真实监听态”判定；这里必须保持同一语义，
             // 否则会出现“gateway 认为端口可用，但 upstream 启动前用 bind 判定又误报占用”的分裂。
-            $httpPortOccupied = $this->isProxyUpstreamMode()
-                ? self::isListeningPortInUse($this->bindPort)
-                : self::isPortInUse($this->bindPort, $this->bindHost);
+            $httpPortOccupied = self::isListeningPortInUse($this->bindPort);
             if ($httpPortOccupied) {
-                if ($this->isProxyUpstreamMode()) {
-                    throw new RuntimeException('upstream HTTP端口已被占用，等待gateway重新分配:' . $this->bindHost . ':' . $this->bindPort);
-                }
-                if (!self::killProcessByPort($this->bindPort)) {
-                    $this->log(Color::red('HTTP服务端口[' . $this->bindPort . ']被占用,尝试结束进程失败'));
-                    // 稍等片刻再退出/或由外层管理器重试
-                    usleep(1000 * 1000);
-                    exit(1);
-                }
+                throw new RuntimeException('upstream HTTP端口已被占用，等待gateway重新分配:' . $this->bindHost . ':' . $this->bindPort);
             }
             $httpServer = $this->server->listen($this->bindHost, $this->bindPort, SWOOLE_SOCK_TCP);
             if ($httpServer === false) {
@@ -645,26 +623,16 @@ class Http extends \Scf\Core\Server {
             exit(1);
         }
         //监听RPC服务(tcp)请求
-        $rport = $this->isProxyUpstreamMode() ? (RPC_PORT ?: 0) : (RPC_PORT ?: ($serverConfig['rpc_port'] ?? 0));
+        $rport = RPC_PORT ?: 0;
         if ($rport) {
             try {
                 $rpcPort = $rport;
-                $rpcBindHost = $this->isProxyUpstreamMode() ? '127.0.0.1' : '0.0.0.0';
+                $rpcBindHost = '127.0.0.1';
                 // 尝试杀掉占用端口的进程
                 // upstream RPC 端口同样采用监听态判定，避免 bind 误判导致不必要的重试。
-                $rpcPortOccupied = $this->isProxyUpstreamMode()
-                    ? self::isListeningPortInUse($rpcPort)
-                    : self::isPortInUse($rpcPort, $rpcBindHost);
+                $rpcPortOccupied = self::isListeningPortInUse($rpcPort);
                 if ($rpcPortOccupied) {
-                    if ($this->isProxyUpstreamMode()) {
-                        throw new RuntimeException('upstream RPC端口已被占用，等待gateway重新分配:' . '127.0.0.1:' . $rpcPort);
-                    }
-                    $this->log(Color::yellow('RPC服务端口[' . $rpcPort . ']被占用,尝试结束进程'));
-                    if (!self::killProcessByPort($rpcPort)) {
-                        $this->log(Color::red('RPC服务端口[' . $rpcPort . ']被占用,尝试结束进程失败'));
-                        usleep(1000 * 1000);
-                        exit(1);
-                    }
+                    throw new RuntimeException('upstream RPC端口已被占用，等待gateway重新分配:' . '127.0.0.1:' . $rpcPort);
                 }
                 /** @var Server $rpcServer */
                 $rpcServer = $this->server->listen($rpcBindHost, $rpcPort, SWOOLE_SOCK_TCP);
@@ -728,39 +696,31 @@ class Http extends \Scf\Core\Server {
             $disconnected > 0 and $this->log(Color::yellow("已断开 {$disconnected} 个客户端连接"));
         });
         $this->server->on("Shutdown", function (Server $server) {
-            if ($this->isProxyUpstreamMode()) {
-                // upstream 的本地 IPC 挂在 master/onStart；Shutdown 再补一次收口，确保 accept 协程跟随 master 退出。
-                $this->stopUpstreamGatewayLeaseWatcher();
-                $this->stopLocalIpcServer();
-            }
+            // upstream 的本地 IPC 挂在 master/onStart；Shutdown 再补一次收口，确保 accept 协程跟随 master 退出。
+            $this->stopUpstreamGatewayLeaseWatcher();
+            $this->stopLocalIpcServer();
         });
         $this->server->on("ManagerStart", function (Server $server) {
             //Console::info('ManagerStart');
             //MemoryMonitor::start('Server:Manager');
-            if ($this->isProxyUpstreamMode()) {
-                // lease watcher 需要覆盖 manager 生命周期：
-                // 当 upstream master 异常退出但 manager 仍残留时，仍可继续执行围栏回收。
-                $this->startUpstreamGatewayLeaseWatcher();
-            }
+            // lease watcher 需要覆盖 manager 生命周期：
+            // 当 upstream master 异常退出但 manager 仍残留时，仍可继续执行围栏回收。
+            $this->startUpstreamGatewayLeaseWatcher();
         });
         $this->server->on("ManagerStop", function (Server $server) {
             //Console::info('onManagerStop');
             //MemoryMonitor::stop();
-            if ($this->isProxyUpstreamMode()) {
-                $this->stopUpstreamGatewayLeaseWatcher();
-            }
+            $this->stopUpstreamGatewayLeaseWatcher();
         });
         //服务器完成启动
-        $this->server->on('start', function (Server $server) use ($serverConfig) {
+        $this->server->on('start', function (Server $server) {
             MemoryMonitor::start('Server:Master');
-            if ($this->isProxyUpstreamMode()) {
-                // 新 upstream 的 master/onStart 先挂载应用上下文，这样本地 IPC 读到的
-                // appid/version/modules 与业务实例本身保持同一代代码语义。
-                App::mount();
-                // upstream 控制 IPC 属于 server 自己的控制能力，直接挂在 onStart，不进入任何 worker 生命周期。
-                $this->startLocalIpcServer();
-                // gateway lease watcher 统一在 ManagerStart 启动，避免 master/manager 双进程各启一份。
-            }
+            // 新 upstream 的 master/onStart 先挂载应用上下文，这样本地 IPC 读到的
+            // appid/version/modules 与业务实例本身保持同一代代码语义。
+            App::mount();
+            // upstream 控制 IPC 属于 server 自己的控制能力，直接挂在 onStart，不进入任何 worker 生命周期。
+            $this->startLocalIpcServer();
+            // gateway lease watcher 统一在 ManagerStart 启动，避免 master/manager 双进程各启一份。
             //每三秒将服务器运行状态写入内存表
             Timer::tick(1000 * 3, function ($tid) use ($server) {
                 if (!Runtime::instance()->serverIsAlive()) {
@@ -769,27 +729,19 @@ class Http extends \Scf\Core\Server {
                 }
                 Runtime::instance()->set('SERVER_STATS', $server->stats());
             });
-            if ($this->isProxyUpstreamMode()) {
+            ConsoleRelay::refreshSubscriptionFromGateway();
+            Timer::tick(1000 * 5, function ($tid) {
+                if (!Runtime::instance()->serverIsAlive()) {
+                    Timer::clear($tid);
+                    return;
+                }
                 ConsoleRelay::refreshSubscriptionFromGateway();
-                Timer::tick(1000 * 5, function ($tid) {
-                    if (!Runtime::instance()->serverIsAlive()) {
-                        Timer::clear($tid);
-                        return;
-                    }
-                    ConsoleRelay::refreshSubscriptionFromGateway();
-                });
-            }
+            });
 
             File::write(SERVER_DASHBOARD_PORT_FILE, Runtime::instance()->dashboardPort());
-            //自动更新
-            !$this->isProxyUpstreamMode() && APP_AUTO_UPDATE == STATUS_ON and App::checkVersion();
         });
 
         try {
-            if (!$this->isProxyUpstreamMode()) {
-                $this->subProcessManager = new SubProcessManager($this->server, $serverConfig, []);
-                $this->subProcessManager->start();
-            }
             $this->server->start();
         } catch (Throwable $exception) {
             Console::error($exception->getMessage());
@@ -804,16 +756,13 @@ class Http extends \Scf\Core\Server {
      * @return bool|int
      */
     public function pushConsoleLog($time, $message): bool|int {
-        if (!isset($this->subProcessManager)) {
-            return false;
-        }
-        return $this->subProcessManager->pushConsoleLog($time, $message);
+        return false;
     }
 
     public function proxyUpstreamRuntimeStatus(): array {
         $stats = $this->server ? $this->server->stats() : (Runtime::instance()->get('SERVER_STATS') ?: []);
         $profile = \Scf\Core\App::profile();
-        $leaseBound = $this->isProxyUpstreamMode() && $this->upstreamGatewayPort > 0 && $this->upstreamOwnerEpoch > 0;
+        $leaseBound = $this->upstreamGatewayPort > 0 && $this->upstreamOwnerEpoch > 0;
 
         return [
             'id' => APP_NODE_ID,
@@ -870,7 +819,7 @@ class Http extends \Scf\Core\Server {
     }
 
     public function proxyUpstreamHealthStatus(): array {
-        $leaseBound = $this->isProxyUpstreamMode() && $this->upstreamGatewayPort > 0 && $this->upstreamOwnerEpoch > 0;
+        $leaseBound = $this->upstreamGatewayPort > 0 && $this->upstreamOwnerEpoch > 0;
         return [
             'id' => APP_NODE_ID,
             'ip' => SERVER_HOST,
@@ -896,7 +845,7 @@ class Http extends \Scf\Core\Server {
      * @return void
      */
     public function startLocalIpcServer(): void {
-        if (!$this->isProxyUpstreamMode() || $this->localIpcServer instanceof LocalIpcServer) {
+        if ($this->localIpcServer instanceof LocalIpcServer) {
             return;
         }
         $port = (int)Runtime::instance()->httpPort();
@@ -904,7 +853,7 @@ class Http extends \Scf\Core\Server {
             return;
         }
         // LocalIpcServer 与 LocalIpc 定义在同一文件中，这里显式载入，避免 onStart 时因自动加载找不到类。
-        require_once __DIR__ . '/Proxy/LocalIpc.php';
+        require_once __DIR__ . '/Gateway/LocalIpc.php';
         $this->localIpcServer = new LocalIpcServer(
             LocalIpc::upstreamSocketPath($port),
             function (array $request): array {
@@ -1057,7 +1006,6 @@ class Http extends \Scf\Core\Server {
         if ($disconnected > 0) {
             Console::warning("【Server】业务实例回收已主动断开Socket长连接: {$disconnected}", false);
         }
-        isset($this->subProcessManager) && $this->subProcessManager->quiesceBusinessProcesses();
     }
 
 
@@ -1070,17 +1018,10 @@ class Http extends \Scf\Core\Server {
         Runtime::instance()->serverIsDraining(true);
         Runtime::instance()->serverIsAlive(false);
         $this->stopReloadDiagnostics();
-        isset($this->subProcessManager) && $this->subProcessManager->shutdown();
         $this->disconnectAllClients($this->server);
-        if (!$this->isProxyUpstreamMode()) {
-            Timer::after(1000, function () {
-                $this->server->shutdown();
-            });
-            return;
-        }
         $drainTimeoutSeconds = max(
-            \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS,
-            (int)(Config::server()['proxy_upstream_shutdown_timeout'] ?? \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
+            \Scf\Server\Gateway\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS,
+            (int)(Config::server()['proxy_upstream_shutdown_timeout'] ?? \Scf\Server\Gateway\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
         );
         // 当计数器发生泄漏时（例如某次异常路径未能正确 decr），旧实例会在“无连接”状态
         // 下长期卡在 draining。这里增加“计数稳定 + 无活动连接”的兜底收敛窗口，避免
@@ -1225,14 +1166,7 @@ class Http extends \Scf\Core\Server {
         } else {
             Console::info('【Server】' . Color::yellow('正在重启服务器'));
         }
-        isset($this->subProcessManager) && $this->subProcessManager->sendCommand('upgrade');
         $this->server->reload();
-        //重启控制台
-        if (!$this->isProxyUpstreamMode() && App::isMaster()) {
-            $dashboardHost = 'http://localhost:' . Runtime::instance()->dashboardPort() . '/reload';
-            $client = \Scf\Client\Http::create($dashboardHost);
-            $client->get();
-        }
     }
 
     /**

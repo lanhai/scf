@@ -18,7 +18,7 @@ function scf_bootstrap(array $argv): void {
  * 定义 boot 以及独立 CLI 入口共享的根路径常量。
  *
  * 这些常量只描述 SCF 根目录、build 目录和 apps 根目录，
- * 既能服务 boot，也能让 `src/Server/Proxy/*.php` 这类源码入口
+ * 既能服务 boot，也能让 `src/Server/Gateway/*.php` 这类源码入口
  * 在不经过 boot 的情况下复用同一套运行时工具链。
  *
  * @param string $root SCF 包根目录
@@ -118,7 +118,7 @@ function scf_run(array $argv): void {
 /**
  * 注册源码目录下的 framework autoload。
  *
- * 这个能力只服务源码模式入口，例如 `src/Server/Proxy/run.php` 这种
+ * 这个能力只服务源码模式入口，例如 `src/Server/Gateway/run.php` 这种
  * 不经过 boot 的调试链路。显式 `-pack` 的正常运行链仍由 boot 自己的
  * pack-aware autoload 接管。
  *

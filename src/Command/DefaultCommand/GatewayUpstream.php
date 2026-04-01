@@ -5,7 +5,7 @@ namespace Scf\Command\DefaultCommand;
 use Scf\Command\CommandInterface;
 use Scf\Command\Help;
 use Scf\Command\Manager;
-use Scf\Server\Proxy\CliBootstrap;
+use Scf\Server\Gateway\CliBootstrap;
 
 class GatewayUpstream implements CommandInterface {
 

@@ -12,7 +12,7 @@ class Runtime extends ATable {
      * @var array
      */
     protected array $_config = [
-        'size' => 256,
+        'size' => 1024,
         'colums' => [
             '_value' => ['type' => Table::TYPE_STRING, 'size' => 1024 * 100]
         ]

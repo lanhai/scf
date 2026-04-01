@@ -29,6 +29,13 @@ class Updater {
      * 这里统一给业务更新下载设置显式超时，避免上游下载抖动时整条升级链挂死。
      */
     public const PACKAGE_DOWNLOAD_TIMEOUT_SECONDS = 300;
+    /**
+     * App 本地历史升级包最多保留数量。
+     *
+     * 每次 app 包更新成功后会按文件更新时间裁剪 `APP_BIN_DIR/v-*.app`，
+     * 避免历史版本无限堆积占满磁盘。
+     */
+    public const APP_HISTORY_PACKAGE_KEEP_COUNT = 5;
 
     protected static array $_instances;
     protected ?array $_version = null;
@@ -242,6 +249,9 @@ class Updater {
                 'remark' => $versionInfo['remark']
             ];
             File::write(APP_PATH . '/update/update.log', JsonHelper::toJson($log), true);
+            if ($appUpdated) {
+                $this->pruneHistoricalAppPackages($appFile, self::APP_HISTORY_PACKAGE_KEEP_COUNT);
+            }
             clearstatcache();
             $this->logUpdateStep("applyVersionUpdate completed: version={$version}");
             return true;
@@ -714,6 +724,66 @@ class Updater {
             return;
         }
         @unlink($path);
+    }
+
+    /**
+     * 裁剪本地 app 历史升级包，只保留最近的若干版本文件。
+     *
+     * 该清理只作用于 `APP_BIN_DIR/v-*.app`，并始终保留当前激活版本文件。
+     * 清理失败不会阻断升级主流程，只输出 warning 便于后续人工排查。
+     *
+     * @param string $activeAppFile 当前激活的 app 核心包文件路径。
+     * @param int $keepCount 期望保留的历史包数量上限。
+     * @return void
+     */
+    protected function pruneHistoricalAppPackages(string $activeAppFile, int $keepCount): void {
+        $appBinDir = defined('APP_BIN_DIR') ? (string)APP_BIN_DIR : dirname($activeAppFile);
+        if (!is_dir($appBinDir)) {
+            return;
+        }
+
+        $packages = glob(rtrim($appBinDir, '/\\') . '/v-*.app') ?: [];
+        if (!$packages) {
+            return;
+        }
+
+        usort($packages, static function (string $left, string $right): int {
+            $leftTime = @filemtime($left) ?: 0;
+            $rightTime = @filemtime($right) ?: 0;
+            if ($leftTime === $rightTime) {
+                return strcmp($right, $left);
+            }
+            return $rightTime <=> $leftTime;
+        });
+
+        $keepCount = max(1, $keepCount);
+        $activeReal = realpath($activeAppFile) ?: $activeAppFile;
+        $keep = [];
+
+        foreach ($packages as $package) {
+            $packageReal = realpath($package) ?: $package;
+            // 当前激活版本必须保留；其余文件按“最近更新时间”保留前 N 个。
+            if ($packageReal === $activeReal || count($keep) < $keepCount) {
+                $keep[$packageReal] = true;
+            }
+        }
+
+        $removedCount = 0;
+        foreach ($packages as $package) {
+            $packageReal = realpath($package) ?: $package;
+            if (isset($keep[$packageReal])) {
+                continue;
+            }
+            if (@unlink($package)) {
+                $removedCount++;
+                continue;
+            }
+            Console::warning('【updater】历史 app 包清理失败:' . $package);
+        }
+
+        if ($removedCount > 0) {
+            $this->logUpdateStep("历史 app 包清理完成: kept=" . count($keep) . ", removed={$removedCount}");
+        }
     }
 
     protected function directoryHasContent(string $dir): bool {

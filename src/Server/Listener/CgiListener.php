@@ -175,9 +175,6 @@ class CgiListener extends Listener {
         Event::defer(function () use ($workerId) {
             Counter::instance()->decr(Key::COUNTER_REQUEST_PROCESSING);
             $this->flushBufferedRequestTodayCounter(false);
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-                return;
-            }
             $latestUsageUpdated = Runtime::instance()->get("worker.memory.usage.updated:{$workerId}") ?: 0;
             if (time() - $latestUsageUpdated >= 5) {
                 $processName = "worker:" . ($workerId + 1);

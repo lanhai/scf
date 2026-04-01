@@ -162,7 +162,7 @@ class Manager extends Component {
             $attempt++;
             try {
                 $socket = SaberGM::websocket($this->buildInternalSocketUrl($socketHost, 'node-' . APP_NODE_ID));
-                if ($this->wsConnected($socket)) {
+                if ($this->wsHandshakeEstablished($socket)) {
                     if ($attempt > 1) {
                         Console::success("【Server】已连接到master节点[{$socketHost}]，重试次数:{$attempt}", false);
                     }
@@ -500,20 +500,39 @@ class Manager extends Component {
     }
 
     /**
-     * 判断 Saber WebSocket 是否握手成功且连接仍可用。
+     * 判断 Saber WebSocket 是否已完成握手升级。
      *
-     * 长连接子进程（cluster/heartbeat）在 recv(timeout) 场景下，底层 client
-     * 可能把 errCode 置为 ETIMEDOUT/EAGAIN；这属于“当前无消息”的瞬态状态，
-     * 不应被判定为断链。这里保留握手成功约束，并把瞬态错误码视为可用连接。
+     * 这个判定只用于“初次建连”阶段，要求状态码为 `101`，确保连接真正升级为
+     * websocket；已建立连接后的存活判定请使用 `wsConnected`。
+     *
+     * @param WebSocket $ws
+     * @return bool
+     */
+    protected function wsHandshakeEstablished(WebSocket $ws): bool {
+        $cli = $this->getWsClient($ws);
+        if (!$cli) {
+            return false;
+        }
+        $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
+        $status = property_exists($cli, 'statusCode') ? (int)$cli->statusCode : 0;
+        return $connected && $status === 101;
+    }
+
+    /**
+     * 判断 Saber WebSocket 在“已建连阶段”是否仍可用。
+     *
+     * 子进程长轮询 `recv(timeout)` 时，底层 client 可能临时写入 EAGAIN/ETIMEDOUT。
+     * 这些错误码只表示“当前无消息”，不能直接视为断链；否则 heartbeat/cluster
+     * 会因为空轮询而频繁重连。
      */
     protected function wsConnected(WebSocket $ws): bool {
         $cli = $this->getWsClient($ws);
-        if (!$cli) return false;
+        if (!$cli) {
+            return false;
+        }
         $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
-        $status = property_exists($cli, 'statusCode') ? (int)$cli->statusCode : 0;
         $errCode = property_exists($cli, 'errCode') ? (int)$cli->errCode : 0;
-        $handshakeOk = $connected && $status === 101;
-        if (!$handshakeOk) {
+        if (!$connected) {
             return false;
         }
         if ($errCode === 0) {

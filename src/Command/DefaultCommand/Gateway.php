@@ -8,8 +8,8 @@ use Scf\Command\Manager;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Env;
-use Scf\Server\Proxy\LocalIpc;
-use Scf\Server\Proxy\CliBootstrap;
+use Scf\Server\Gateway\LocalIpc;
+use Scf\Server\Gateway\CliBootstrap;
 use Swoole\Process;
 
 /**

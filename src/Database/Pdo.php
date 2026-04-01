@@ -193,7 +193,9 @@ class Pdo {
             \PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true     // ★ 关键配置
         ], $this->actor);//\PDO::ATTR_PERSISTENT => true 启用持久化连接，但只适合 FPM
         $this->database->setConfig($this->serverConfig);
-        $isTaskWorker = IS_HTTP_SERVER && Http::server()->taskworker;
+        // CLI/Crontab/启动早期阶段可能没有 Http Server 实例，需先判空避免属性访问告警
+        $httpServer = Http::server();
+        $isTaskWorker = IS_HTTP_SERVER && !is_null($httpServer) && $httpServer->taskworker;
 //        if ($isTaskWorker) {
 //            $this->enablePool = $this->serverConfig['pool']['task_worker_enable'] ?? false;
 //        }

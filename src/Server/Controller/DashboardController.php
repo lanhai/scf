@@ -133,11 +133,7 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabRun(): Result {
-        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-            return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
-        }
-        Request::post(['name', 'host'])->assign($name, $host);
-        return Result::success(CrontabManager::runRightNow($name, $host));
+        return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
     }
 
     /**
@@ -145,11 +141,7 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabStatus(): Result {
-        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-            return Result::success([]);
-        }
-        Request::post(['name'])->assign($name);
-        return Result::success(CrontabManager::status($name));
+        return Result::success([]);
     }
 
     /**
@@ -157,24 +149,7 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabOverride(): Result {
-        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-            return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
-        }
-        Request::post()->pack($data);
-        try {
-            $result = CrontabManager::saveOverrides($data);
-            if ($result->hasError()) {
-                return Result::error($result->getMessage());
-            }
-            if (!$result->getData()) {
-                return Result::error('配置文件保存失败');
-            }
-            //重启排程任务
-            return Result::success();
-        } catch (Throwable $exception) {
-            Console::error($exception->getMessage());
-        }
-        return Result::error('message');
+        return Result::error('Gateway 已不再托管常驻排程，请改用 Linux 排程页面管理系统 crontab');
     }
 
     /**
@@ -221,10 +196,7 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionCrontabs(): Result {
-        if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) {
-            return Result::success([]);
-        }
-        return Result::success(CrontabManager::allStatus());
+        return Result::success([]);
     }
 
     /**

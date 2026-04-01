@@ -9,21 +9,27 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Log;
-use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
-use Scf\Core\Table\SocketConnectionTable;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Root;
-use Scf\Server\LinuxCrontab\LinuxCrontabManager;
+use Scf\Server\SubProcess\ConsolePushProcess;
+use Scf\Server\SubProcess\CrontabManagerProcess;
+use Scf\Server\SubProcess\FileWatchProcess;
+use Scf\Server\SubProcess\GatewayBusinessCoordinatorProcess;
+use Scf\Server\SubProcess\GatewayClusterCoordinatorProcess;
+use Scf\Server\SubProcess\GatewayHealthMonitorProcess;
+use Scf\Server\SubProcess\HeartbeatProcess;
+use Scf\Server\SubProcess\LogBackupProcess;
+use Scf\Server\SubProcess\MemoryUsageCountProcess;
+use Scf\Server\SubProcess\RedisQueueProcess;
 use Scf\Server\Struct\Node;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
-use Scf\Server\Proxy\ConsoleRelay;
-use Scf\Util\Date;
+use Scf\Server\Gateway\ConsoleRelay;
 use Scf\Util\Dir;
 use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
@@ -39,7 +45,6 @@ class SubProcessManager {
     protected const PROCESS_EXIT_GRACE_SECONDS = 8;
     protected const PROCESS_EXIT_WARN_AFTER_SECONDS = 60;
     protected const PROCESS_EXIT_WARN_INTERVAL_SECONDS = 60;
-    protected const REMOTE_APPOINT_UPDATE_TIMEOUT_SECONDS = 300;
     protected const MANAGER_COMMAND_RETRY_TIMES = 6;
     protected const MANAGER_COMMAND_RETRY_INTERVAL_US = 50000;
     protected const MANAGER_HEARTBEAT_FRESH_SECONDS = 3;
@@ -48,11 +53,6 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_STALE_SECONDS = 120;
     protected const PROCESS_HEARTBEAT_FORCE_KILL_SECONDS = 300;
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
-    protected const GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS = 3;
-    protected const GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS = 30;
-    protected const GATEWAY_STATUS_PAYLOAD_CACHE_SECONDS = 2;
-    protected const GATEWAY_TABLES_CACHE_SECONDS = 10;
-    protected const GATEWAY_NODE_TASKS_CACHE_SECONDS = 30;
     protected const HEARTBEAT_COUNTER_PREFIX = '__hb__:';
     protected const HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS = 30;
     protected const TEMP_HEARTBEAT_TRACE_ENABLED = false;
@@ -83,19 +83,11 @@ class SubProcessManager {
     protected array $processLastStaleHandleAt = [];
     protected array $manualStoppedProcesses = [];
     protected array $heartbeatWriteFailWarnAt = [];
-    protected int $gatewayStatusPayloadCachedAt = 0;
-    protected array $gatewayStatusPayloadCached = [];
-    protected bool $gatewayStatusPayloadRefreshing = false;
-    protected int $gatewayTablesCachedAt = 0;
-    protected array $gatewayTablesCached = [];
-    protected bool $gatewayTablesRefreshing = false;
-    protected int $gatewayNodeTasksCachedAt = 0;
-    protected array $gatewayNodeTasksCached = [];
-    protected bool $gatewayNodeTasksRefreshing = false;
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
         $this->server = $server;
         $this->serverConfig = $serverConfig;
+        $this->assertGatewayControlPlaneRuntime();
         $this->shutdownHandler = $options['shutdown_handler'] ?? null;
         $this->reloadHandler = $options['reload_handler'] ?? null;
         $this->restartHandler = $options['restart_handler'] ?? null;
@@ -108,22 +100,20 @@ class SubProcessManager {
         $this->excludedProcesses = isset($options['exclude_processes']) ? array_fill_keys((array)$options['exclude_processes'], true) : [];
         $runQueueInMaster = $serverConfig['redis_queue_in_master'] ?? true;
         $runQueueInSlave = $serverConfig['redis_queue_in_slave'] ?? false;
-        if ($this->isProxyGatewayMode() && $this->processEnabled('GatewayClusterCoordinator')) {
+        if ($this->processEnabled('GatewayClusterCoordinator')) {
             $this->processList['GatewayClusterCoordinator'] = $this->createGatewayClusterCoordinatorProcess();
         }
-        if ($this->isProxyGatewayMode() && $this->processEnabled('GatewayBusinessCoordinator') && is_callable($this->gatewayBusinessTickHandler) && is_callable($this->gatewayBusinessCommandHandler)) {
+        if ($this->processEnabled('GatewayBusinessCoordinator') && is_callable($this->gatewayBusinessTickHandler) && is_callable($this->gatewayBusinessCommandHandler)) {
             $this->processList['GatewayBusinessCoordinator'] = $this->createGatewayBusinessCoordinatorProcess();
         }
-        if ($this->isProxyGatewayMode() && $this->processEnabled('GatewayHealthMonitor') && is_callable($this->gatewayHealthTickHandler)) {
+        if ($this->processEnabled('GatewayHealthMonitor') && is_callable($this->gatewayHealthTickHandler)) {
             $this->processList['GatewayHealthMonitor'] = $this->createGatewayHealthMonitorProcess();
         }
         //内存使用情况统计
         if ($this->processEnabled('MemoryUsageCount')) {
             $this->processList['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
         }
-        // 心跳进程在 gateway 模式下与 GatewayClusterCoordinator 职责重叠。
-        // 当 cluster 协调进程可用时，Heartbeat 仅保留为轻量保活进程，
-        // 不再承担到 master 的长连接上报职责，避免重复链路和无效开销。
+        // Heartbeat 负责节点心跳/命令链路，GatewayClusterCoordinator 只做轻量桥接。
         if ($this->processEnabled('Heartbeat')) {
             $this->processList['Heartbeat'] = $this->createHeartbeatProcess();
         }
@@ -135,15 +125,8 @@ class SubProcessManager {
         if ($this->processEnabled('CrontabManager')) {
             $this->processList['CrontabManager'] = $this->createCrontabManagerProcess();
         }
-        // 控制台日志只需要从子节点推给 master，本机 master 不必自连
-        if (
-            $this->processEnabled('ConsolePush')
-            && !App::isMaster()
-            && !(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)
-            && !(defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true)
-        ) {
-            $this->consolePushProcess = $this->createConsolePushProcess();
-        }
+        // gateway 控制面统一通过 GatewayCluster -> master 链路回传控制台日志，
+        // 这里不再启动旧的 ConsolePush 长连接子进程，避免重复上报链路。
         //redis队列
         if ($this->processEnabled('RedisQueue') && ((App::isMaster() && $runQueueInMaster) || (!App::isMaster() && $runQueueInSlave))) {
             $this->processList['RedisQueue'] = $this->createRedisQueueProcess();
@@ -152,6 +135,72 @@ class SubProcessManager {
         if ($this->processEnabled('FileWatch') && Env::isDev() && APP_SRC_TYPE == 'dir') {
             $this->processList['FileWatch'] = $this->createFileWatchProcess();
         }
+    }
+
+    /**
+     * 当前子进程管理器只允许在 gateway 控制面运行。
+     *
+     * HTTP 直连模式已下线，继续在非 gateway 场景构造会把控制命令链路
+     * 落到不存在的内部端口，导致 reload/restart 行为漂移。
+     *
+     * @return void
+     */
+    protected function assertGatewayControlPlaneRuntime(): void {
+        if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
+            throw new \RuntimeException('SubProcessManager 仅支持 gateway 控制面模式');
+        }
+    }
+
+    /**
+     * 标记当前子进程属于 gateway 控制面派生子进程。
+     *
+     * 相关逻辑在多个子进程入口都会读取该标记，统一收口成一个方法，
+     * 避免每个入口都重复保留模式判断分支。
+     *
+     * @return void
+     */
+    protected function markGatewaySubProcessContext(): void {
+        if (!defined('IS_GATEWAY_SUB_PROCESS')) {
+            define('IS_GATEWAY_SUB_PROCESS', true);
+        }
+    }
+
+    /**
+     * 构建子进程运行类所需的回调依赖映射。
+     *
+     * SubProcessManager 只保留“进程编排/管理”职责，具体子进程运行逻辑拆到
+     * `Server/SubProcess/*` 后，通过这张回调表注入必要的管理能力与公共工具。
+     *
+     * @return array<string, callable>
+     */
+    protected function subProcessRuntimeCallbacks(): array {
+        return [
+            'mark_gateway_sub_process_context' => fn() => $this->markGatewaySubProcessContext(),
+            'touch_managed_heartbeat' => fn(string $runtimeKey, int $heartbeatAt, string $processName = '') => $this->touchManagedHeartbeat($runtimeKey, $heartbeatAt, $processName),
+            'trace_heartbeat_step' => fn(string $step, float $startedAt, array $context = []) => $this->traceHeartbeatStep($step, $startedAt, $context),
+            'update_gateway_cluster_trace_snapshot' => fn(string $step, array $context = []) => $this->updateGatewayClusterTraceSnapshot($step, $context),
+            'send_gateway_pipe_message' => fn(string $event, array $data = []) => $this->sendGatewayPipeMessage($event, $data),
+            'run_gateway_business_tick' => fn() => $this->runGatewayBusinessTick(),
+            'run_gateway_health_tick' => fn() => $this->runGatewayHealthTick(),
+            'run_gateway_business_command' => fn(string $command, array $params = [], string $source = 'pipe', string $token = '') => $this->runGatewayBusinessCommand($command, $params, $source, $token),
+            'dequeue_gateway_business_runtime_command' => fn(): ?array => $this->dequeueGatewayBusinessRuntimeCommand(),
+            'build_node_status_payload' => fn(Node $node): array => $this->buildNodeStatusPayload($node),
+            'server_started_at' => fn(): int => $this->serverStartedAt(),
+            'should_skip_heartbeat_status_build' => fn(): bool => $this->shouldSkipHeartbeatStatusBuild(),
+            'read_file_watcher_meta' => fn(string $path): ?array => $this->readFileWatcherMeta($path),
+            'should_restart_for_changed_files' => fn(array $files): bool => $this->shouldRestartForChangedFiles($files),
+            'trigger_shutdown' => fn() => $this->triggerShutdown(),
+            'trigger_restart' => fn() => $this->triggerRestart(),
+            'trigger_reload' => fn() => $this->triggerReload(),
+            'dispatch_gateway_internal_command' => fn(string $command, array $params = [], float $timeoutSeconds = 1.0): bool => $this->dispatchGatewayInternalCommand($command, $params, $timeoutSeconds),
+            'request_gateway_internal_command' => fn(string $command, array $params = [], float $timeoutSeconds = 1.0): array => $this->requestGatewayInternalCommand($command, $params, $timeoutSeconds),
+            'restart_managed_processes' => fn(array $names = []): array => $this->restartManagedProcesses($names),
+            'stop_managed_processes' => fn(array $names = []): array => $this->stopManagedProcesses($names),
+            'restart_all_managed_processes' => fn(): array => $this->restartAllManagedProcesses(),
+            'has_process' => fn(string $name): bool => $this->hasProcess($name),
+            'should_push_managed_lifecycle_log' => fn(): bool => $this->shouldPushManagedLifecycleLog(),
+            'exit_coroutine_runtime' => fn() => $this->exitCoroutineRuntime(),
+        ];
     }
 
     /**
@@ -185,7 +234,7 @@ class SubProcessManager {
         return new Process(function (Process $process) {
             $process->setBlocking(false);
             while (true) {
-                if (Runtime::instance()->serverIsReady() && (!(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true) || App::isReady())) {
+                if (Runtime::instance()->serverIsReady() && App::isReady()) {
                     break;
                 }
                 usleep(100000);
@@ -270,7 +319,7 @@ class SubProcessManager {
                         // Gateway restart 场景里 serverIsAlive 可能先被置为 false，再触发
                         // manager pipe 的 shutdown_processes。若这里不主动关停一次子进程，
                         // 会直接落入“被动等待超时 -> SIGTERM”路径，形成关停卡顿。
-                        $this->shutdownManagedProcessesDirect($this->isProxyGatewayMode());
+                        $this->shutdownManagedProcessesDirect(true);
                         $shutdownDispatched = true;
                     }
                     $this->drainManagedProcesses($this->managedProcessDrainGraceSeconds());
@@ -281,7 +330,7 @@ class SubProcessManager {
                 while ($ret = Process::wait(false)) {
                     if (!Runtime::instance()->serverIsAlive()) {
                         if (!$shutdownDispatched) {
-                            $this->shutdownManagedProcessesDirect($this->isProxyGatewayMode());
+                            $this->shutdownManagedProcessesDirect(true);
                             $shutdownDispatched = true;
                         }
                         $this->drainManagedProcesses($this->managedProcessDrainGraceSeconds());
@@ -784,10 +833,13 @@ class SubProcessManager {
      * @return void
      */
     protected function dumpManagedProcessTimeoutTrace(string $name, int $staleSeconds): void {
-        if ($name !== 'GatewayHealthMonitor') {
+        if ($name === 'GatewayHealthMonitor') {
+            $this->dumpGatewayHealthTimeoutTrace($staleSeconds);
             return;
         }
-        $this->dumpGatewayHealthTimeoutTrace($staleSeconds);
+        if ($name === 'GatewayClusterCoordinator') {
+            $this->dumpGatewayClusterTimeoutTrace($staleSeconds);
+        }
     }
 
     /**
@@ -837,6 +889,64 @@ class SubProcessManager {
     }
 
     /**
+     * 输出 GatewayClusterCoordinator 最近一次循环步骤快照。
+     *
+     * @param int $staleSeconds 心跳过期秒数
+     * @return void
+     */
+    protected function dumpGatewayClusterTimeoutTrace(int $staleSeconds): void {
+        $snapshot = Runtime::instance()->get(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT);
+        if (!is_array($snapshot)) {
+            Console::warning("【GatewayClusterTrace】心跳超时({$staleSeconds}s)，无可用步骤快照");
+            return;
+        }
+
+        $step = trim((string)($snapshot['step'] ?? ''));
+        $tracePid = (int)($snapshot['pid'] ?? 0);
+        $updatedAt = (float)($snapshot['updated_at'] ?? 0);
+        $now = microtime(true);
+        $lastUpdateAgoMs = $updatedAt > 0 ? round(max(0, ($now - $updatedAt) * 1000), 2) : -1;
+        $context = (array)($snapshot['context'] ?? []);
+        $parts = [];
+        foreach ($context as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $parts[] = $key . '=' . (is_null($value) ? 'null' : (string)$value);
+            }
+        }
+        $contextLine = $parts ? implode(', ', $parts) : '--';
+        Console::warning(
+            "【GatewayClusterTrace】心跳超时({$staleSeconds}s)最近步骤: "
+            . "pid={$tracePid}, step=" . ($step !== '' ? $step : '--')
+            . ", last_update_ago_ms={$lastUpdateAgoMs}, context={$contextLine}"
+        );
+    }
+
+    /**
+     * 更新 GatewayClusterCoordinator 的最近步骤快照。
+     *
+     * 该快照默认不主动打印，仅在心跳超时回收前由 manager 读取并输出，
+     * 用于定位 cluster 循环卡在了哪一步。
+     *
+     * @param string $step 当前步骤
+     * @param array<string, scalar|null> $context 追加上下文
+     * @return void
+     */
+    protected function updateGatewayClusterTraceSnapshot(string $step, array $context = []): void {
+        $normalizedContext = [];
+        foreach ($context as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $normalizedContext[$key] = $value;
+            }
+        }
+        Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT, [
+            'pid' => (int)(getmypid() ?: 0),
+            'step' => $step,
+            'updated_at' => round(microtime(true), 6),
+            'context' => $normalizedContext,
+        ]);
+    }
+
+    /**
      * 清理指定子进程的 runtime pid/heartbeat 状态，避免残留值误导后续健康判定。
      *
      * @param string $name 子进程名
@@ -863,6 +973,8 @@ class SubProcessManager {
         }
         if ($name === 'GatewayHealthMonitor') {
             Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, '');
+        } elseif ($name === 'GatewayClusterCoordinator') {
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT, '');
         }
     }
 
@@ -945,17 +1057,11 @@ class SubProcessManager {
     }
 
     protected function managedProcessDrainGraceSeconds(): int {
-        if (defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true) {
-            return max(
-                \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS,
-                (int)(Config::server()['proxy_upstream_shutdown_timeout'] ?? \Scf\Server\Proxy\AppServerLauncher::NORMAL_RECYCLE_GRACE_SECONDS)
-            );
-        }
         return self::PROCESS_EXIT_GRACE_SECONDS;
     }
 
     protected function triggerShutdown(): void {
-        if ($this->isProxyGatewayMode() && $this->dispatchGatewayInternalCommand('shutdown')) {
+        if ($this->dispatchGatewayInternalCommand('shutdown')) {
             return;
         }
         if (is_callable($this->shutdownHandler)) {
@@ -966,7 +1072,7 @@ class SubProcessManager {
     }
 
     protected function triggerReload(): void {
-        if ($this->isProxyGatewayMode() && $this->dispatchGatewayInternalCommand('reload')) {
+        if ($this->dispatchGatewayInternalCommand('reload')) {
             return;
         }
         if (is_callable($this->reloadHandler)) {
@@ -977,7 +1083,7 @@ class SubProcessManager {
     }
 
     protected function triggerRestart(): void {
-        if ($this->isProxyGatewayMode() && $this->dispatchGatewayInternalCommand('restart')) {
+        if ($this->dispatchGatewayInternalCommand('restart')) {
             return;
         }
         if (is_callable($this->restartHandler)) {
@@ -985,229 +1091,6 @@ class SubProcessManager {
             return;
         }
         $this->triggerShutdown();
-    }
-
-    protected function handleRemoteCommand(string $command, array $params, object $socket): bool {
-        if ($command !== '') {
-            $channel = ($this->isProxyGatewayMode() || $this->hasProcess('GatewayClusterCoordinator')) ? 'GatewayCluster' : 'Heatbeat';
-            Console::info("【{$channel}】收到master指令: command={$command}", false);
-        }
-
-        switch ($command) {
-            case 'shutdown':
-                $socket->push("【" . SERVER_HOST . "】start shutdown");
-                $this->triggerShutdown();
-                return true;
-            case 'reload':
-                $socket->push("【" . SERVER_HOST . "】start reload");
-                $this->triggerReload();
-                return true;
-            case 'restart':
-                $socket->push("【" . SERVER_HOST . "】start restart");
-                $this->triggerRestart();
-                return true;
-            case 'restart_crontab':
-                if ($this->isProxyGatewayMode() && $this->dispatchGatewayInternalCommand('restart_crontab')) {
-                    $socket->push("【" . SERVER_HOST . "】start crontab restart");
-                    return true;
-                }
-                return false;
-            case 'restart_redisqueue':
-                if ($this->isProxyGatewayMode() && $this->dispatchGatewayInternalCommand('restart_redisqueue')) {
-                    $socket->push("【" . SERVER_HOST . "】start redisqueue restart");
-                    return true;
-                }
-                return false;
-            case 'subprocess_restart':
-                $name = trim((string)($params['name'] ?? ''));
-                $restartResult = $this->restartManagedProcesses($name === '' ? [] : [$name]);
-                $socket->push("【" . SERVER_HOST . "】" . $restartResult['message']);
-                return true;
-            case 'subprocess_stop':
-                $name = trim((string)($params['name'] ?? ''));
-                $stopResult = $this->stopManagedProcesses($name === '' ? [] : [$name]);
-                $socket->push("【" . SERVER_HOST . "】" . $stopResult['message']);
-                return true;
-            case 'subprocess_restart_all':
-                $restartAllResult = $this->restartAllManagedProcesses();
-                $socket->push("【" . SERVER_HOST . "】" . $restartAllResult['message']);
-                return true;
-            case 'linux_crontab_sync':
-                try {
-                    $result = LinuxCrontabManager::applyReplicationPayload((array)($params['config'] ?? []));
-                    Console::success("【LinuxCrontab】已同步本地排程配置: items=" . (int)($result['item_count'] ?? 0), false);
-                    $this->reportLinuxCrontabSyncState($socket, 'success', [
-                        'message' => "【" . SERVER_HOST . "】Linux 排程已同步: items=" . (int)($result['item_count'] ?? 0),
-                        'item_count' => (int)($result['item_count'] ?? 0),
-                        'sync' => (array)($result['sync'] ?? []),
-                    ]);
-                } catch (Throwable $throwable) {
-                    Console::warning("【LinuxCrontab】同步排程配置失败:" . $throwable->getMessage(), false);
-                    $this->reportLinuxCrontabSyncState($socket, 'failed', [
-                        'message' => "【" . SERVER_HOST . "】Linux 排程同步失败:" . $throwable->getMessage(),
-                        'error' => $throwable->getMessage(),
-                    ]);
-                }
-                return true;
-            case 'appoint_update':
-                $taskId = (string)($params['task_id'] ?? '');
-                $type = (string)($params['type'] ?? '');
-                $version = (string)($params['version'] ?? '');
-                $statePayload = [
-                    'event' => 'node_update_state',
-                    'data' => [
-                        'task_id' => $taskId,
-                        // 升级状态回报必须和 slave_node_report / heartbeat 使用同一 host 标识，
-                        // 否则 master 汇总 task 状态时会把这个 slave 误判成一直 pending。
-                        'host' => APP_NODE_ID,
-                        'type' => $type,
-                        'version' => $version,
-                        'updated_at' => time(),
-                    ]
-                ];
-                $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                    'data' => [
-                        'state' => 'running',
-                        'message' => "【" . SERVER_HOST . "】开始更新 {$type} => {$version}",
-                    ]
-                ])));
-                $result = $this->executeRemoteAppointUpdate($type, $version, $taskId);
-                $reportedState = (string)(($result['data'] ?? [])['master']['state'] ?? '');
-                if (!empty($result['ok']) && $reportedState !== 'failed') {
-                    $finalState = $reportedState === 'pending' ? 'pending' : 'success';
-                    $finalMessage = $finalState === 'pending'
-                        ? "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}"
-                        : "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}";
-                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                        'data' => [
-                            'state' => $finalState,
-                            'message' => $finalMessage,
-                            'updated_at' => time(),
-                        ]
-                    ])));
-                    $socket->push($finalMessage);
-                } else {
-                    $error = (string)($result['message'] ?? '') ?: App::getLastUpdateError() ?: '未知原因';
-                    $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
-                        'data' => [
-                            'state' => 'failed',
-                            'error' => $error,
-                            'message' => "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}",
-                            'updated_at' => time(),
-                        ]
-                    ])));
-                    $socket->push("【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}");
-                }
-                return true;
-            default:
-                // 远端集群命令属于强约束控制面协议：只允许白名单。
-                // 明确业务流程下不能再走“未知命令兜底分发”，否则命令会在错误进程上下文
-                // 被执行，造成重启链路状态漂移（例如 registry/实例状态不一致）。
-                if ($command !== '') {
-                    $channel = ($this->isProxyGatewayMode() || $this->hasProcess('GatewayClusterCoordinator')) ? 'GatewayCluster' : 'Heatbeat';
-                    Console::warning("【{$channel}】未支持的远端命令，已拒绝: command={$command}", false);
-                }
-                return false;
-        }
-    }
-
-    /**
-     * 在 slave 节点上执行远端下发的指定版本升级。
-     *
-     * slave 不能再直接在 cluster 协调进程里调用 `App::appointUpdateTo()`，否则会绕开
-     * gateway 业务编排子进程那层统一升级链，导致本地包替换、rolling upstream、
-     * 业务子进程迭代与 master 行为不一致。这里改为与 master 复用同一条业务编排命令，
-     * 只在完成后额外把结果回报给 master。
-     *
-     * @param string $type 升级类型
-     * @param string $version 目标版本
-     * @param string $taskId 集群升级任务 id
-     * @return array<string, mixed>
-     */
-    protected function executeRemoteAppointUpdate(string $type, string $version, string $taskId): array {
-        if (
-            $this->isProxyGatewayMode()
-            && $this->hasProcess('GatewayBusinessCoordinator')
-            && is_callable($this->gatewayBusinessCommandHandler)
-        ) {
-            Console::info("【GatewayCluster】转交业务编排执行升级: task={$taskId}, type={$type}, version={$version}", false);
-            $response = $this->requestGatewayInternalCommand('appoint_update_remote', [
-                'task_id' => $taskId,
-                'type' => $type,
-                'version' => $version,
-            ], self::REMOTE_APPOINT_UPDATE_TIMEOUT_SECONDS + 5);
-            if (empty($response['ok'])) {
-                return [
-                    'ok' => false,
-                    'message' => (string)($response['message'] ?? 'Gateway 内部升级命令执行失败'),
-                    'data' => [],
-                    'updated_at' => time(),
-                ];
-            }
-            return [
-                'ok' => true,
-                'message' => (string)($response['message'] ?? 'success'),
-                'data' => (array)($response['data'] ?? []),
-                'updated_at' => time(),
-            ];
-        }
-
-        if (App::appointUpdateTo($type, $version)) {
-            return [
-                'ok' => true,
-                'message' => 'success',
-                'data' => [],
-                'updated_at' => time(),
-            ];
-        }
-
-        return [
-            'ok' => false,
-            'message' => App::getLastUpdateError() ?: '未知原因',
-            'data' => [],
-            'updated_at' => time(),
-        ];
-    }
-
-    /**
-     * 将 Linux 排程同步结果即时回报给 master gateway。
-     *
-     * slave 收到配置后不仅要落地本地文件并同步系统 crontab，还要尽快把
-     * “这轮同步是否成功 + 最新节点状态”回推给 master。这样 dashboard
-     * 不必等待下一次心跳，就能立即刷新节点排程抽屉里的系统安装状态。
-     *
-     * @param object $socket 当前 slave -> master 的 websocket 连接
-     * @param string $state success / failed
-     * @param array<string, mixed> $payload 额外状态字段
-     * @return void
-     */
-    protected function reportLinuxCrontabSyncState(object $socket, string $state, array $payload = []): void {
-        $status = $this->buildGatewayClusterStatusPayload();
-        $status['linux_crontab_sync'] = [
-            'state' => $state,
-            'message' => (string)($payload['message'] ?? ''),
-            'error' => (string)($payload['error'] ?? ''),
-            'updated_at' => time(),
-            'item_count' => (int)($payload['item_count'] ?? 0),
-            'sync' => (array)($payload['sync'] ?? []),
-        ];
-
-        try {
-            $socket->push(JsonHelper::toJson([
-                'event' => 'linux_crontab_sync_state',
-                'data' => [
-                    'host' => APP_NODE_ID,
-                    'state' => $state,
-                    'message' => (string)($payload['message'] ?? ''),
-                    'error' => (string)($payload['error'] ?? ''),
-                    'item_count' => (int)($payload['item_count'] ?? 0),
-                    'sync' => (array)($payload['sync'] ?? []),
-                    'updated_at' => time(),
-                    'status' => $status,
-                ],
-            ]));
-        } catch (Throwable) {
-        }
     }
 
     protected function buildNodeStatusPayload(Node $node): array {
@@ -1456,556 +1339,7 @@ class SubProcessManager {
      * @return Process
      */
     protected function createGatewayClusterCoordinatorProcess(): Process {
-        return new Process(function (Process $process) {
-            run(function () use ($process) {
-                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                    define('IS_GATEWAY_SUB_PROCESS', true);
-                }
-                App::mount();
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID, (int)$process->pid);
-                $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
-                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                    Console::info("【GatewayCluster】集群协调PID:" . $process->pid, false);
-                }
-                if (App::isMaster()) {
-                    $this->runGatewayMasterClusterLoop($process);
-                    return;
-                }
-                $this->runGatewaySlaveClusterLoop($process);
-            });
-        });
-    }
-
-    /**
-     * gateway master 的 cluster 周期循环。
-     *
-     * master 不再在 worker 里跑 dashboard 状态 tick，而是由 cluster 子进程
-     * 通过 pipe message 驱动 worker 做“剪掉离线节点 + 推送 dashboard 状态”。
-     *
-     * @param Process $process 当前 cluster 协调子进程
-     * @return void
-     */
-    protected function runGatewayMasterClusterLoop(Process $process): void {
-        MemoryMonitor::start('GatewayCluster');
-        $socket = $process->exportSocket();
-        $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
-        if (is_resource($commandPipe)) {
-            stream_set_blocking($commandPipe, false);
-        }
-        $lastTickAt = 0;
-        while (true) {
-            if (!Runtime::instance()->serverIsAlive()) {
-                Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
-                MemoryMonitor::stop();
-                is_resource($commandPipe) and fclose($commandPipe);
-                $this->exitCoroutineRuntime();
-                return;
-            }
-            $now = time();
-            $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, $now, 'GatewayClusterCoordinator');
-            if ($now !== $lastTickAt && Runtime::instance()->serverIsReady()) {
-                $lastTickAt = $now;
-                try {
-                    // 控制面状态表由 cluster 子进程直接按秒刷新，避免只依赖 pipe 到 worker
-                    // 时出现“push 没发出去但状态表也没更新”的双重丢失。
-                    ServerNodeStatusTable::instance()->set('localhost', $this->cachedGatewayClusterStatusPayload());
-                } catch (Throwable $throwable) {
-                    Console::warning('【GatewayCluster】刷新本地节点状态失败:' . $throwable->getMessage(), false);
-                }
-                $this->sendGatewayPipeMessage('gateway_cluster_tick');
-            }
-            $message = '';
-            if (is_resource($commandPipe)) {
-                $chunks = '';
-                while (true) {
-                    $part = @fread($commandPipe, 8192);
-                    if (!is_string($part) || $part === '') {
-                        break;
-                    }
-                    $chunks .= $part;
-                    if (strlen($part) < 8192) {
-                        break;
-                    }
-                }
-                if ($chunks !== '') {
-                    $message = $chunks;
-                }
-            } else {
-                // command pipe 异常时退回 socket 短轮询，避免 recv 阻塞拖住心跳主循环。
-                $socketPayload = $socket->recv(timeout: 0.1);
-                if (is_string($socketPayload) && $socketPayload !== '') {
-                    $message = $socketPayload;
-                }
-            }
-            if ($message !== '' && str_contains($message, 'shutdown')) {
-                Console::warning('【GatewayCluster】收到shutdown,安全退出', false);
-                MemoryMonitor::stop();
-                is_resource($commandPipe) and fclose($commandPipe);
-                $this->exitCoroutineRuntime();
-                return;
-            }
-            Coroutine::sleep(0.1);
-        }
-    }
-
-    /**
-     * gateway slave 的 cluster 桥接循环。
-     *
-     * slave 节点在这里完成到 master gateway 的 websocket 长连接、节点心跳、
-     * 远端命令接收，以及本地控制台日志上送。worker 不再自己维护这条桥接链路。
-     *
-     * @param Process $process 当前 cluster 协调子进程
-     * @return void
-     */
-    protected function runGatewaySlaveClusterLoop(Process $process): void {
-        MemoryMonitor::start('GatewayCluster');
-        $processSocket = $process->exportSocket();
-        while (true) {
-            if (!Runtime::instance()->serverIsAlive()) {
-                Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
-                MemoryMonitor::stop();
-                return;
-            }
-            try {
-                $socket = Manager::instance()->getMasterSocketConnection();
-                $heartbeatBroken = false;
-                $socketLivenessSuspectCount = 0;
-                $heartbeatTimerId = null;
-                $clearHeartbeatTimer = function () use (&$heartbeatTimerId): void {
-                    if ($heartbeatTimerId !== null) {
-                        Timer::clear((int)$heartbeatTimerId);
-                        $heartbeatTimerId = null;
-                    }
-                };
-                // 心跳发送必须与 recv 链路解耦。某些 Saber/WebSocket 组合下，
-                // recv(timeout) 可能长期阻塞而不是按秒返回 false，若把心跳绑定在
-                // recv 分支里，slave 会只上报启动那一跳，dashboard 很快误判离线。
-                $sendHeartbeat = function () use (&$socket, &$heartbeatBroken): void {
-                    if ($heartbeatBroken || !Runtime::instance()->serverIsAlive()) {
-                        return;
-                    }
-                    try {
-                        $this->pushGatewayClusterSocketMessage($socket, [
-                            'event' => 'node_heart_beat',
-                            'data' => [
-                                'host' => APP_NODE_ID,
-                                'status' => $this->cachedGatewayClusterStatusPayload(),
-                            ]
-                        ], 'node_heart_beat');
-                    } catch (Throwable) {
-                        $heartbeatBroken = true;
-                    }
-                };
-                $this->pushGatewayClusterSocketMessage($socket, [
-                    'event' => 'slave_node_report',
-                    'data' => [
-                        'host' => APP_NODE_ID,
-                        'ip' => SERVER_HOST,
-                        'role' => SERVER_ROLE,
-                    ]
-                ], 'slave_node_report');
-                $sendHeartbeat();
-                $heartbeatTimerId = Timer::tick(5000, function () use (&$heartbeatBroken, $sendHeartbeat): void {
-                    if ($heartbeatBroken) {
-                        return;
-                    }
-                    $sendHeartbeat();
-                });
-                while (true) {
-                    if (!Runtime::instance()->serverIsAlive()) {
-                        $clearHeartbeatTimer();
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                        Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
-                        MemoryMonitor::stop();
-                        $this->exitCoroutineRuntime();
-                        return;
-                    }
-                    $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
-                    $message = $processSocket->recv(timeout: 0.1);
-                    if ($message === 'shutdown') {
-                        $clearHeartbeatTimer();
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                        Console::warning('【GatewayCluster】收到shutdown,安全退出', false);
-                        MemoryMonitor::stop();
-                        $this->exitCoroutineRuntime();
-                        return;
-                    }
-                    if (is_string($message) && $message !== '' && StringHelper::isJson($message)) {
-                        $payload = JsonHelper::recover($message);
-                        $command = (string)($payload['command'] ?? '');
-                        $params = (array)($payload['params'] ?? []);
-                        if ($command === 'console_log') {
-                            $this->pushGatewayClusterSocketMessage($socket, [
-                                'event' => 'console_log',
-                                'data' => [
-                                    'host' => APP_NODE_ID,
-                                    ...$params,
-                                ]
-                            ], 'console_log');
-                        }
-                    }
-                    if ($heartbeatBroken) {
-                        $clearHeartbeatTimer();
-                        try {
-                            $socket->close();
-                        } catch (Throwable) {
-                        }
-                        Console::warning('【GatewayCluster】与master gateway连接已断开,准备重连', false);
-                        break;
-                    }
-                    $reply = $socket->recv(1.0);
-                    // Saber websocket 在“这一秒内没有收到任何帧”时也可能返回 false，
-                    // 这不等于连接已断开。之前这里把 timeout 直接当成断线，slave
-                    // 会每隔几秒就主动 close 并重新握手，所以日志里不断出现新的
-                    // “已与master gateway建立连接,客户端ID:xx”。
-                    //
-                    // 这里需要同时补上“底层连接已断开”的判断：如果 master 已经下线，
-                    // recv(false) 不能再被当成普通 timeout，否则 slave 会一直卡在
-                    // 已失效的 socket 上，永远回不到外层重连循环。
-                    if ($reply === false || !$reply || $reply->data === '' || $reply->data === '::pong') {
-                        if (!Manager::instance()->isSocketConnected($socket)) {
-                            // 部分 Saber 客户端在 recv(timeout) 后会短暂把 connected 标记成 false，
-                            // 但连接实际上仍可写。这里先做一次轻量写探活，再用连续失败阈值兜底，
-                            // 避免 slave 刚连上就被误判断链而进入“频繁重连”循环。
-                            $probeAlive = false;
-                            try {
-                                $probeAlive = $socket->push('::ping') !== false;
-                            } catch (Throwable) {
-                                $probeAlive = false;
-                            }
-                            if ($probeAlive) {
-                                $socketLivenessSuspectCount = 0;
-                                MemoryMonitor::updateUsage('GatewayCluster');
-                                continue;
-                            }
-                            $socketLivenessSuspectCount++;
-                            if ($socketLivenessSuspectCount < 3) {
-                                MemoryMonitor::updateUsage('GatewayCluster');
-                                continue;
-                            }
-                            $clearHeartbeatTimer();
-                            try {
-                                $socket->close();
-                            } catch (Throwable) {
-                            }
-                            Console::warning('【GatewayCluster】与master gateway连接已断开,准备重连', false);
-                            break;
-                        }
-                        $socketLivenessSuspectCount = 0;
-                        MemoryMonitor::updateUsage('GatewayCluster');
-                        continue;
-                    }
-                    $socketLivenessSuspectCount = 0;
-                    if (JsonHelper::is($reply->data)) {
-                        $data = JsonHelper::recover($reply->data);
-                        $event = (string)($data['event'] ?? '');
-                        if ($event === 'command') {
-                            $command = (string)($data['data']['command'] ?? '');
-                            $params = (array)($data['data']['params'] ?? []);
-                            if (!$this->handleRemoteCommand($command, $params, $socket)) {
-                                Console::warning("【GatewayCluster】Command '$command' is not supported", false);
-                            }
-                        } elseif ($event === 'slave_node_report_response') {
-                            Console::success('【GatewayCluster】已与master gateway建立连接,客户端ID:' . ($data['data'] ?? ''), false);
-                        } elseif ($event === 'console_subscription') {
-                            ConsoleRelay::setRemoteSubscribed((bool)($data['data']['enabled'] ?? false));
-                        }
-                    }
-                    MemoryMonitor::updateUsage('GatewayCluster');
-                }
-                $clearHeartbeatTimer();
-            } catch (Throwable $throwable) {
-                if (!Runtime::instance()->serverIsAlive()) {
-                    MemoryMonitor::stop();
-                    $this->exitCoroutineRuntime();
-                    return;
-                }
-                Console::warning("【GatewayCluster】与master gateway连接失败:" . $throwable->getMessage(), false);
-            }
-            Coroutine::sleep(1);
-        }
-    }
-
-    /**
-     * 向 master cluster socket 推送一条消息，并在失败时抛出异常触发重连。
-     *
-     * slave 桥接循环不能把 push 失败当成“普通无消息”，否则会卡在半断链连接里，
-     * 外层重连分支永远进不去，表现为节点不再自动回连。
-     *
-     * @param object $socket slave->master websocket 客户端对象
-     * @param array<string, mixed> $payload 待发送消息
-     * @param string $label 日志语义标签
-     * @return void
-     */
-    protected function pushGatewayClusterSocketMessage(object $socket, array $payload, string $label): void {
-        $encoded = JsonHelper::toJson($payload);
-        try {
-            $pushed = $socket->push($encoded);
-        } catch (Throwable $throwable) {
-            throw new \RuntimeException("push({$label}) failed: " . $throwable->getMessage(), 0, $throwable);
-        }
-        // 这里以 push 结果作为发送成败的一手信号。部分客户端会在 timeout 后短暂
-        // 暴露不稳定 connected 状态，若再叠加二次连接判定，会把成功发送误判为断链。
-        if ($pushed === false) {
-            throw new \RuntimeException("push({$label}) failed: socket disconnected");
-        }
-    }
-
-    /**
-     * 构建 gateway 节点上报给 master 的 cluster 状态。
-     *
-     * @return array<string, mixed>
-     */
-    protected function buildGatewayClusterStatusPayload(): array {
-        $buildStartedAt = microtime(true);
-        $stepStartedAt = $buildStartedAt;
-        $node = Node::factory();
-        $node->appid = APP_ID;
-        $node->id = APP_NODE_ID;
-        $node->name = APP_DIR_NAME;
-        $node->ip = SERVER_HOST;
-        $node->env = SERVER_RUN_ENV ?: 'production';
-        $node->fingerprint = APP_FINGERPRINT;
-        $node->port = Runtime::instance()->httpPort();
-        $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
-        $node->started = $this->serverStartedAt();
-        $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
-        $node->master_pid = $this->server->master_pid;
-        $node->manager_pid = $this->server->manager_pid;
-        $node->swoole_version = swoole_version();
-        $node->cpu_num = swoole_cpu_num();
-        $node->stack_useage = memory_get_usage(true);
-        $node->scf_version = SCF_COMPOSER_VERSION;
-        $node->server_run_mode = APP_SRC_TYPE;
-        $node->role = SERVER_ROLE;
-        $node->app_version = App::version() ?: (App::info()?->toArray()['version'] ?? App::profile()->version);
-        $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
-        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
-        $node->heart_beat = time();
-        $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
-        $baseBuildCostMs = round((microtime(true) - $stepStartedAt) * 1000, 2);
-
-        $tablesStartedAt = microtime(true);
-        $node->tables = $this->cachedGatewayTableStats();
-        $tablesCostMs = round((microtime(true) - $tablesStartedAt) * 1000, 2);
-
-        $threadStatsStartedAt = microtime(true);
-        $threadStats = Coroutine::stats();
-        $node->threads = (int)($threadStats['coroutine_num'] ?? 0);
-        $node->thread_status = $threadStats;
-        $threadStatsCostMs = round((microtime(true) - $threadStatsStartedAt) * 1000, 2);
-
-        $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: [];
-        $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
-        $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
-        $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
-        $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
-        $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
-        $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
-        $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-        $node->memory_usage = MemoryMonitor::sum();
-        // gateway 模式下节点详情页需要直接看到当前节点本地 Linux 排程；
-        // 非 gateway 模式继续保持原有常驻 CrontabManager 状态。
-        $tasksStartedAt = microtime(true);
-        $node->tasks = $this->isProxyGatewayMode()
-            ? $this->cachedGatewayNodeTasks()
-            : CrontabManager::allStatus();
-        $tasksCostMs = round((microtime(true) - $tasksStartedAt) * 1000, 2);
-
-        $payloadStartedAt = microtime(true);
-        $payload = $this->buildNodeStatusPayload($node);
-        $payloadCostMs = round((microtime(true) - $payloadStartedAt) * 1000, 2);
-        $elapsed = microtime(true) - $buildStartedAt;
-        if ($elapsed >= self::GATEWAY_STATUS_BUILD_SLOW_WARNING_SECONDS) {
-            static $lastWarnAt = 0;
-            $now = time();
-            if (($now - $lastWarnAt) >= self::GATEWAY_STATUS_BUILD_WARNING_INTERVAL_SECONDS) {
-                $lastWarnAt = $now;
-                Console::warning(
-                    "【GatewayCluster】状态构建耗时过长:" . round($elapsed, 2) . "s"
-                    . ", base=" . $baseBuildCostMs . "ms"
-                    . ", tables=" . $tablesCostMs . "ms"
-                    . ", thread_stats=" . $threadStatsCostMs . "ms"
-                    . ", tasks=" . $tasksCostMs . "ms"
-                    . ", payload=" . $payloadCostMs . "ms",
-                    false
-                );
-            }
-        }
-        return $payload;
-    }
-
-    /**
-     * 返回 GatewayCluster 主循环可复用的状态快照缓存。
-     *
-     * 主循环每秒都要推进心跳，不能把整套状态构建串行阻塞在当前轮次。
-     * 这里采用“短 TTL + 异步刷新 + 过期兜底旧值”的策略，避免 heartbeat
-     * 被慢 I/O 拖死。
-     *
-     * @return array<string, mixed>
-     */
-    protected function cachedGatewayClusterStatusPayload(): array {
-        $now = time();
-        if (
-            $this->gatewayStatusPayloadCached
-            && $this->gatewayStatusPayloadCachedAt > 0
-            && ($now - $this->gatewayStatusPayloadCachedAt) < self::GATEWAY_STATUS_PAYLOAD_CACHE_SECONDS
-        ) {
-            return $this->gatewayStatusPayloadCached;
-        }
-
-        if (!$this->gatewayStatusPayloadCached) {
-            return $this->reloadGatewayClusterStatusPayloadCache();
-        }
-
-        if ($this->gatewayStatusPayloadRefreshing) {
-            return $this->gatewayStatusPayloadCached;
-        }
-
-        if (Coroutine::getCid() <= 0) {
-            return $this->reloadGatewayClusterStatusPayloadCache();
-        }
-
-        $this->gatewayStatusPayloadRefreshing = true;
-        Coroutine::create(function (): void {
-            try {
-                $this->reloadGatewayClusterStatusPayloadCache();
-            } finally {
-                $this->gatewayStatusPayloadRefreshing = false;
-            }
-        });
-
-        return $this->gatewayStatusPayloadCached;
-    }
-
-    /**
-     * 同步刷新 GatewayCluster 状态快照缓存。
-     *
-     * @return array<string, mixed>
-     */
-    protected function reloadGatewayClusterStatusPayloadCache(): array {
-        try {
-            $payload = $this->buildGatewayClusterStatusPayload();
-            if (is_array($payload) && $payload) {
-                $this->gatewayStatusPayloadCached = $payload;
-                $this->gatewayStatusPayloadCachedAt = time();
-            }
-        } catch (Throwable) {
-        }
-        return $this->gatewayStatusPayloadCached;
-    }
-
-    /**
-     * 返回内存表统计缓存。
-     *
-     * ATable::list() 会遍历所有共享表并读取 stats，频繁执行会放大状态构建开销。
-     * 这里采用短 TTL 缓存，并在缓存过期后异步刷新。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function cachedGatewayTableStats(): array {
-        $now = time();
-        if (
-            $this->gatewayTablesCachedAt > 0
-            && ($now - $this->gatewayTablesCachedAt) < self::GATEWAY_TABLES_CACHE_SECONDS
-        ) {
-            return $this->gatewayTablesCached;
-        }
-
-        if (!$this->gatewayTablesCached) {
-            return $this->reloadGatewayTableStatsCache();
-        }
-
-        if ($this->gatewayTablesRefreshing) {
-            return $this->gatewayTablesCached;
-        }
-
-        if (Coroutine::getCid() <= 0) {
-            return $this->reloadGatewayTableStatsCache();
-        }
-
-        $this->gatewayTablesRefreshing = true;
-        Coroutine::create(function (): void {
-            try {
-                $this->reloadGatewayTableStatsCache();
-            } finally {
-                $this->gatewayTablesRefreshing = false;
-            }
-        });
-
-        return $this->gatewayTablesCached;
-    }
-
-    /**
-     * 同步刷新内存表统计缓存。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function reloadGatewayTableStatsCache(): array {
-        $tables = ATable::list();
-        $this->gatewayTablesCached = is_array($tables) ? $tables : [];
-        $this->gatewayTablesCachedAt = time();
-        return $this->gatewayTablesCached;
-    }
-
-    /**
-     * 返回 gateway 心跳链路可复用的 Linux 排程任务缓存。
-     *
-     * 心跳状态每秒构建一次，直接逐轮读配置+状态文件会带来不必要 I/O。
-     * 这里用短 TTL 缓存任务列表，既保持分钟级可观测性，也避免把排程读取开销
-     * 叠加到 GatewayCluster 主循环里。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function cachedGatewayNodeTasks(): array {
-        $now = time();
-        if (
-            $this->gatewayNodeTasksCachedAt > 0
-            && ($now - $this->gatewayNodeTasksCachedAt) < self::GATEWAY_NODE_TASKS_CACHE_SECONDS
-        ) {
-            return $this->gatewayNodeTasksCached;
-        }
-
-        if (!$this->gatewayNodeTasksCached) {
-            return $this->reloadGatewayNodeTasksCache();
-        }
-
-        if ($this->gatewayNodeTasksRefreshing) {
-            return $this->gatewayNodeTasksCached;
-        }
-
-        if (Coroutine::getCid() <= 0) {
-            return $this->reloadGatewayNodeTasksCache();
-        }
-
-        $this->gatewayNodeTasksRefreshing = true;
-        Coroutine::create(function (): void {
-            try {
-                $this->reloadGatewayNodeTasksCache();
-            } finally {
-                $this->gatewayNodeTasksRefreshing = false;
-            }
-        });
-
-        return $this->gatewayNodeTasksCached;
-    }
-
-    /**
-     * 同步刷新 Linux 排程任务缓存。
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function reloadGatewayNodeTasksCache(): array {
-        $tasks = LinuxCrontabManager::nodeTasks(false);
-        $this->gatewayNodeTasksCached = is_array($tasks) ? $tasks : [];
-        $this->gatewayNodeTasksCachedAt = time();
-        return $this->gatewayNodeTasksCached;
+        return (new GatewayClusterCoordinatorProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -2055,74 +1389,7 @@ class SubProcessManager {
      * @return Process
      */
     protected function createGatewayBusinessCoordinatorProcess(): Process {
-        return new Process(function (Process $process) {
-            run(function () use ($process) {
-                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                    define('IS_GATEWAY_SUB_PROCESS', true);
-                }
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT, time());
-                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                    Console::info("【GatewayBusiness】业务编排PID:" . $process->pid, false);
-                }
-                $lastTickAt = 0;
-                $socket = $process->exportSocket();
-                while (true) {
-                    if (!Runtime::instance()->serverIsAlive()) {
-                        Console::warning('【GatewayBusiness】服务器已关闭,结束运行');
-                        $this->exitCoroutineRuntime();
-                        break;
-                    }
-                    // 业务编排只允许单活。若 manager 重拉导致短时并存双 coordinator，
-                    // 非 owner 实例必须立即退出，避免同一批回收状态被重复推进。
-                    $ownerPid = (int)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID) ?? 0);
-                    if ($ownerPid > 0 && $ownerPid !== (int)$process->pid) {
-                        Console::warning("【GatewayBusiness】检测到新实例接管(owner_pid={$ownerPid})，当前实例退出");
-                        $this->exitCoroutineRuntime();
-                        break;
-                    }
-                    $now = time();
-                    Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_HEARTBEAT_AT, $now);
-                    if ($now !== $lastTickAt && Runtime::instance()->serverIsReady()) {
-                        $lastTickAt = $now;
-                        $this->runGatewayBusinessTick();
-                    }
-
-                    // 在单个协程事件循环里复用同一个进程 socket，避免反复 run()
-                    // 触发新的 Scheduler，造成 eventLoop 已存在的运行时告警。
-                    $message = $socket->recv(timeout: 1);
-                    if ($message === 'shutdown') {
-                        Console::warning('【GatewayBusiness】收到shutdown,安全退出');
-                        $this->exitCoroutineRuntime();
-                        break;
-                    }
-                    if (is_string($message) && $message !== '') {
-                        if (!StringHelper::isJson($message)) {
-                            continue;
-                        }
-                        $payload = JsonHelper::recover($message);
-                        $command = trim((string)($payload['command'] ?? ''));
-                        if ($command === '') {
-                            continue;
-                        }
-                        $this->runGatewayBusinessCommand($command, (array)($payload['params'] ?? []), 'pipe');
-                        continue;
-                    }
-
-                    // pipe 在部分时序下可能瞬时返回不可写，worker 会把命令写入 Runtime 队列；
-                    // 业务编排子进程这里兜底消费，确保升级/reload 这类控制命令不会丢失。
-                    $queued = $this->dequeueGatewayBusinessRuntimeCommand();
-                    if (is_array($queued)) {
-                        $this->runGatewayBusinessCommand(
-                            (string)$queued['command'],
-                            (array)$queued['params'],
-                            'runtime_queue',
-                            (string)($queued['token'] ?? '')
-                        );
-                    }
-                }
-            });
-        });
+        return (new GatewayBusinessCoordinatorProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -2134,77 +1401,7 @@ class SubProcessManager {
      * @return Process
      */
     protected function createGatewayHealthMonitorProcess(): Process {
-        return new Process(function (Process $process) {
-            run(function () use ($process) {
-                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                    define('IS_GATEWAY_SUB_PROCESS', true);
-                }
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time());
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, '');
-                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                    Console::info("【GatewayHealth】健康检查PID:" . $process->pid, false);
-                }
-                $socket = $process->exportSocket();
-                while (true) {
-                    $loopStartedAt = microtime(true);
-
-                    $aliveCheckStartedAt = microtime(true);
-                    $serverAlive = Runtime::instance()->serverIsAlive();
-                    $this->traceHeartbeatStep('GatewayHealth.loop.server_alive', $aliveCheckStartedAt, [
-                        'alive' => $serverAlive ? 1 : 0,
-                    ]);
-                    if (!$serverAlive) {
-                        Console::warning('【GatewayHealth】服务器已关闭,结束运行');
-                        $this->exitCoroutineRuntime();
-                        break;
-                    }
-
-                    $touchStartedAt = microtime(true);
-                    $this->touchManagedHeartbeat(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time(), 'GatewayHealthMonitor');
-                    $this->traceHeartbeatStep('GatewayHealth.loop.touch_heartbeat', $touchStartedAt);
-
-                    $readyCheckStartedAt = microtime(true);
-                    $serverReady = Runtime::instance()->serverIsReady();
-                    $appReady = App::isReady();
-                    $this->traceHeartbeatStep('GatewayHealth.loop.ready_check', $readyCheckStartedAt, [
-                        'server_ready' => $serverReady ? 1 : 0,
-                        'app_ready' => $appReady ? 1 : 0,
-                    ]);
-                    if ($serverReady && $appReady) {
-                        $healthTickStartedAt = microtime(true);
-                        $this->runGatewayHealthTick();
-                        $this->traceHeartbeatStep('GatewayHealth.loop.run_health_tick', $healthTickStartedAt);
-                    }
-
-                    $recvStartedAt = microtime(true);
-                    $message = $socket->recv(timeout: 1);
-                    $this->traceHeartbeatStep('GatewayHealth.loop.pipe_recv', $recvStartedAt, [
-                        'is_shutdown' => $message === 'shutdown' ? 1 : 0,
-                        'has_message' => is_string($message) && $message !== '' ? 1 : 0,
-                    ]);
-                    if ($message === 'shutdown') {
-                        Console::warning('【GatewayHealth】收到shutdown,安全退出');
-                        $this->exitCoroutineRuntime();
-                        break;
-                    }
-                    $this->traceHeartbeatStep('GatewayHealth.loop.total', $loopStartedAt);
-                }
-            });
-        });
-    }
-
-    /**
-     * 判断当前是否运行在 gateway 控制面模式。
-     *
-     * gateway 下的 shutdown/reload/restart 不能在子进程里直接调用捕获的
-     * GatewayServer 闭包，否则会在 fork 出来的对象副本里操作 server，造成
-     * 控制面进入半关闭状态却没有真正释放监听端口。
-     *
-     * @return bool
-     */
-    protected function isProxyGatewayMode(): bool {
-        return defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true;
+        return (new GatewayHealthMonitorProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -2286,18 +1483,6 @@ class SubProcessManager {
     }
 
     /**
-     * 协程场景下通过 HTTP client 回投内部命令。
-     *
-     * @param int $port
-     * @param string $payload
-     * @return bool
-     */
-    protected function dispatchGatewayInternalCommandByCoroutine(int $port, string $payload, float $timeoutSeconds = 1.0): bool {
-        $result = $this->requestGatewayInternalCommandByCoroutine($port, $payload, $timeoutSeconds);
-        return !empty($result['ok']);
-    }
-
-    /**
      * 协程场景下通过 HTTP client 调用 gateway 内部控制面并读取返回值。
      *
      * @param int $port 内部控制端口
@@ -2326,18 +1511,6 @@ class SubProcessManager {
         }
         $client->close();
         return $this->normalizeGatewayInternalCommandResponse($ok, $statusCode, $body);
-    }
-
-    /**
-     * 非协程场景下通过 stream socket 回投内部命令。
-     *
-     * @param int $port
-     * @param string $payload
-     * @return bool
-     */
-    protected function dispatchGatewayInternalCommandByStream(int $port, string $payload, float $timeoutSeconds = 1.0): bool {
-        $result = $this->requestGatewayInternalCommandByStream($port, $payload, $timeoutSeconds);
-        return !empty($result['ok']);
     }
 
     /**
@@ -2461,12 +1634,10 @@ class SubProcessManager {
             // shutdown 路径，会在 full restart 时触发 Swoole rshutdown 的
             // Event::wait() deprecated warning。这里直接 SIGKILL 收口，既不拖住
             // 控制面监听 FD，也避免它们进入各自的协程 shutdown 尾声。
-            if ($this->isProxyGatewayMode()) {
-                $pid = (int)($process->pid ?? 0);
-                if ($pid > 0) {
-                    @Process::kill($pid, SIGKILL);
-                    continue;
-                }
+            $pid = (int)($process->pid ?? 0);
+            if ($pid > 0) {
+                @Process::kill($pid, SIGKILL);
+                continue;
             }
             $process->write('shutdown');
         }
@@ -3057,7 +2228,7 @@ class SubProcessManager {
     }
 
     protected function shouldPushManagedLifecycleLog(): bool {
-        return defined('PROXY_UPSTREAM_MODE') && PROXY_UPSTREAM_MODE === true;
+        return false;
     }
 
     protected function bumpProcessGenerations(array $targets): void {
@@ -3080,49 +2251,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createConsolePushProcess(): Process {
-        return new Process(function (Process $process) {
-            App::mount();
-            Console::info("【ConsolePush】控制台消息推送PID:" . $process->pid, false);
-            MemoryMonitor::start('ConsolePush');
-            run(function () use ($process) {
-                while (true) {
-                    $masterSocket = Manager::instance()->getMasterSocketConnection();
-                    while (true) {
-                        $masterSocket->push('::ping');
-                        $reply = $masterSocket->recv(5);
-                        if ($reply && isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
-                            $masterSocket->push('', WEBSOCKET_OPCODE_PONG);
-                        }
-                        if (($reply === false || !$reply || $reply->data === '' || $reply->data === '::pong')
-                            && !Manager::instance()->isSocketConnected($masterSocket)) {
-                            try {
-                                $masterSocket->close();
-                            } catch (Throwable) {
-                            }
-                            Console::warning('【ConsolePush】与master节点连接已断开', false);
-                            break;
-                        }
-                        $processSocket = $process->exportSocket();
-                        $msg = $processSocket->recv(timeout: 30);
-                        if ($msg) {
-                            if (StringHelper::isJson($msg)) {
-                                $payload = JsonHelper::recover($msg);
-                                $masterSocket->push(JsonHelper::toJson(['event' => 'console_log', 'data' => [
-                                    'host' => SERVER_ROLE == NODE_ROLE_MASTER ? 'master' : SERVER_HOST,
-                                    ...$payload
-                                ]]));
-                            } elseif ($msg == 'shutdown') {
-                                $masterSocket->close();
-                                Console::warning('【ConsolePush】管理进程退出,结束推送', false);
-                                MemoryMonitor::stop();
-                                return;
-                            }
-                        }
-                        MemoryMonitor::updateUsage('ConsolePush');
-                    }
-                }
-            });
-        });
+        return (new ConsolePushProcess())->create();
     }
 
     /**
@@ -3139,86 +2268,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createRedisQueueProcess(): Process {
-        Counter::instance()->incr(Key::COUNTER_REDIS_QUEUE_PROCESS);
-        return new Process(function (Process $process) {
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                define('IS_GATEWAY_SUB_PROCESS', true);
-            }
-            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, time());
-            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                Console::info("【RedisQueue】Redis队列管理PID:" . $process->pid, false);
-            }
-            define('IS_REDIS_QUEUE_PROCESS', true);
-            // 升级/关停时 manager 需要持续回收消费子进程，不能被 pipe read 阻塞住。
-            // 这里直接读取 pipe fd 的非阻塞 stream，避免 Process::read() 在 EAGAIN 时持续刷 warning。
-            $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
-            is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            $managerId = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS) ?: 0);
-            $quiescing = false;
-            $queueWorkerPid = 0;
-            while (true) {
-                Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, time());
-                // manager 自己负责以非阻塞方式回收队列消费子进程，避免内部 wait() 把升级控制链阻塞住。
-                while ($ret = Process::wait(false)) {
-                    $pid = (int)($ret['pid'] ?? 0);
-                    if ($pid > 0 && $pid === $queueWorkerPid) {
-                        $queueWorkerPid = 0;
-                        Runtime::instance()->redisQueueProcessStatus(false);
-                    }
-                }
-
-                if (!Runtime::instance()->serverIsAlive()) {
-                    Console::warning("【RedisQueue】服务器已关闭,结束运行");
-                    break;
-                }
-                // iterate 时会先 bump generation；即便 upgrade 命令还在 pipe 里，老 manager 也应该立刻停止继续拉新子进程。
-                $latestManagerId = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS) ?: 0);
-                if (!$quiescing && $latestManagerId !== $managerId) {
-                    $quiescing = true;
-                    Console::warning("【RedisQueue】#{$managerId} 管理进程进入迭代排空,停止接新任务");
-                }
-
-                // 非排空态下才受 serverIsReady 门控；一旦进入迭代排空，哪怕控制面
-                // 已经把 serverIsReady 拉低，也必须继续推进剩余任务收口并退出。
-                if (!$quiescing && !Runtime::instance()->serverIsReady()) {
-                    sleep(1);
-                    continue;
-                }
-
-                if (!$quiescing && $queueWorkerPid <= 0 && !Runtime::instance()->redisQueueProcessStatus() && Runtime::instance()->serverIsAlive() && !Runtime::instance()->serverIsDraining()) {
-                    Runtime::instance()->redisQueueProcessStatus(true);
-                    $queueProcess = RQueue::startProcess();
-                    $queueWorkerPid = (int)($queueProcess?->pid ?? 0);
-                    if ($queueWorkerPid <= 0) {
-                        Runtime::instance()->redisQueueProcessStatus(false);
-                    }
-                }
-
-                if ($quiescing && $queueWorkerPid <= 0 && (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0) <= 0) {
-                    Console::warning("【RedisQueue】#{$managerId} 管理进程排空完成,退出等待拉起");
-                    break;
-                }
-                $cmd = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
-                if ($cmd === false) {
-                    $cmd = '';
-                }
-                if ($cmd == 'shutdown') {
-                    Console::warning("【RedisQueue】#{$managerId} 服务器已关闭,结束运行");
-                    break;
-                }
-                if ($cmd !== '') {
-                    if (!$quiescing) {
-                        $quiescing = true;
-                        Console::warning("【RedisQueue】#{$managerId} 管理进程进入迭代排空,停止接新任务");
-                    }
-                }
-                sleep(1);
-            }
-            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID, 0);
-            is_resource($commandPipe) and fclose($commandPipe);
-        });
+        return (new RedisQueueProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -3226,151 +2276,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createCrontabManagerProcess(): Process {
-        Counter::instance()->incr(Key::COUNTER_CRONTAB_PROCESS);
-        return new Process(function (Process $process) {
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                define('IS_GATEWAY_SUB_PROCESS', true);
-            }
-            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, time());
-            Console::info("【Crontab】排程任务管理PID:" . $process->pid, false);
-            define('IS_CRONTAB_PROCESS', true);
-            // 升级/关停时 manager 需要持续 wait(false) 回收任务子进程，不能被 pipe read 闷住。
-            // 这里直接读取 pipe fd 的非阻塞 stream，避免 Process::read() 在 EAGAIN 时持续刷 warning。
-            $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
-            is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            $managerId = (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0);
-            $quiescing = false;
-            while (true) {
-                Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, time());
-                // Crontab manager 需要在整个生命周期里持续回收任务子进程。
-                // 否则排空阶段虽然任务进程已经退出，但 CrontabTable 里的旧行还在，
-                // manager 会误判“仍有存量任务未收完”而一直不退出，最终拖住 gateway 监听 FD。
-                while ($ret = Process::wait(false)) {
-                    $pid = (int)($ret['pid'] ?? 0);
-                    if ($pid <= 0) {
-                        continue;
-                    }
-                    if ($task = CrontabManager::getTaskTableByPid($pid)) {
-                        CrontabManager::removeTaskTable($task['id']);
-                    }
-                }
-                // gateway restart / crontab iterate 都会先 bump generation。即便 upgrade 命令
-                // 因关停时序没有及时从 pipe 里读到，老 manager 也必须基于代际变化立即进入排空。
-                $latestManagerId = (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0);
-                if (!$quiescing && $latestManagerId !== $managerId) {
-                    $quiescing = true;
-                    Console::warning("【Crontab】#{$managerId} 管理进程进入迭代排空,停止接新任务");
-                }
-                // 非排空态下才需要等待 server ready。gateway restart 过程中会先把
-                // serverIsReady 置为 false；如果这里一刀切 continue，老 manager
-                // 会停止推进任务回收，最终自己永远挂着并继续持有旧监听 FD。
-                if (!$quiescing && !Runtime::instance()->serverIsReady()) {
-                    sleep(1);
-                    continue;
-                }
-                if (!$quiescing && !Runtime::instance()->crontabProcessStatus() && Runtime::instance()->serverIsAlive() && !Runtime::instance()->serverIsDraining()) {
-                    $taskList = CrontabManager::start();
-                    Runtime::instance()->crontabProcessStatus(true);
-                    if ($taskList) {
-                        while ($ret = Process::wait(false)) {
-                            if ($t = CrontabManager::getTaskTableByPid($ret['pid'])) {
-                                CrontabManager::removeTaskTable($t['id']);
-                            }
-                        }
-                    }
-                }
-                $tasks = CrontabManager::getTaskTable();
-                if (!$tasks) {
-                    Runtime::instance()->crontabProcessStatus(false);
-                    if ($quiescing) {
-                        Console::warning("【Crontab】#{$managerId} 管理进程排空完成,退出等待拉起");
-                        break;
-                    }
-                } else {
-                    foreach ($tasks as $processTask) {
-                        if (!isset($processTask['id'])) {
-                            Console::warning("【Crontab】任务ID为空:" . JsonHelper::toJson($processTask));
-                            continue;
-                        }
-                        if (Counter::instance()->get('CRONTAB_' . $processTask['id'] . '_ERROR')) {
-                            CrontabManager::errorReport($processTask);
-                        }
-                        $taskInstance = CrontabManager::getTaskTableById($processTask['id']);
-                        $taskPid = (int)($taskInstance['pid'] ?? 0);
-                        $taskAlive = $taskPid > 0 && Process::kill($taskPid, 0);
-                        if (!$taskAlive) {
-                            // gateway restart 时老 manager 可能在父进程退出后才继续扫尾。
-                            // 这时如果 wait(false) 没及时捞到子进程退出，CrontabTable 会残留旧行，
-                            // manager 就会误判“还有任务没排空”而继续持有旧监听 FD。
-                            if ($quiescing || $taskInstance['manager_id'] !== $managerId) {
-                                CrontabManager::removeTaskTable($processTask['id']);
-                            } else {
-                                CrontabManager::updateTaskTable($processTask['id'], [
-                                    'process_is_alive' => STATUS_OFF,
-                                ]);
-                            }
-                            continue;
-                        }
-                        if ($quiescing) {
-                            // gateway full restart 时，Crontab task 子进程大多只是挂着
-                            // Timer/Coroutine 等待下一轮执行；让它们自己走 PHP shutdown
-                            // 尾声，会触发 Swoole rshutdown 的 Event::wait() warning。
-                            // 这里改由 manager 在“当前轮次已空闲”后直接收掉对应 task pid：
-                            // 正在执行中的任务继续跑完，回到 idle 态后再被回收。
-                            if ((int)($taskInstance['is_busy'] ?? 0) <= 0) {
-                                @Process::kill($taskPid, SIGKILL);
-                            }
-                            continue;
-                        }
-                        if ($taskInstance['process_is_alive'] == STATUS_OFF) {
-                            sleep($processTask['retry_timeout'] ?? 60);
-                            if ($quiescing) {
-                                // 排空阶段不再重拉旧任务，让老 manager 只负责把存量任务收干净后退出。
-                                CrontabManager::removeTaskTable($processTask['id']);
-                            } elseif ($managerId == $processTask['manager_id']) {//重新创建发生致命错误的任务进程
-                                CrontabManager::createTaskProcess($processTask, $processTask['restart_num'] + 1);
-                            } else {
-                                CrontabManager::removeTaskTable($processTask['id']);
-                            }
-                        } elseif ($taskInstance['manager_id'] !== $managerId) {
-                            CrontabManager::removeTaskTable($processTask['id']);
-                        }
-                    }
-                }
-                $msg = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
-                if ($msg === false) {
-                    $msg = '';
-                }
-                if ($msg !== '') {
-                    if (StringHelper::isJson($msg)) {
-                        $payload = JsonHelper::recover($msg);
-                        $command = $payload['command'] ?? 'unknow';
-                        Console::log("【Crontab】#{$managerId} 收到命令:" . Color::cyan($command));
-                        switch ($command) {
-                            case 'upgrade':
-                                $quiescing = true;
-                                Console::warning("【Crontab】#{$managerId} 管理进程进入迭代排空,停止接新任务");
-                            case 'shutdown':
-                                break;
-                            default:
-                                Console::info($command);
-                        }
-                    } elseif ($msg == 'shutdown') {
-                        Console::warning("【Crontab】服务器已关闭,结束运行", $this->shouldPushManagedLifecycleLog());
-                        break;
-                    }
-                }
-                if ($msg == 'shutdown') {
-                    Console::warning("【Crontab】服务器已关闭,结束运行", $this->shouldPushManagedLifecycleLog());
-                    break;
-                }
-                sleep(1);
-            }
-            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_CRONTAB_MANAGER_PID, 0);
-            is_resource($commandPipe) and fclose($commandPipe);
-        });
+        return (new CrontabManagerProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
 
@@ -3379,93 +2285,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createMemoryUsageCountProcess(): Process {
-        return new Process(function (Process $process) {
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                define('IS_GATEWAY_SUB_PROCESS', true);
-            }
-            $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
-            is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
-            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
-            }
-            MemoryMonitor::start('MemoryMonitor');
-            $nextTickAt = 0.0;
-            while (true) {
-                Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
-                $msg = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
-                if ($msg === false) {
-                    $msg = '';
-                }
-                if ($msg === 'shutdown') {
-                    MemoryMonitor::stop();
-                    Console::warning("【MemoryMonitor】收到shutdown,安全退出", $this->shouldPushManagedLifecycleLog());
-                    break;
-                }
-
-                if (microtime(true) >= $nextTickAt) {
-                    try {
-                        $processList = MemoryMonitorTable::instance()->rows();
-                        if ($processList) {
-                            foreach ($processList as $processInfo) {
-                                $processName = $processInfo['process'];
-                                $limitMb = $processInfo['limit_memory_mb'] ?? 300;
-                                $pid = (int)$processInfo['pid'];
-
-                                if (PHP_OS_FAMILY !== 'Darwin' && !Process::kill($pid, 0)) {
-                                    continue;
-                                }
-
-                                $mem = MemoryMonitor::getPssRssByPid($pid);
-                                $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;
-                                $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;
-                                $osActualMb = $pss ?? $rss;
-
-                                $processInfo['rss_mb'] = $rss;
-                                $processInfo['pss_mb'] = $pss;
-                                $processInfo['os_actual'] = $osActualMb;
-                                $processInfo['updated'] = time();
-
-                                $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
-                                if (
-                                    $autoRestart == STATUS_ON
-                                    && PHP_OS_FAMILY !== 'Darwin'
-                                    && str_starts_with($processName, 'worker:')
-                                    && $osActualMb !== null
-                                    && $osActualMb > $limitMb
-                                    && time() - ($processInfo['restart_ts'] ?? 0) >= 120
-                                ) {
-                                    Log::instance()->setModule('system')
-                                        ->error("{$processName}[PID:$pid] 内存 {$osActualMb}MB ≥ {$limitMb}MB，强制重启");
-                                    Process::kill($pid, SIGTERM);
-                                    $processInfo['restart_ts'] = time();
-                                    $processInfo['restart_count'] = ($processInfo['restart_count'] ?? 0) + 1;
-                                }
-
-                                $curr = MemoryMonitorTable::instance()->get($processName);
-                                if ($curr && $curr['pid'] !== $processInfo['pid']) {
-                                    $processInfo['pid'] = $curr['pid'];
-                                }
-                                MemoryMonitorTable::instance()->set($processName, $processInfo);
-                            }
-                        } else {
-                            Console::warning("【MemoryMonitor】暂无待统计进程", false);
-                        }
-                        MemoryMonitor::updateUsage('MemoryMonitor');
-                    } catch (Throwable $e) {
-                        Log::instance()->error("【MemoryMonitor】调度异常:" . $e->getMessage());
-                        Process::kill($process->pid, SIGTERM);
-                    }
-                    $nextTickAt = microtime(true) + 5;
-                }
-
-                usleep(200000);
-            }
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, 0);
-            is_resource($commandPipe) and fclose($commandPipe);
-        }, false, SOCK_DGRAM);
+        return (new MemoryUsageCountProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -3473,182 +2293,8 @@ class SubProcessManager {
      * @return Process
      */
     private function createHeartbeatProcess(): Process {
-        return new Process(function (Process $process) {
-            run(function () use ($process) {
-                if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                    define('IS_GATEWAY_SUB_PROCESS', true);
-                }
-                App::mount();
-                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
-                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                    Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
-                }
-                $clusterBridgeEnabled = $this->isProxyGatewayMode() && $this->hasProcess('GatewayClusterCoordinator');
-                // gateway 模式下，当 GatewayClusterCoordinator 可用时，节点上报与远程命令桥接
-                // 统一由它负责。Heartbeat 在这里仅做生命周期保活，不再建立到 master 的 socket，
-                // 避免重复链路导致“Heatbeat 重连刷屏”和状态干扰。
-                if ($clusterBridgeEnabled) {
-                    MemoryMonitor::start('Heatbeat');
-                    $processSocket = $process->exportSocket();
-                    while (true) {
-                        Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
-                        $cmd = $processSocket->recv(timeout: 0.1);
-                        if ($cmd == 'shutdown') {
-                            Timer::clearAll();
-                            Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
-                            MemoryMonitor::stop();
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
-                            $this->exitCoroutineRuntime();
-                            return;
-                        }
-                        if (!Runtime::instance()->serverIsAlive()) {
-                            Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
-                            MemoryMonitor::stop();
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
-                            $this->exitCoroutineRuntime();
-                            return;
-                        }
-                        MemoryMonitor::updateUsage('Heatbeat');
-                        Coroutine::sleep(5);
-                    }
-                }
-                MemoryMonitor::start('Heatbeat');
-                $node = Node::factory();
-                $node->appid = APP_ID;
-                $node->id = APP_NODE_ID;
-                $node->name = APP_DIR_NAME;
-                $node->ip = SERVER_HOST;
-                $node->fingerprint = APP_FINGERPRINT;
-                $node->port = Runtime::instance()->httpPort();
-                $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
-                $node->started = $this->serverStartedAt();
-                $node->restart_times = 0;
-                $node->master_pid = $this->server->master_pid;
-                $node->manager_pid = $this->server->manager_pid;
-                $node->swoole_version = swoole_version();
-                $node->cpu_num = swoole_cpu_num();
-                $node->stack_useage = Coroutine::getStackUsage();
-                $node->scf_version = SCF_COMPOSER_VERSION;
-                $node->server_run_mode = APP_SRC_TYPE;
-                // gateway 模式下节点身份统一使用 APP_NODE_ID，避免 master/slave 同机时
-                // 因共享 IP 产生 host 键冲突，导致命令目标与心跳覆盖错位。
-                $nodeHost = $this->isProxyGatewayMode() ? APP_NODE_ID : SERVER_HOST;
-                while (true) {
-                    Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
-                    $socket = Manager::instance()->getMasterSocketConnection();
-                    $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => [
-                        'host' => $nodeHost,
-                        'ip' => SERVER_HOST,
-                        'role' => SERVER_ROLE
-                    ]]));
-                    $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, &$node) {
-                        // 控制面进入 shutdown/restart 后，心跳进程只等待明确的 shutdown 命令，
-                        // 不再继续构建节点状态，避免在退出窗口里触发 gateway->upstream IPC。
-                        if ($this->shouldSkipHeartbeatStatusBuild()) {
-                            MemoryMonitor::updateUsage('Heatbeat');
-                            return;
-                        }
-                        $node->role = SERVER_ROLE;
-                        $node->app_version = App::version() ?: (App::info()?->toArray()['version'] ?? App::profile()->version);
-                        $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
-                        $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
-                        $node->heart_beat = time();
-                        $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
-                        $node->tables = ATable::list();
-                        $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
-                        $node->stack_useage = memory_get_usage(true);
-                        $node->threads = count(Coroutine::list());
-                        $node->thread_status = Coroutine::stats();
-                        $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: [];
-                        $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
-                        $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
-                        $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
-                        $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
-                        $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
-                        $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
-                        $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
-                        $node->memory_usage = MemoryMonitor::sum();
-                        // 与 gateway cluster 状态保持一致：proxy gateway 节点改为上报
-                        // 当前节点本地 Linux 排程；非 gateway 模式保留原有常驻排程。
-                        $node->tasks = $this->isProxyGatewayMode()
-                            ? LinuxCrontabManager::nodeTasks(false)
-                            : CrontabManager::allStatus();
-                        $payload = $this->buildNodeStatusPayload($node);
-                        if ($node->role == NODE_ROLE_MASTER) {
-                            ServerNodeStatusTable::instance()->set('localhost', $payload);
-                            $socket->push('::ping');
-                        } else {
-                            $socket->push(JsonHelper::toJson(['event' => 'node_heart_beat', 'data' => [
-                                'host' => $nodeHost,
-                                'status' => $payload
-                            ]]));
-                        }
-                        MemoryMonitor::updateUsage('Heatbeat');
-                    });
-                    while (true) {
-                        Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
-                        $processSocket = $process->exportSocket();
-                        $cmd = $processSocket->recv(timeout: 0.1);
-                        if ($cmd == 'shutdown') {
-                            Timer::clear($pingTimerId);
-                            Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
-                            $socket->close();
-                            MemoryMonitor::stop();
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
-                            $this->exitCoroutineRuntime();
-                            return;
-                        }
-                        $reply = $socket->recv(1.0);
-                        if ($reply === false) {
-                            if (!Manager::instance()->isSocketConnected($socket)) {
-                                Timer::clear($pingTimerId);
-                                try {
-                                    $socket->close();
-                                } catch (Throwable) {
-                                }
-                                Console::warning('【Heatbeat】与master节点连接已断开,准备重连', false);
-                                break;
-                            }
-                            continue;
-                        }
-                        if ($reply) {
-                            // 有些 websocket 服务端会下发“空 data 的 ping 帧”，这里必须先回 pong，
-                            // 否则会被服务端判定为心跳失联并主动断开连接。
-                            if (isset($reply->opcode) && $reply->opcode === WEBSOCKET_OPCODE_PING) {
-                                $socket->push('', WEBSOCKET_OPCODE_PONG);
-                                continue;
-                            }
-                            if (!empty($reply->data) && $reply->data !== "::pong") {
-                                if (JsonHelper::is($reply->data)) {
-                                    $data = JsonHelper::recover($reply->data);
-                                    $event = $data['event'] ?? 'unknow';
-                                    if ($event == 'command') {
-                                        $command = $data['data']['command'];
-                                        $params = $data['data']['params'];
-                                        if (!$this->handleRemoteCommand($command, $params, $socket)) {
-                                            Console::warning("【Heatbeat】Command '$command' is not supported", false);
-                                        }
-                                    } elseif ($event == 'slave_node_report_response') {
-                                        $masterHost = Manager::instance()->getMasterHost();
-                                        Console::success('【Heatbeat】已与master[' . $masterHost . ']建立连接,客户端ID:' . $data['data'], false);
-                                    } elseif ($event == 'console_subscription') {
-                                        ConsoleRelay::setRemoteSubscribed((bool)($data['data']['enabled'] ?? false));
-                                    } else {
-                                        Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
-                                    }
-                                } else {
-                                    Console::info("【Heatbeat】收到master消息:" . $reply->data, false);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }, false, SOCK_DGRAM);
+        return (new HeartbeatProcess($this->subProcessRuntimeCallbacks()))
+            ->create((int)($this->server->master_pid ?? 0), (int)($this->server->manager_pid ?? 0));
     }
 
     /**
@@ -3656,61 +2302,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createLogBackupProcess(): Process {
-        return new Process(function (Process $process) {
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                define('IS_GATEWAY_SUB_PROCESS', true);
-            }
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
-            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
-            }
-            App::mount();
-            MemoryMonitor::start('LogBackup');
-            $serverConfig = Config::server();
-            $logger = Log::instance();
-            $logExpireDays = $serverConfig['log_expire_days'] ?? 15;
-            $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
-            is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            $nextTickAt = 0.0;
-
-            $clearCount = $logger->clear($logExpireDays);
-            if ($clearCount) {
-                Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
-            }
-
-            while (true) {
-                Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
-                $cmd = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
-                if ($cmd === false) {
-                    $cmd = '';
-                }
-                if ($cmd == 'shutdown') {
-                    MemoryMonitor::stop();
-                    Console::warning("【LogBackup】管理进程退出,结束备份", false);
-                    break;
-                }
-                if (microtime(true) >= $nextTickAt) {
-                    if ((int)Runtime::instance()->get('_LOG_CLEAR_DAY_') !== (int)Date::today()) {
-                        $clearCount = $logger->clear($logExpireDays);
-                        if ($clearCount) {
-                            Console::log("【LogBackup】已清理过期日志:" . Color::cyan($clearCount), false);
-                        }
-                        $countKeyDay = Key::COUNTER_REQUEST . Date::leftday(2);
-                        if (Counter::instance()->get($countKeyDay)) {
-                            Counter::instance()->delete($countKeyDay);
-                        }
-                    }
-                    $logger->backup();
-                    MemoryMonitor::updateUsage('LogBackup');
-                    $nextTickAt = microtime(true) + 5;
-                }
-                usleep(200000);
-            }
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, 0);
-            is_resource($commandPipe) and fclose($commandPipe);
-        }, false, SOCK_DGRAM);
+        return (new LogBackupProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -3718,101 +2310,7 @@ class SubProcessManager {
      * @return Process
      */
     private function createFileWatchProcess(): Process {
-        return new Process(function (Process $process) {
-            if (defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true && !defined('IS_GATEWAY_SUB_PROCESS')) {
-                define('IS_GATEWAY_SUB_PROCESS', true);
-            }
-            run(function () use ($process) {
-                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
-                if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-                    Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
-                }
-                sleep(1);
-                App::mount();
-                MemoryMonitor::start('FileWatcher');
-                $scanDirectories = function () {
-                    if (APP_SRC_TYPE == 'dir') {
-                        $appFiles = Dir::scan(APP_PATH . '/src');
-                    } else {
-                        $appFiles = [];
-                    }
-                    return [...$appFiles, ...Dir::scan(Root::dir())];
-                };
-                $files = $scanDirectories();
-                $fileList = [];
-                foreach ($files as $path) {
-                    $meta = $this->readFileWatcherMeta($path);
-                    $meta && $fileList[$path] = $meta;
-                }
-                while (true) {
-                    Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
-                    $socket = $process->exportSocket();
-                    $msg = $socket->recv(timeout: 0.1);
-                    if ($msg == 'shutdown') {
-                        Timer::clearAll();
-                        MemoryMonitor::stop();
-                        Console::warning("【FileWatcher】管理进程退出,结束监听", false);
-                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
-                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
-                        $this->exitCoroutineRuntime();
-                        return;
-                    }
-                    $changedFiles = [];
-                    $currentFiles = $scanDirectories();
-
-                    // 使用 path=>meta 快照做增量比对，避免循环内 array_column/in_array 的 O(n²) 开销。
-                    $currentSet = array_fill_keys($currentFiles, true);
-                    foreach ($currentFiles as $path) {
-                        $meta = $this->readFileWatcherMeta($path);
-                        if ($meta === null) {
-                            continue;
-                        }
-                        if (!isset($fileList[$path])) {
-                            $fileList[$path] = $meta;
-                            $changedFiles[$path] = true;
-                            continue;
-                        }
-                        if ($fileList[$path]['mtime'] !== $meta['mtime'] || $fileList[$path]['size'] !== $meta['size']) {
-                            $fileList[$path] = $meta;
-                            $changedFiles[$path] = true;
-                        }
-                    }
-
-                    foreach (array_keys($fileList) as $path) {
-                        if (!isset($currentSet[$path])) {
-                            unset($fileList[$path]);
-                            $changedFiles[$path] = true;
-                        }
-                    }
-
-                    if ($changedFiles) {
-                        $changedPaths = array_keys($changedFiles);
-                        $shouldRestart = $this->shouldRestartForChangedFiles($changedPaths);
-                        Console::warning($shouldRestart
-                            ? '---------以下文件发生变动,检测到Gateway核心目录变动,即将重启Gateway---------'
-                            : '---------以下文件发生变动,即将重载业务平面---------');
-                        foreach ($changedPaths as $f) {
-                            Console::write($f);
-                        }
-                        Console::warning('-------------------------------------------');
-                        if ($shouldRestart) {
-                            $this->triggerRestart();
-                            MemoryMonitor::stop();
-                            Console::warning("【FileWatcher】管理进程退出,结束监听", false);
-                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
-                            $this->exitCoroutineRuntime();
-                            return;
-                        }
-                        // 业务代码变动只触发业务平面 reload；Gateway 重启仅由核心目录变动触发。
-                        $this->triggerReload();
-                    }
-                    MemoryMonitor::updateUsage('FileWatcher');
-                    Coroutine::sleep(2);
-                }
-            });
-        }, false, SOCK_DGRAM);
+        return (new FileWatchProcess($this->subProcessRuntimeCallbacks()))->create();
     }
 
     /**
@@ -3841,7 +2339,7 @@ class SubProcessManager {
             }
             // 仅当 Gateway 代理核心目录变动时才触发 Gateway 重启，
             // 业务目录和其它框架目录变动统一走业务平面 reload。
-            if (str_contains($path, '/scf/src/Server/Proxy/')) {
+            if (str_contains($path, '/scf/src/Server/Gateway/')) {
                 return true;
             }
         }

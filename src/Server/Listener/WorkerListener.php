@@ -10,7 +10,6 @@ use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
-use Scf\Mode\Web\Log;
 use Scf\Mode\Web\Router;
 use Scf\Util\MemoryMonitor;
 use Swoole\Process;
@@ -29,14 +28,9 @@ class WorkerListener extends Listener {
                 Process::kill($server->worker_pid, SIGKILL);
             }
         });
-        if (!(defined('PROXY_GATEWAY_MODE') && PROXY_GATEWAY_MODE === true)) {
-            //监控内存使用
-            $serverConfig = Config::server();
-            $limitMb = (int)($serverConfig['worker_memory_limit'] ?? 256);
-            $autoRestart = (bool)($serverConfig['worker_memory_auto_restart'] ?? false);
-            MemoryMonitor::start('worker:' . ($workerId + 1), limitMb: $limitMb, autoRestart: $autoRestart);
-        }
-        // 保留 worker 级致命错误记录能力，这和本次 rshutdown warning 根因无关。
+        // gateway-only 模式下 worker 行会在 WorkerStart 注册，随后由
+        // CgiListener + MemoryUsageCount 协同维护 usage 与 OS 实际占用。
+        // 这里继续保留 worker 级致命错误记录能力。
         register_shutdown_function(function () use ($workerId) {
             $error = error_get_last();
             switch ($error['type'] ?? null) {
@@ -56,6 +50,7 @@ class WorkerListener extends Listener {
         });
         //要使用app命名空间必须先加载模块
         App::mount();
+        $this->registerWorkerMemoryMonitor($server, (int)$workerId);
         //给每个worker添加RPC服务
         try {
             Rpc::addService($workerId);
@@ -93,6 +88,36 @@ class WorkerListener extends Listener {
 INFO;
             Console::write(Color::green($info));
         }
+    }
+
+    /**
+     * 为 upstream 的 server worker / task worker 注册内存监控行。
+     *
+     * upstream.memory_rows 与 heartbeat 聚合展示都依赖 MemoryMonitorTable 的进程行。
+     * 这里统一在 WorkerStart 按 worker 类型落表，保证 dashboard 能同时看到：
+     * - `worker:{N}`
+     * - `task_worker:{N}`
+     *
+     * @param Server $server 当前 server 实例。
+     * @param int $workerId 当前 worker id（0-based，包含 task worker）。
+     * @return void
+     */
+    protected function registerWorkerMemoryMonitor(Server $server, int $workerId): void {
+        $serverWorkerNum = (int)($server->setting['worker_num'] ?? 0);
+        $taskWorkerNum = (int)($server->setting['task_worker_num'] ?? 0);
+        $processName = null;
+        if ($workerId >= 0 && $workerId < $serverWorkerNum) {
+            $processName = "worker:" . ($workerId + 1);
+        } elseif ($workerId >= $serverWorkerNum && $workerId < ($serverWorkerNum + $taskWorkerNum)) {
+            $processName = "task_worker:" . (($workerId - $serverWorkerNum) + 1);
+        }
+        if ($processName === null) {
+            return;
+        }
+        $serverConfig = Config::server();
+        $workerMemoryLimit = max(1, (int)($serverConfig['worker_memory_limit'] ?? 256));
+        $autoRestart = (bool)($serverConfig['worker_memory_auto_restart'] ?? false);
+        MemoryMonitor::start($processName, 2000, $workerMemoryLimit, $autoRestart);
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
