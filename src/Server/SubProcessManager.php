@@ -2,20 +2,14 @@
 
 namespace Scf\Server;
 
-use Scf\Command\Color;
 use Scf\Core\App;
-use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\Key;
-use Scf\Core\Log;
 use Scf\Core\Table\Counter;
-use Scf\Core\Table\MemoryMonitorTable;
 use Scf\Core\Table\Runtime;
-use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
-use Scf\Root;
 use Scf\Server\SubProcess\ConsolePushProcess;
 use Scf\Server\SubProcess\CrontabManagerProcess;
 use Scf\Server\SubProcess\FileWatchProcess;
@@ -27,19 +21,12 @@ use Scf\Server\SubProcess\LogBackupProcess;
 use Scf\Server\SubProcess\MemoryUsageCountProcess;
 use Scf\Server\SubProcess\RedisQueueProcess;
 use Scf\Server\Struct\Node;
-use Scf\Server\Task\CrontabManager;
-use Scf\Server\Task\RQueue;
-use Scf\Server\Gateway\ConsoleRelay;
-use Scf\Util\Dir;
-use Scf\Util\MemoryMonitor;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client;
 use Swoole\Event;
 use Swoole\Process;
-use Swoole\Timer;
 use Swoole\WebSocket\Server;
 use Throwable;
-use function Co\run;
 
 class SubProcessManager {
     protected const PROCESS_EXIT_GRACE_SECONDS = 8;
@@ -109,7 +96,9 @@ class SubProcessManager {
         if ($this->processEnabled('GatewayHealthMonitor') && is_callable($this->gatewayHealthTickHandler)) {
             $this->processList['GatewayHealthMonitor'] = $this->createGatewayHealthMonitorProcess();
         }
-        //内存使用情况统计
+        // 控制面内存补采子进程（主要补齐 gateway 子进程 rss/pss/os_actual）。
+        // upstream worker 的内存轮换主链路已走 gateway->upstream IPC 平滑 stop，
+        // 不依赖 MemoryUsageCount 直接发信号。
         if ($this->processEnabled('MemoryUsageCount')) {
             $this->processList['MemoryUsageCount'] = $this->createMemoryUsageCountProcess();
         }

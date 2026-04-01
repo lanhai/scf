@@ -8,6 +8,7 @@ use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
+use Scf\Core\InflightCounter;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Router;
@@ -28,8 +29,29 @@ class WorkerListener extends Listener {
                 Process::kill($server->worker_pid, SIGKILL);
             }
         });
-        // gateway-only 模式下 worker 行会在 WorkerStart 注册，随后由
-        // CgiListener + MemoryUsageCount 协同维护 usage 与 OS 实际占用。
+        // PID 复用场景下，上一代进程可能遗留同 PID 的 inflight 子计数。
+        // worker 启动时先按当前 PID 做一次回补，确保新进程从干净状态开始统计。
+        $this->cleanupInflightResidueByPid((int)getmypid(), (int)$workerId, 'worker_start');
+        if ((int)$workerId === 0) {
+            // worker0 启动时兜底扫描已退出 PID 的残留 inflight，覆盖极端退出场景
+            // 未触发 workerExit/workerError 回调的链路，避免脏统计长期悬挂。
+            $released = InflightCounter::cleanupExitedProcessInflight();
+            $total = (int)($released['total'] ?? 0);
+            if ($total > 0) {
+                Console::warning(
+                    "【Worker】启动期清理已退出进程 inflight 残留: pids=" . (int)($released['pids'] ?? 0)
+                    . ", mysql=" . (int)($released['mysql'] ?? 0)
+                    . ", redis=" . (int)($released['redis'] ?? 0)
+                    . ", outbound_http=" . (int)($released['outbound_http'] ?? 0)
+                    . ", total={$total}",
+                    false
+                );
+            }
+        }
+        // upstream 业务 worker/task worker 会在这里注册 MemoryMonitorTable 行。
+        // usage/real/peak 由 CgiListener/TaskListener 在请求(任务)收尾时刷新；
+        // OS 视角 rss/pss/os_actual 由 gateway 汇总阶段按 pid 现采，不再依赖
+        // MemoryUsageCountProcess 作为 upstream worker 的主统计链路。
         // 这里继续保留 worker 级致命错误记录能力。
         register_shutdown_function(function () use ($workerId) {
             $error = error_get_last();
@@ -121,10 +143,54 @@ INFO;
     }
 
     protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
+        $this->cleanupInflightResidueByPid($worker_pid, $worker_id, 'worker_error');
         Timer::after(3000, function () use ($server, $worker_id) {
             if (!Process::kill($server->master_pid, 0)) {
                 $server->stop($worker_id);
             }
         });
+    }
+
+    /**
+     * worker 退出时回补该进程遗留的 inflight 计数。
+     *
+     * 正常路径下 finally 会把 inflight 归零；若 worker 在 I/O 中途退出，
+     * begin 后未执行到 finally，会遗留“脏在途”。这里在退出钩子按 pid
+     * 执行一次回补，避免全局 inflight 长期悬挂。
+     *
+     * @param Server $server 当前 server。
+     * @param int $workerId 退出 worker id。
+     * @return void
+     */
+    protected function onWorkerExit(Server $server, int $workerId): void {
+        $pid = (int)($server->worker_pid ?? getmypid());
+        $this->cleanupInflightResidueByPid($pid, $workerId, 'worker_exit');
+    }
+
+    /**
+     * 按 PID 清理 inflight 残留并输出诊断日志。
+     *
+     * @param int $pid 目标进程 PID。
+     * @param int $workerId worker id。
+     * @param string $phase 调用阶段（worker_exit/worker_error）。
+     * @return void
+     */
+    protected function cleanupInflightResidueByPid(int $pid, int $workerId, string $phase): void {
+        if ($pid <= 0) {
+            return;
+        }
+        $released = InflightCounter::cleanupProcessInflightByPid($pid);
+        $total = (int)($released['total'] ?? 0);
+        if ($total <= 0) {
+            return;
+        }
+        Console::warning(
+            "【Worker】检测到 inflight 残留并已回补: phase={$phase}, worker_id={$workerId}, pid={$pid}"
+            . ", mysql=" . (int)($released['mysql'] ?? 0)
+            . ", redis=" . (int)($released['redis'] ?? 0)
+            . ", outbound_http=" . (int)($released['outbound_http'] ?? 0)
+            . ", total={$total}",
+            false
+        );
     }
 }

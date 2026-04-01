@@ -15,7 +15,10 @@ use Throwable;
  * MemoryUsageCount 子进程运行逻辑。
  *
  * 责任边界：
- * - 周期采样各进程内存并按策略触发 worker 回收。
+ * - 周期采样 gateway 控制面子进程内存，并补齐 rss/pss/os_actual。
+ * - 历史兼容地保留 worker:* 超限 SIGTERM 分支；但在当前 gateway-only 架构中，
+ *   upstream worker 轮换主链路已切到 `gateway -> upstream.restart_worker -> server->stop`，
+ *   因此该分支通常不会成为 upstream worker 的主治理入口。
  */
 class MemoryUsageCountProcess extends AbstractRuntimeProcess {
     /**
@@ -69,6 +72,9 @@ class MemoryUsageCountProcess extends AbstractRuntimeProcess {
                                 $processInfo['updated'] = time();
 
                                 $autoRestart = $processInfo['auto_restart'] ?? STATUS_OFF;
+                                // 兼容旧分支：仅当本进程表里出现 worker:* 行时才会触发。
+                                // 当前架构下 upstream worker 的主内存轮换并不依赖这里，
+                                // 而是由 gateway 在汇总阶段判定后经 IPC 请求 upstream 平滑 stop。
                                 if (
                                     $autoRestart == STATUS_ON
                                     && PHP_OS_FAMILY !== 'Darwin'

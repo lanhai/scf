@@ -293,13 +293,13 @@ class Crontab implements CommandInterface {
      * 让脚本中的 `$this->log()`、运行元数据和异常处理路径保持一致。
      *
      * @param string $identifier 用户传入的脚本标识
-     * @return string
+     * @return string|null
      */
-    protected function runTask(string $identifier): string {
+    protected function runTask(string $identifier): ?string {
         // Linux crontab 场景下优先确认业务端口确实在线，避免因为残留 pid 文件
         // 或手工停服导致离线节点仍继续跑一次性任务。
         if (!$this->isApplicationOnline()) {
-            return Color::warning(
+            return Color::yellow(
                 '【Crontab】应用未在线，已跳过本次任务: app=' . APP_DIR_NAME
                 . ', role=' . SERVER_ROLE
                 . ', port=' . $this->resolveExpectedPort()
@@ -327,7 +327,9 @@ class Crontab implements CommandInterface {
         try {
             $this->executeTaskInCoroutine($taskInstance);
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, true, '任务执行完成');
-            return Color::success('【Crontab】任务执行完成: namespace=' . $task['namespace']);
+            // Linux 系统 cron 频率高，成功态默认静默，避免每次执行都刷屏；
+            // 失败态仍保留显式输出，便于在 inst.log / cron 输出链路中快速定位异常。
+            return null;
         } catch (Throwable $throwable) {
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, false, $throwable->getMessage());
             return Color::danger('【Crontab】任务执行失败: ' . $throwable->getMessage());

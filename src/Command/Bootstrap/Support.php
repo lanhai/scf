@@ -39,8 +39,9 @@ function scf_stderr(string $message): void {
 /**
  * 输出 bootstrap 日志。
  *
- * 仅对 `【Boot】` 前缀日志补齐统一时间戳，保持与运行时 Console 日志同一视觉格式；
- * 其余文本（例如业务命令原始输出）保持原样，避免误改命令返回内容。
+ * 对 `【Boot】` / `【Crontab】` 前缀日志补齐统一时间戳，保持与运行时
+ * Console 日志同一视觉格式；其余文本（例如业务命令原始输出）保持原样，
+ * 避免误改命令返回内容。
  *
  * @param resource $stream
  * @param string $message
@@ -49,7 +50,8 @@ function scf_stderr(string $message): void {
 function scf_stream_write($stream, string $message): void {
     $lines = preg_split('/\r\n|\r|\n/', $message) ?: [''];
     foreach ($lines as $line) {
-        if (str_starts_with($line, '【Boot】')) {
+        $plainLine = preg_replace('/\x1b\[[0-9;]*m/', '', $line) ?? $line;
+        if (str_starts_with($plainLine, '【Boot】') || str_starts_with($plainLine, '【Crontab】')) {
             $line = scf_boot_log_prefix() . ' ' . $line;
         }
         fwrite($stream, $line . PHP_EOL);
