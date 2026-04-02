@@ -25,6 +25,10 @@ class Node extends Struct {
      */
     public string $ip = '';
     /**
+     * @var string 运行环境
+     */
+    public string $env = 'production';
+    /**
      * @var int 端口号
      */
     public int $port;

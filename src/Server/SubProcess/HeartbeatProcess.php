@@ -63,6 +63,7 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                 $node->id = APP_NODE_ID;
                 $node->name = APP_DIR_NAME;
                 $node->ip = SERVER_HOST;
+                $node->env = SERVER_RUN_ENV ?: 'production';
                 $node->fingerprint = APP_FINGERPRINT;
                 $node->port = Runtime::instance()->httpPort();
                 $node->socketPort = Runtime::instance()->dashboardPort() ?: Runtime::instance()->httpPort();
@@ -170,6 +171,7 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
      */
     protected function buildAndCacheNodeStatusPayload(Node $node): array {
         $node->role = SERVER_ROLE;
+        $node->env = SERVER_RUN_ENV ?: 'production';
         $node->app_version = App::version() ?: (App::info()?->toArray()['version'] ?? App::profile()->version);
         $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
@@ -244,17 +246,88 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
             case 'linux_crontab_sync':
                 try {
                     $result = LinuxCrontabManager::applyReplicationPayload((array)($params['config'] ?? []));
-                    Console::success("【LinuxCrontab】已同步本地排程配置: items=" . (int)($result['item_count'] ?? 0), false);
-                    $this->reportLinuxCrontabSyncState($socket, 'success', [
-                        'message' => "【" . SERVER_HOST . "】Linux 排程已同步: items=" . (int)($result['item_count'] ?? 0),
+                    $sync = (array)($result['sync'] ?? []);
+                    $itemCount = (int)($result['item_count'] ?? 0);
+                    $managedLineCount = (int)($sync['managed_line_count'] ?? 0);
+                    $enabledCount = (int)($sync['enabled_count'] ?? 0);
+                    $applicableEnabledCount = (int)($sync['applicable_enabled_count'] ?? 0);
+                    $scopeSkippedCount = (int)($sync['scope_skipped_count'] ?? 0);
+                    $expressionSkippedCount = (int)($sync['expression_skipped_count'] ?? 0);
+                    $currentEnv = trim((string)($sync['current_env'] ?? ''));
+                    $currentRole = trim((string)($sync['current_role'] ?? ''));
+                    $skipped = (bool)($sync['skipped'] ?? false);
+                    $reason = trim((string)($sync['reason'] ?? ''));
+                    $noManagedLines = !$skipped && $enabledCount > 0 && $managedLineCount === 0;
+                    $state = 'success';
+                    $error = '';
+                    if ($skipped) {
+                        $state = 'failed';
+                        $error = $reason !== '' ? $reason : 'sync_skipped';
+                    } elseif ($noManagedLines) {
+                        $state = 'failed';
+                        if ($scopeSkippedCount > 0) {
+                            $error = 'scope_mismatch';
+                        } elseif ($expressionSkippedCount > 0) {
+                            $error = 'empty_schedule_expression';
+                        } else {
+                            $error = 'managed_lines_empty';
+                        }
+                    }
+
+                    $message = "【" . SERVER_HOST . "】Linux 排程同步结果: items={$itemCount}, enabled={$enabledCount}, applicable={$applicableEnabledCount}, managed_lines={$managedLineCount}";
+                    if ($scopeSkippedCount > 0) {
+                        $message .= ", scope_skipped={$scopeSkippedCount}";
+                    }
+                    if ($expressionSkippedCount > 0) {
+                        $message .= ", expression_skipped={$expressionSkippedCount}";
+                    }
+                    if ($currentEnv !== '') {
+                        $message .= ", current_env={$currentEnv}";
+                    }
+                    if ($currentRole !== '') {
+                        $message .= ", current_role={$currentRole}";
+                    }
+                    if ($skipped) {
+                        $message .= $reason !== '' ? ", skipped={$reason}" : ', skipped=1';
+                    }
+                    if ($noManagedLines) {
+                        $message .= ", failed={$error}";
+                    }
+
+                    if ($state === 'failed') {
+                        Console::warning("【LinuxCrontab】同步本地排程失败: {$message}", false);
+                    } else {
+                        Console::success("【LinuxCrontab】已同步本地排程配置: {$message}", false);
+                    }
+
+                    $this->reportLinuxCrontabSyncState($socket, $state, [
+                        'message' => $message,
+                        'error' => $error,
                         'item_count' => (int)($result['item_count'] ?? 0),
-                        'sync' => (array)($result['sync'] ?? []),
+                        'sync' => $sync,
                     ], $node);
                 } catch (Throwable $throwable) {
                     Console::warning("【LinuxCrontab】同步排程配置失败:" . $throwable->getMessage(), false);
                     $this->reportLinuxCrontabSyncState($socket, 'failed', [
                         'message' => "【" . SERVER_HOST . "】Linux 排程同步失败:" . $throwable->getMessage(),
                         'error' => $throwable->getMessage(),
+                    ], $node);
+                }
+                return true;
+            case 'linux_crontab_installed_snapshot':
+                $requestId = trim((string)($params['request_id'] ?? ''));
+                try {
+                    $snapshot = (new LinuxCrontabManager())->installedSnapshot();
+                    $this->reportLinuxCrontabInstalledState($socket, 'success', [
+                        'message' => "【" . SERVER_HOST . "】Linux 排程本机快照已回报",
+                        'snapshot' => $snapshot,
+                        'request_id' => $requestId,
+                    ], $node);
+                } catch (Throwable $throwable) {
+                    $this->reportLinuxCrontabInstalledState($socket, 'failed', [
+                        'message' => "【" . SERVER_HOST . "】Linux 排程本机快照获取失败:" . $throwable->getMessage(),
+                        'error' => $throwable->getMessage(),
+                        'request_id' => $requestId,
                     ], $node);
                 }
                 return true;
@@ -404,6 +477,45 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                     'status' => $status,
                 ],
             ]));
+        } catch (Throwable) {
+        }
+    }
+
+    /**
+     * 将 Linux 排程“本机已安装快照”即时回报给 master gateway。
+     *
+     * @param object $socket 当前 slave -> master 的 websocket 连接
+     * @param string $state success / failed
+     * @param array<string, mixed> $payload 额外状态字段
+     * @param Node $node 当前节点运行态对象
+     * @return void
+     */
+    protected function reportLinuxCrontabInstalledState(object $socket, string $state, array $payload, Node $node): void {
+        $status = $this->lastNodeStatusPayload;
+        if (!$status) {
+            $status = $this->buildAndCacheNodeStatusPayload($node);
+        }
+        $installedState = [
+            'state' => $state,
+            'message' => (string)($payload['message'] ?? ''),
+            'error' => (string)($payload['error'] ?? ''),
+            'updated_at' => time(),
+            'snapshot' => (array)($payload['snapshot'] ?? []),
+            'request_id' => trim((string)($payload['request_id'] ?? '')),
+        ];
+        $status['linux_crontab_installed'] = $installedState;
+        try {
+            $pushed = $socket->push(JsonHelper::toJson([
+                'event' => 'linux_crontab_installed_state',
+                'data' => [
+                    'host' => APP_NODE_ID,
+                    ...$installedState,
+                    'status' => $status,
+                ],
+            ]));
+            if ($pushed === false) {
+                Console::warning('【LinuxCrontab】本机排程快照回报失败: socket disconnected', false);
+            }
         } catch (Throwable) {
         }
     }

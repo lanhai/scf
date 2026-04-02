@@ -53,18 +53,29 @@ trait GatewayControlCommandTrait {
             ];
         }
 
-        // slave 节点只需要维护属于自己角色的 Linux 排程定义。
-        // 这样既能减少不必要的配置噪音，也能降低本机联调时 master/slave
-        // 共用同一系统用户 crontab 带来的互相覆盖风险。
-        $payload = (new LinuxCrontabManager())->replicationPayload(NODE_ROLE_SLAVE);
-        $accepted = $this->sendCommandToAllNodeClients('linux_crontab_sync', [
-            'config' => $payload,
-        ]);
+        $manager = new LinuxCrontabManager();
+        $accepted = 0;
+        $targetCount = count($targets);
 
-        Console::info("【LinuxCrontab】已广播排程配置到 slave 节点: accepted={$accepted}, targets=" . count($targets), false);
+        foreach ($targets as $host) {
+            $nodeStatus = (array)(ServerNodeStatusTable::instance()->get($host) ?: []);
+            $targetEnv = trim((string)($nodeStatus['env'] ?? ''));
+
+            // 按节点 env 定向下发配置，避免“收到命令但因 env 不匹配导致 managed_lines=0”。
+            // 若当前节点尚未上报 env（兼容旧版本），回退为“下发全部 slave 配置”。
+            $payload = $manager->replicationPayload(NODE_ROLE_SLAVE, $targetEnv !== '' ? $targetEnv : null);
+            $result = $this->sendCommandToNodeClient('linux_crontab_sync', (string)$host, [
+                'config' => $payload,
+            ]);
+            if (!$result->hasError()) {
+                $accepted++;
+            }
+        }
+
+        Console::info("【LinuxCrontab】已广播排程配置到 slave 节点: accepted={$accepted}, targets={$targetCount}", false);
 
         return [
-            'target_count' => count($targets),
+            'target_count' => $targetCount,
             'accepted_count' => $accepted,
         ];
     }

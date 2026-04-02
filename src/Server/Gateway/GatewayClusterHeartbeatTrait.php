@@ -92,6 +92,9 @@ trait GatewayClusterHeartbeatTrait {
                     if (!isset($status['linux_crontab_sync']) && isset($previousStatus['linux_crontab_sync'])) {
                         $status['linux_crontab_sync'] = $previousStatus['linux_crontab_sync'];
                     }
+                    if (!isset($status['linux_crontab_installed']) && isset($previousStatus['linux_crontab_installed'])) {
+                        $status['linux_crontab_installed'] = $previousStatus['linux_crontab_installed'];
+                    }
 
                     // 兼容旧版 slave 心跳还没稳定带 env 的情况，避免节点弹窗里环境列反复掉成空值。
                     if (empty($status['env']) && !empty($previousStatus['env'])) {
@@ -122,6 +125,10 @@ trait GatewayClusterHeartbeatTrait {
             case 'linux_crontab_sync_state':
                 $payload = (array)($data['data'] ?? []);
                 $this->acceptLinuxCrontabSyncState($payload);
+                break;
+            case 'linux_crontab_installed_state':
+                $payload = (array)($data['data'] ?? []);
+                $this->acceptLinuxCrontabInstalledState($payload);
                 break;
             case 'console_log':
                 $this->acceptConsolePayload((array)($data['data'] ?? []));
@@ -172,6 +179,52 @@ trait GatewayClusterHeartbeatTrait {
         // 直接拼接较长 node_id 会触发 "key is too long" 并导致写入失败。
         // 这里统一用定长 hash，保证 Runtime key 可写且跨进程读写一致。
         return 'linux_crontab_sync_state:' . md5($host);
+    }
+
+    /**
+     * 接收并落盘 slave 回报的“本机系统 crontab 快照”。
+     *
+     * @param array<string, mixed> $payload
+     * @return void
+     */
+    protected function acceptLinuxCrontabInstalledState(array $payload): void {
+        $host = (string)($payload['host'] ?? '');
+        if ($host === '') {
+            return;
+        }
+
+        $installedState = [
+            'state' => (string)($payload['state'] ?? ''),
+            'message' => (string)($payload['message'] ?? ''),
+            'error' => (string)($payload['error'] ?? ''),
+            'updated_at' => (int)($payload['updated_at'] ?? time()),
+            'snapshot' => (array)($payload['snapshot'] ?? []),
+            'request_id' => trim((string)($payload['request_id'] ?? '')),
+        ];
+        Runtime::instance()->set($this->nodeLinuxCrontabInstalledStateKey($host), $installedState);
+
+        $status = (array)($payload['status'] ?? []);
+        if (!$status) {
+            $status = (array)(ServerNodeStatusTable::instance()->get($host) ?: []);
+        }
+        if ($status) {
+            $status['linux_crontab_installed'] = $installedState;
+            ServerNodeStatusTable::instance()->set($host, $status);
+        }
+
+        if ($installedState['message'] !== '') {
+            if ($installedState['state'] === 'failed') {
+                Console::warning($installedState['message'], false);
+            } else {
+                Console::info($installedState['message'], false);
+            }
+        }
+
+        $this->pushDashboardStatus();
+    }
+
+    protected function nodeLinuxCrontabInstalledStateKey(string $host): string {
+        return 'linux_crontab_installed_state:' . md5($host);
     }
 
     /**

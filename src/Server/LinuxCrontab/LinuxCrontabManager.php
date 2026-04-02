@@ -395,6 +395,14 @@ class LinuxCrontabManager {
         $config = $this->readConfig();
         $items = $config['items'] ?? [];
         $entry = $this->normalizeEntry($payload, true);
+
+        // master 编辑 slave 类型排程时，禁止把“写入本机排程”状态打开。
+        // slave 任务是否下发到节点，由节点管理里的“同步”操作控制。
+        if (SERVER_ROLE === NODE_ROLE_MASTER && (string)($entry['role'] ?? '') === NODE_ROLE_SLAVE) {
+            $entry['enabled'] = 0;
+            $syncCurrentNode = false;
+        }
+
         $matched = false;
         $previousEntry = null;
 
@@ -430,18 +438,24 @@ class LinuxCrontabManager {
      * 该数据用于 master 通过 socket 下发到 slave，本身只描述排程定义，
      * 不依赖当前节点的系统 crontab 安装状态。
      *
+     * @param string|null $role 节点角色过滤；为空时不过滤角色
+     * @param string|null $env 运行环境过滤；为空时不过滤环境
      * @return array<string, mixed>
      */
-    public function replicationPayload(?string $role = null): array {
+    public function replicationPayload(?string $role = null, ?string $env = null): array {
         $config = $this->readConfig();
-        if ($role === null || $role === '') {
+        if (($role === null || $role === '') && ($env === null || trim($env) === '')) {
             return $config;
         }
 
+        $normalizedEnv = $env === null ? '' : $this->normalizeComparableEnv($env);
         $items = [];
         foreach (($config['items'] ?? []) as $item) {
             $entry = $this->normalizeEntry((array)$item, false);
-            if ((string)($entry['role'] ?? '') !== $role) {
+            if ($role !== null && $role !== '' && (string)($entry['role'] ?? '') !== $role) {
+                continue;
+            }
+            if ($normalizedEnv !== '' && $this->normalizeComparableEnv((string)($entry['env'] ?? '')) !== $normalizedEnv) {
                 continue;
             }
             $items[] = $entry;
@@ -705,18 +719,52 @@ class LinuxCrontabManager {
             return [
                 'managed_line_count' => 0,
                 'enabled_count' => $enabledCount,
+                'applicable_enabled_count' => 0,
+                'scope_skipped_count' => 0,
+                'expression_skipped_count' => 0,
+                'scope_skipped' => [],
+                'expression_skipped' => [],
+                'current_env' => $this->scopeEnv(),
+                'current_role' => SERVER_ROLE,
                 'skipped' => true,
                 'reason' => 'system_crontab_unavailable',
             ];
         }
         $managedLines = [];
+        $applicableEnabledCount = 0;
+        $scopeSkipped = [];
+        $expressionSkipped = [];
 
         foreach (($config['items'] ?? []) as $item) {
             $normalized = $this->normalizeEntry($item, false);
-            if ((int)($normalized['enabled'] ?? 0) !== 1 || !$this->shouldInstallOnCurrentNode($normalized)) {
+            if ((int)($normalized['enabled'] ?? 0) !== 1) {
                 continue;
             }
-            foreach ($this->buildCronLines($normalized) as $line) {
+
+            // 记录“启用但不作用于当前节点”的条目，便于远端同步时快速定位 env/role 不匹配。
+            if (!$this->shouldInstallOnCurrentNode($normalized)) {
+                $scopeSkipped[] = [
+                    'id' => (string)($normalized['id'] ?? ''),
+                    'name' => (string)($normalized['name'] ?? ''),
+                    'env' => (string)($normalized['env'] ?? ''),
+                    'role' => (string)($normalized['role'] ?? ''),
+                ];
+                continue;
+            }
+
+            $applicableEnabledCount++;
+            $entryLines = $this->buildCronLines($normalized);
+            if (!$entryLines) {
+                // 启用且命中当前节点，但表达式为空时说明排程定义本身异常（常见于老配置残留）。
+                $expressionSkipped[] = [
+                    'id' => (string)($normalized['id'] ?? ''),
+                    'name' => (string)($normalized['name'] ?? ''),
+                    'schedule_type' => (string)($normalized['schedule_type'] ?? ''),
+                ];
+                continue;
+            }
+
+            foreach ($entryLines as $line) {
                 $managedLines[] = $line;
             }
         }
@@ -753,6 +801,13 @@ class LinuxCrontabManager {
         return [
             'managed_line_count' => count($managedLines),
             'enabled_count' => $enabledCount,
+            'applicable_enabled_count' => $applicableEnabledCount,
+            'scope_skipped_count' => count($scopeSkipped),
+            'expression_skipped_count' => count($expressionSkipped),
+            'scope_skipped' => array_slice($scopeSkipped, 0, 10),
+            'expression_skipped' => array_slice($expressionSkipped, 0, 10),
+            'current_env' => $this->scopeEnv(),
+            'current_role' => SERVER_ROLE,
         ];
     }
 
@@ -1435,9 +1490,31 @@ class LinuxCrontabManager {
             return false;
         }
 
-        $currentEnv = strtolower((string)(SERVER_RUN_ENV ?: 'production'));
-        $entryEnv = strtolower(trim((string)($entry['env'] ?? $currentEnv)) ?: $currentEnv);
+        $currentEnv = $this->normalizeComparableEnv((string)(SERVER_RUN_ENV ?: 'production'));
+        $entryEnv = $this->normalizeComparableEnv((string)($entry['env'] ?? $currentEnv));
         return $entryEnv === $currentEnv;
+    }
+
+    /**
+     * 归一化用于“是否命中当前节点”的环境名。
+     *
+     * 同一环境在不同部署脚本里可能写成 `prod/production`、`develop/dev`。
+     * 这里仅用于比较，不影响写入命令里的原始 env 值，避免误改用户配置。
+     *
+     * @param string $env 原始环境名
+     * @return string
+     */
+    protected function normalizeComparableEnv(string $env): string {
+        $normalized = strtolower(trim($env));
+        if ($normalized === '') {
+            return 'production';
+        }
+
+        return match ($normalized) {
+            'prod' => 'production',
+            'develop', 'development' => 'dev',
+            default => $normalized,
+        };
     }
 
     /**

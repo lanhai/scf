@@ -120,6 +120,7 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
             try {
                 $socket = Manager::instance()->getMasterSocketConnection();
                 $this->call('update_gateway_cluster_trace_snapshot', 'slave.connect.ready');
+                $lastKeepaliveAt = 0;
                 while (true) {
                     $loopStartedAt = microtime(true);
                     $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.start');
@@ -135,6 +136,22 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
                     }
                     $this->call('touch_managed_heartbeat', Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
                     $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.heartbeat_touched');
+                    if ((time() - $lastKeepaliveAt) >= 15) {
+                        try {
+                            $socket->push('::ping');
+                            $lastKeepaliveAt = time();
+                        } catch (Throwable $throwable) {
+                            $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.keepalive.failed', [
+                                'error' => $throwable->getMessage(),
+                            ]);
+                            try {
+                                $socket->close();
+                            } catch (Throwable) {
+                            }
+                            Console::warning('【GatewayCluster】keepalive 发送失败,准备重连:' . $throwable->getMessage(), false);
+                            break;
+                        }
+                    }
                     $processRecvStartedAt = microtime(true);
                     $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.process_recv.start', ['timeout' => 0.1]);
                     $message = $processSocket->recv(timeout: 0.1);
