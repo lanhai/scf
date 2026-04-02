@@ -344,6 +344,12 @@ class GatewayServer {
             case 'gateway_control_shutdown':
                 $this->shutdownGateway((bool)($payload['preserve_managed_upstreams'] ?? false));
                 break;
+            case 'gateway_control_reload':
+                $this->restartGatewayBusinessPlane();
+                break;
+            case 'gateway_control_restart':
+                $this->shutdownGateway((bool)($payload['preserve_managed_upstreams'] ?? false));
+                break;
             default:
                 break;
         }

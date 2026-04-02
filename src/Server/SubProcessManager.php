@@ -22,7 +22,6 @@ use Scf\Server\SubProcess\MemoryUsageCountProcess;
 use Scf\Server\SubProcess\RedisQueueProcess;
 use Scf\Server\Struct\Node;
 use Swoole\Coroutine;
-use Swoole\Coroutine\Http\Client;
 use Swoole\Event;
 use Swoole\Process;
 use Swoole\WebSocket\Server;
@@ -129,8 +128,8 @@ class SubProcessManager {
     /**
      * 当前子进程管理器只允许在 gateway 控制面运行。
      *
-     * HTTP 直连模式已下线，继续在非 gateway 场景构造会把控制命令链路
-     * 落到不存在的内部端口，导致 reload/restart 行为漂移。
+     * HTTP 直连模式已下线，继续在非 gateway 场景构造会让控制命令与
+     * Runtime 队列回执链路失配，导致 reload/restart/upgrade 行为漂移。
      *
      * @return void
      */
@@ -181,8 +180,7 @@ class SubProcessManager {
             'trigger_shutdown' => fn() => $this->triggerShutdown(),
             'trigger_restart' => fn() => $this->triggerRestart(),
             'trigger_reload' => fn() => $this->triggerReload(),
-            'dispatch_gateway_internal_command' => fn(string $command, array $params = [], float $timeoutSeconds = 1.0): bool => $this->dispatchGatewayInternalCommand($command, $params, $timeoutSeconds),
-            'request_gateway_internal_command' => fn(string $command, array $params = [], float $timeoutSeconds = 1.0): array => $this->requestGatewayInternalCommand($command, $params, $timeoutSeconds),
+            'request_gateway_business_command' => fn(string $command, array $params = [], int $timeoutSeconds = 30): array => $this->requestGatewayBusinessCommand($command, $params, $timeoutSeconds),
             'restart_managed_processes' => fn(array $names = []): array => $this->restartManagedProcesses($names),
             'stop_managed_processes' => fn(array $names = []): array => $this->stopManagedProcesses($names),
             'restart_all_managed_processes' => fn(): array => $this->restartAllManagedProcesses(),
@@ -1050,7 +1048,9 @@ class SubProcessManager {
     }
 
     protected function triggerShutdown(): void {
-        if ($this->dispatchGatewayInternalCommand('shutdown')) {
+        if ($this->sendGatewayPipeMessage('gateway_control_shutdown', [
+            'preserve_managed_upstreams' => false,
+        ])) {
             return;
         }
         if (is_callable($this->shutdownHandler)) {
@@ -1061,7 +1061,7 @@ class SubProcessManager {
     }
 
     protected function triggerReload(): void {
-        if ($this->dispatchGatewayInternalCommand('reload')) {
+        if ($this->sendGatewayPipeMessage('gateway_control_reload')) {
             return;
         }
         if (is_callable($this->reloadHandler)) {
@@ -1072,7 +1072,9 @@ class SubProcessManager {
     }
 
     protected function triggerRestart(): void {
-        if ($this->dispatchGatewayInternalCommand('restart')) {
+        if ($this->sendGatewayPipeMessage('gateway_control_restart', [
+            'preserve_managed_upstreams' => false,
+        ])) {
             return;
         }
         if (is_callable($this->restartHandler)) {
@@ -1109,6 +1111,129 @@ class SubProcessManager {
         // 结果 key 必须和 Gateway worker 侧保持同一套定长编码，否则高精度 request id
         // 在写入 Runtime(Table) 时会超过 key 长度限制，导致结果实际没有写回成功。
         return 'gateway_business_result:' . md5($requestId);
+    }
+
+    /**
+     * 通过 Runtime 队列向 GatewayBusinessCoordinator 投递命令并等待结果。
+     *
+     * 该入口供 heartbeat/cluster 等子进程使用，避免再绕经本机 HTTP 控制面。
+     * 命令写入 `RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE`，结果从
+     * `gateway_business_result:*` 回收，和 dashboard worker 侧保持同一语义。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return array<string, mixed>
+     */
+    protected function requestGatewayBusinessCommand(string $command, array $params = [], int $timeoutSeconds = 30): array {
+        $command = trim($command);
+        if ($command === '') {
+            return [
+                'ok' => false,
+                'message' => 'Gateway 业务编排命令不能为空',
+                'data' => [],
+                'updated_at' => time(),
+            ];
+        }
+        if (!$this->hasProcess('GatewayBusinessCoordinator')) {
+            return [
+                'ok' => false,
+                'message' => 'Gateway 业务编排子进程未启用',
+                'data' => [],
+                'updated_at' => time(),
+            ];
+        }
+
+        $requestId = uniqid('gateway_business_', true);
+        $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+        Runtime::instance()->delete($resultKey);
+        $params['request_id'] = $requestId;
+        $token = $this->enqueueGatewayBusinessRuntimeCommand($command, $params);
+        if ($token === false) {
+            Runtime::instance()->delete($resultKey);
+            return [
+                'ok' => false,
+                'message' => 'Gateway 业务编排命令入队失败',
+                'data' => [],
+                'updated_at' => time(),
+            ];
+        }
+
+        return $this->waitGatewayBusinessRuntimeResult($requestId, $timeoutSeconds);
+    }
+
+    /**
+     * 将业务编排命令写入 Runtime 队列，等待 GatewayBusinessCoordinator 拉取消费。
+     *
+     * 队列是低频控制面通道，保留最近 32 条足够覆盖升级/重载场景，同时限制
+     * Runtime 表值体积，避免命令暴涨时影响其它运行态键写入。
+     *
+     * @param string $command 命令名
+     * @param array<string, mixed> $params 命令参数
+     * @return string|false 写入成功返回 token
+     */
+    protected function enqueueGatewayBusinessRuntimeCommand(string $command, array $params = []): string|false {
+        $token = uniqid('gateway_business_runtime_', true);
+        $queue = Runtime::instance()->get(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE);
+        $items = (is_array($queue) && is_array($queue['items'] ?? null)) ? (array)$queue['items'] : [];
+        $items[] = [
+            'token' => $token,
+            'command' => $command,
+            'params' => $params,
+            'queued_at' => time(),
+        ];
+        if (count($items) > 32) {
+            $items = array_slice($items, -32);
+        }
+        $written = Runtime::instance()->set(Key::RUNTIME_GATEWAY_BUSINESS_COMMAND_QUEUE, [
+            'items' => array_values($items),
+            'updated_at' => time(),
+        ]);
+        if (!$written) {
+            Console::error(
+                "【GatewayBusiness】命令入队失败: command={$command}, token={$token}, runtime_count="
+                . Runtime::instance()->count() . ", runtime_size=" . Runtime::instance()->size() . ", queued_items=" . count($items)
+            );
+            return false;
+        }
+        return $token;
+    }
+
+    /**
+     * 等待指定业务编排命令的 Runtime 结果回执。
+     *
+     * @param string $requestId 命令请求 id
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return array<string, mixed>
+     */
+    protected function waitGatewayBusinessRuntimeResult(string $requestId, int $timeoutSeconds = 30): array {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $resultKey = $this->gatewayBusinessCommandResultKey($requestId);
+        while (microtime(true) < $deadline) {
+            $payload = Runtime::instance()->get($resultKey);
+            if (is_array($payload) && array_key_exists('ok', $payload)) {
+                Runtime::instance()->delete($resultKey);
+                return [
+                    'ok' => (bool)($payload['ok'] ?? false),
+                    'message' => (string)($payload['message'] ?? (!empty($payload['ok']) ? 'success' : 'failed')),
+                    'data' => (array)($payload['data'] ?? []),
+                    'updated_at' => (int)($payload['updated_at'] ?? time()),
+                ];
+            }
+            if (Coroutine::getCid() > 0) {
+                Coroutine::sleep(0.1);
+            } else {
+                usleep(100000);
+            }
+        }
+
+        Runtime::instance()->delete($resultKey);
+        return [
+            'ok' => false,
+            'message' => 'Gateway 业务编排子进程执行超时',
+            'data' => [],
+            'updated_at' => time(),
+        ];
     }
 
     /**
@@ -1357,15 +1482,16 @@ class SubProcessManager {
      *
      * @param string $event 事件名
      * @param array<string, mixed> $data 事件数据
-     * @return void
+     * @return bool 是否成功投递到 worker pipe
      */
-    protected function sendGatewayPipeMessage(string $event, array $data = []): void {
+    protected function sendGatewayPipeMessage(string $event, array $data = []): bool {
         try {
-            $this->server->sendMessage(JsonHelper::toJson([
+            return (bool)$this->server->sendMessage(JsonHelper::toJson([
                 'event' => $event,
                 'data' => $data,
             ]), 0);
         } catch (Throwable) {
+            return false;
         }
     }
 
@@ -1391,197 +1517,6 @@ class SubProcessManager {
      */
     protected function createGatewayHealthMonitorProcess(): Process {
         return (new GatewayHealthMonitorProcess($this->subProcessRuntimeCallbacks()))->create();
-    }
-
-    /**
-     * 将控制命令回投给 gateway 控制面自身执行。
-     *
-     * SubProcessManager 作为 addProcess 托管进程后，FileWatcher/Heartbeat 等
-     * 触发的控制动作需要回到 gateway 的 HTTP 控制面处理，不能继续直接调用
-     * fork 过来的 GatewayServer 闭包。
-     *
-     * @param string $command
-     * @return bool
-     */
-    protected function dispatchGatewayInternalCommand(string $command, array $params = [], float $timeoutSeconds = 1.0): bool {
-        $response = $this->requestGatewayInternalCommand($command, $params, $timeoutSeconds);
-        return !empty($response['ok']);
-    }
-
-    /**
-     * 向 gateway 内部控制面发起一条带返回值的本机命令请求。
-     *
-     * cluster/heartbeat/filewatcher 等子进程不直接操作 worker 私有对象，
-     * 需要通过 `/_gateway/internal/command` 这条稳定入口把命令交还给 worker。
-     * 返回值统一规整成 `ok/message/data`，便于子进程继续做后续收口。
-     *
-     * @param string $command 命令名
-     * @param array<string, mixed> $params 命令参数
-     * @return array<string, mixed>
-     */
-    protected function requestGatewayInternalCommand(string $command, array $params = [], float $timeoutSeconds = 1.0): array {
-        $port = $this->gatewayInternalControlPort();
-        if ($port <= 0) {
-            return [
-                'ok' => false,
-                'message' => 'Gateway 内部控制端口不可用',
-                'data' => [],
-            ];
-        }
-        $payload = json_encode([
-            'command' => $command,
-            'params' => $params,
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if ($payload === false) {
-            return [
-                'ok' => false,
-                'message' => 'Gateway 内部命令编码失败',
-                'data' => [],
-            ];
-        }
-        $timeoutSeconds = max(0.1, $timeoutSeconds);
-        if (Coroutine::getCid() > 0) {
-            return $this->requestGatewayInternalCommandByCoroutine($port, $payload, $timeoutSeconds);
-        }
-        return $this->requestGatewayInternalCommandByStream($port, $payload, $timeoutSeconds);
-    }
-
-    /**
-     * 解析 gateway 内部控制命令端口。
-     *
-     * Gateway 已不再承接 HTTP 业务转发，因此内部控制命令始终走独立控制面端口。
-     * 这里与 GatewayServer::controlPort() 的计算规则保持一致。
-     *
-     * @return int
-     */
-    protected function gatewayInternalControlPort(): int {
-        $businessPort = (int)(Runtime::instance()->httpPort() ?: 0);
-        if ($businessPort <= 0) {
-            $businessPort = (int)($this->serverConfig['port'] ?? 0);
-        }
-        if ($businessPort <= 0) {
-            return 0;
-        }
-        $configPort = (int)($this->serverConfig['port'] ?? $businessPort);
-        $configuredControlPort = (int)($this->serverConfig['gateway_control_port'] ?? 0);
-        if ($configuredControlPort > 0) {
-            $offset = max(1, $configuredControlPort - $configPort);
-            return $businessPort + $offset;
-        }
-        return $businessPort + 1000;
-    }
-
-    /**
-     * 协程场景下通过 HTTP client 调用 gateway 内部控制面并读取返回值。
-     *
-     * @param int $port 内部控制端口
-     * @param string $payload JSON 请求体
-     * @return array<string, mixed>
-     */
-    protected function requestGatewayInternalCommandByCoroutine(int $port, string $payload, float $timeoutSeconds = 1.0): array {
-        $client = new Client('127.0.0.1', $port);
-        $client->setHeaders([
-            'Host' => '127.0.0.1:' . $port,
-            'Content-Type' => 'application/json',
-        ]);
-        $client->set(['timeout' => max(0.1, $timeoutSeconds)]);
-        $ok = $client->post('/_gateway/internal/command', $payload);
-        $statusCode = (int)$client->statusCode;
-        $body = (string)($client->body ?? '');
-        // appoint_update_remote 这类命令会同步等待业务编排结果，若传输层失败且 body 为空，
-        // 这里补齐错误信息，避免上游只能拿到“未知原因”。
-        if ($body === '' && !$ok) {
-            $errno = (int)($client->errCode ?? 0);
-            $errMsg = trim((string)($client->errMsg ?? ''));
-            $message = $errMsg !== ''
-                ? "Gateway 内部控制请求失败({$errno}):{$errMsg}"
-                : "Gateway 内部控制请求失败({$errno})";
-            $body = JsonHelper::toJson(['message' => $message]);
-        }
-        $client->close();
-        return $this->normalizeGatewayInternalCommandResponse($ok, $statusCode, $body);
-    }
-
-    /**
-     * 非协程场景下通过 stream socket 调用 gateway 内部控制面并读取返回值。
-     *
-     * @param int $port 内部控制端口
-     * @param string $payload JSON 请求体
-     * @return array<string, mixed>
-     */
-    protected function requestGatewayInternalCommandByStream(int $port, string $payload, float $timeoutSeconds = 1.0): array {
-        $timeoutSeconds = max(0.1, $timeoutSeconds);
-        $socket = @stream_socket_client(
-            "tcp://127.0.0.1:{$port}",
-            $errno,
-            $errstr,
-            $timeoutSeconds,
-            STREAM_CLIENT_CONNECT
-        );
-        if (!is_resource($socket)) {
-            return [
-                'ok' => false,
-                'message' => $errstr !== '' ? $errstr : 'Gateway 内部控制连接失败',
-                'data' => [],
-            ];
-        }
-        stream_set_timeout($socket, (int)max(1, ceil($timeoutSeconds)));
-        $request = "POST /_gateway/internal/command HTTP/1.1\r\n"
-            . "Host: 127.0.0.1:{$port}\r\n"
-            . "Content-Type: application/json\r\n"
-            . "Connection: close\r\n"
-            . "Content-Length: " . strlen($payload) . "\r\n\r\n"
-            . $payload;
-        fwrite($socket, $request);
-        $response = stream_get_contents($socket);
-        fclose($socket);
-        if (!is_string($response) || $response === '') {
-            return [
-                'ok' => false,
-                'message' => 'Gateway 内部控制响应为空',
-                'data' => [],
-            ];
-        }
-
-        $headerBody = explode("\r\n\r\n", $response, 2);
-        $header = (string)($headerBody[0] ?? '');
-        $body = (string)($headerBody[1] ?? '');
-        preg_match('/HTTP\\/\\d\\.\\d\\s+(\\d+)/', $header, $matches);
-        $statusCode = (int)($matches[1] ?? 0);
-        return $this->normalizeGatewayInternalCommandResponse($statusCode > 0, $statusCode, $body);
-    }
-
-    /**
-     * 统一解析 gateway 内部控制命令的 HTTP 返回体。
-     *
-     * 内部控制面返回的是简单 JSON，不同命令的消息字段结构并不完全一致。
-     * 这里统一折叠成 `ok/message/data`，让子进程调用方不需要关心具体 HTTP 细节。
-     *
-     * @param bool $transportOk HTTP 请求是否成功发出
-     * @param int $statusCode HTTP 状态码
-     * @param string $body 响应体
-     * @return array<string, mixed>
-     */
-    protected function normalizeGatewayInternalCommandResponse(bool $transportOk, int $statusCode, string $body): array {
-        $decoded = JsonHelper::recover($body);
-        $data = is_array($decoded) ? $decoded : [];
-        $message = (string)($data['message'] ?? '');
-        if ($message === '' && isset($data['error']) && is_string($data['error'])) {
-            $message = $data['error'];
-        }
-        if ($message === '' && isset($data['data']) && is_string($data['data'])) {
-            $message = $data['data'];
-        }
-        if ($message === '' && !$transportOk) {
-            $message = 'Gateway 内部控制请求失败';
-        }
-        return [
-            'ok' => $transportOk && $statusCode === 200,
-            'status' => $statusCode,
-            'message' => $message,
-            'data' => is_array($data['result'] ?? null) ? (array)$data['result'] : [],
-            'raw' => $data,
-        ];
     }
 
     public function shutdown(bool $gracefulBusiness = false): void {

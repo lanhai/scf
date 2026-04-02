@@ -325,7 +325,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
      *
      * @param string $type 升级类型
      * @param string $version 目标版本
-     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     * @return array{target_count:int, success_count:int, failed_nodes:array<int, array<string, mixed>>}
      */
     protected function rollingUpdateManagedUpstreams(string $type, string $version): array {
         $this->managedUpstreamRolling = true;
@@ -333,6 +333,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
             $basePlans = $this->activeManagedPlans();
             if (!$basePlans || !$this->upstreamSupervisor || !$this->launcher) {
                 return [
+                    'target_count' => 0,
                     'success_count' => 0,
                     'failed_nodes' => [],
                 ];
@@ -371,7 +372,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
      * @param string $operationLabel 日志里使用的中文动作名
      * @param string $activationReason nginx 切流同步原因
      * @param callable $metadataPatchBuilder 构建新 plan metadata 补丁
-     * @return array{success_count:int, failed_nodes:array<int, array<string, mixed>>}
+     * @return array{target_count:int, success_count:int, failed_nodes:array<int, array<string, mixed>>}
      */
     protected function executeManagedRollingOperation(
         array $basePlans,
@@ -381,6 +382,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
         string $activationReason,
         callable $metadataPatchBuilder
     ): array {
+        $targetCount = count($basePlans);
         $failedNodes = [];
         $successCount = 0;
         $previousActiveVersion = (string)($this->instanceManager->state()['active_version'] ?? ($basePlans[0]['version'] ?? ''));
@@ -438,6 +440,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 $this->removeManagedPlan($plan);
             }
             return [
+                'target_count' => $targetCount,
                 'success_count' => $successCount,
                 'failed_nodes' => $failedNodes,
             ];
@@ -457,6 +460,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
             );
             $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, $stage);
             return [
+                'target_count' => $targetCount,
                 'success_count' => 0,
                 'failed_nodes' => [[
                     'host' => $generationVersion,
@@ -471,6 +475,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
             $this->logOldInstanceLifecycle("【Gateway】{$operationLabel}切换校验失败，回滚旧实例: new={$generationVersion}", $oldPort);
             $this->rollbackManagedGenerationCutover($previousActiveVersion, $generationVersion, $registeredPlans, $newPlans, $stage);
             return [
+                'target_count' => $targetCount,
                 'success_count' => 0,
                 'failed_nodes' => [[
                     'host' => $generationVersion,
@@ -496,6 +501,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
         }
 
         return [
+            'target_count' => $targetCount,
             'success_count' => $successCount,
             'failed_nodes' => [],
         ];

@@ -5,11 +5,14 @@ namespace Scf\Server\Gateway;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Result;
+use Scf\Core\Table\GatewayCommandHistoryTable;
 use Scf\Core\Table\Runtime;
 use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
+use Swoole\Coroutine\Channel;
+use Swoole\Timer;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
 
@@ -114,6 +117,19 @@ trait GatewayClusterHeartbeatTrait {
                 if ($taskId !== '' && $host !== '') {
                     Runtime::instance()->set($this->nodeUpdateTaskStateKey($taskId, $host), $payload);
                 }
+                $commandId = trim((string)($payload['command_id'] ?? ''));
+                if ($commandId !== '') {
+                    $this->acceptSlaveCommandFeedback([
+                        'command_id' => $commandId,
+                        'command' => (string)($payload['command'] ?? 'appoint_update'),
+                        'host' => $host,
+                        'state' => (string)($payload['state'] ?? ''),
+                        'message' => (string)($payload['message'] ?? ''),
+                        'error' => (string)($payload['error'] ?? ''),
+                        'updated_at' => (int)($payload['updated_at'] ?? time()),
+                        'result' => (array)$payload,
+                    ]);
+                }
                 Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
                     'event' => 'node_update_state',
                     'data' => $payload,
@@ -121,6 +137,10 @@ trait GatewayClusterHeartbeatTrait {
                 if (!empty($payload['message'])) {
                     Console::info((string)$payload['message'], false);
                 }
+                break;
+            case 'slave_command_feedback':
+                $payload = (array)($data['data'] ?? []);
+                $this->acceptSlaveCommandFeedback($payload);
                 break;
             case 'linux_crontab_sync_state':
                 $payload = (array)($data['data'] ?? []);
@@ -225,6 +245,166 @@ trait GatewayClusterHeartbeatTrait {
 
     protected function nodeLinuxCrontabInstalledStateKey(string $host): string {
         return 'linux_crontab_installed_state:' . md5($host);
+    }
+
+    /**
+     * 查询 slave 指令历史（分页）。
+     *
+     * @param int $page 页码
+     * @param int $size 每页数量
+     * @param string $host host 过滤
+     * @param string $state 状态过滤
+     * @return array{page:int,size:int,total:int,list:array<int,array<string,mixed>>,summary:array<string,int>}
+     */
+    public function dashboardCommandHistory(int $page = 1, int $size = 20, string $host = '', string $state = ''): array {
+        return GatewayCommandHistoryTable::instance()->paginate($page, $size, $host, $state);
+    }
+
+    /**
+     * 汇总 slave 指令历史状态。
+     *
+     * @return array{total:int,accepted:int,running:int,success:int,failed:int,pending:int,other:int}
+     */
+    protected function slaveCommandHistorySummary(): array {
+        return GatewayCommandHistoryTable::instance()->summary();
+    }
+
+    /**
+     * 生成一条稳定且可追踪的 slave 指令 id。
+     *
+     * @param string $command 指令名
+     * @param string $host 目标 host
+     * @return string
+     */
+    protected function createSlaveCommandId(string $command, string $host): string {
+        return 'cmd_' . dechex(time()) . '_' . substr(md5($command . '|' . $host . '|' . uniqid('', true)), 0, 16);
+    }
+
+    /**
+     * 过滤可落盘的命令参数，避免把过大的 payload 直接写入历史记录。
+     *
+     * @param array<string, mixed> $params 原始命令参数
+     * @return array<string, mixed>
+     */
+    protected function sanitizeSlaveCommandHistoryParams(array $params): array {
+        $clean = $params;
+        if (isset($clean['command_id'])) {
+            unset($clean['command_id']);
+        }
+        $encoded = json_encode($clean, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($encoded) || strlen($encoded) <= 2048) {
+            return $clean;
+        }
+        return [
+            '_truncated' => true,
+            '_raw_size' => strlen($encoded),
+        ];
+    }
+
+    /**
+     * 过滤可落盘的命令结果，避免回执 payload 过大写爆历史表行。
+     *
+     * @param array<string, mixed> $result 原始结果
+     * @return array<string, mixed>
+     */
+    protected function sanitizeSlaveCommandHistoryResult(array $result): array {
+        $encoded = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($encoded) || strlen($encoded) <= 4096) {
+            return $result;
+        }
+        return [
+            '_truncated' => true,
+            '_raw_size' => strlen($encoded),
+        ];
+    }
+
+    /**
+     * 新增一条 slave 指令历史，并推送实时更新到 dashboard。
+     *
+     * @param array<string, mixed> $record 指令记录
+     * @return array<string, mixed>
+     */
+    protected function appendSlaveCommandHistoryRecord(array $record): array {
+        $saved = GatewayCommandHistoryTable::instance()->append($record);
+        $this->pushSlaveCommandHistoryUpdate('created', $saved);
+        return $saved;
+    }
+
+    /**
+     * 根据 command_id 更新指令历史并广播到 dashboard。
+     *
+     * @param string $commandId 指令 id
+     * @param array<string, mixed> $updates 更新字段
+     * @return array<string, mixed>|null
+     */
+    protected function updateSlaveCommandHistoryRecord(string $commandId, array $updates): ?array {
+        $updated = GatewayCommandHistoryTable::instance()->updateByCommandId($commandId, $updates);
+        if (is_array($updated)) {
+            $this->pushSlaveCommandHistoryUpdate('updated', $updated);
+        }
+        return $updated;
+    }
+
+    /**
+     * 接收并落盘 slave 端的指令回执。
+     *
+     * @param array<string, mixed> $payload 回执数据
+     * @return void
+     */
+    protected function acceptSlaveCommandFeedback(array $payload): void {
+        $commandId = trim((string)($payload['command_id'] ?? ''));
+        if ($commandId === '') {
+            return;
+        }
+        $host = trim((string)($payload['host'] ?? ''));
+        $command = trim((string)($payload['command'] ?? ''));
+        $state = trim((string)($payload['state'] ?? ''));
+        $message = trim((string)($payload['message'] ?? ''));
+        $error = trim((string)($payload['error'] ?? ''));
+        $record = $this->updateSlaveCommandHistoryRecord($commandId, [
+            'host' => $host,
+            'command' => $command,
+            'state' => $state === '' ? 'running' : $state,
+            'message' => $message,
+            'error' => $error,
+            'result' => $this->sanitizeSlaveCommandHistoryResult((array)($payload['result'] ?? [])),
+            'updated_at' => (int)($payload['updated_at'] ?? time()),
+        ]);
+        if ($record !== null) {
+            return;
+        }
+
+        $this->appendSlaveCommandHistoryRecord([
+            'command_id' => $commandId,
+            'command' => $command,
+            'host' => $host,
+            'state' => $state === '' ? 'running' : $state,
+            'message' => $message,
+            'error' => $error,
+            'params' => [],
+            'result' => $this->sanitizeSlaveCommandHistoryResult((array)($payload['result'] ?? [])),
+            'source' => 'feedback_orphan',
+            'created_at' => (int)($payload['updated_at'] ?? time()),
+            'updated_at' => (int)($payload['updated_at'] ?? time()),
+        ]);
+    }
+
+    /**
+     * 向 dashboard 广播指令历史更新事件。
+     *
+     * @param string $action 更新类型 created/updated
+     * @param array<string, mixed> $record 指令记录
+     * @return void
+     */
+    protected function pushSlaveCommandHistoryUpdate(string $action, array $record): void {
+        Manager::instance()->sendMessageToAllDashboardClients(JsonHelper::toJson([
+            'event' => 'command_history_update',
+            'data' => [
+                'action' => $action,
+                'record' => $record,
+                'summary' => $this->slaveCommandHistorySummary(),
+            ],
+        ]));
     }
 
     /**
@@ -431,20 +611,82 @@ trait GatewayClusterHeartbeatTrait {
 
     protected function sendCommandToNodeClient(string $command, string $host, array $params = []): Result {
         $normalized = $this->normalizeNodeHost($host);
+        $commandId = trim((string)($params['command_id'] ?? ''));
+        if ($commandId === '') {
+            $commandId = $this->createSlaveCommandId($command, $normalized);
+        }
+        $dispatchParams = $params;
+        $dispatchParams['command_id'] = $commandId;
         $node = ServerNodeTable::instance()->get($normalized);
         if (!$node) {
-            return Result::error('节点不存在:' . $host);
+            $this->appendSlaveCommandHistoryRecord([
+                'command_id' => $commandId,
+                'command' => $command,
+                'host' => $normalized,
+                'state' => 'failed',
+                'message' => '节点不存在，命令未下发',
+                'error' => 'node_not_found',
+                'params' => $this->sanitizeSlaveCommandHistoryParams($dispatchParams),
+                'result' => [],
+                'source' => 'single',
+                'created_at' => time(),
+                'updated_at' => time(),
+            ]);
+            return Result::error('节点不存在:' . $host, data: [
+                'command_id' => $commandId,
+                'host' => $normalized,
+            ]);
         }
         $fd = (int)($node['socket_fd'] ?? 0);
         if ($fd <= 0 || !$this->server->exist($fd) || !$this->server->isEstablished($fd)) {
             $this->removeNodeClient($fd);
-            return Result::error('节点不在线');
+            $this->appendSlaveCommandHistoryRecord([
+                'command_id' => $commandId,
+                'command' => $command,
+                'host' => $normalized,
+                'state' => 'failed',
+                'message' => '节点不在线，命令未下发',
+                'error' => 'node_offline',
+                'params' => $this->sanitizeSlaveCommandHistoryParams($dispatchParams),
+                'result' => [],
+                'source' => 'single',
+                'created_at' => time(),
+                'updated_at' => time(),
+            ]);
+            return Result::error('节点不在线', data: [
+                'command_id' => $commandId,
+                'host' => $normalized,
+            ]);
         }
-        $this->server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
+        $this->appendSlaveCommandHistoryRecord([
+            'command_id' => $commandId,
             'command' => $command,
-            'params' => $params,
+            'host' => $normalized,
+            'state' => 'accepted',
+            'message' => '指令已下发，等待 slave 回执',
+            'params' => $this->sanitizeSlaveCommandHistoryParams($dispatchParams),
+            'result' => [],
+            'source' => 'single',
+            'created_at' => time(),
+            'updated_at' => time(),
+        ]);
+        $pushed = $this->server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
+            'command' => $command,
+            'params' => $dispatchParams,
         ]]));
-        return Result::success();
+        if (!$pushed) {
+            $this->updateSlaveCommandHistoryRecord($commandId, [
+                'state' => 'failed',
+                'message' => '指令下发失败',
+                'error' => 'socket_push_failed',
+                'updated_at' => time(),
+            ]);
+            return Result::error('节点命令下发失败');
+        }
+        return Result::success([
+            'command_id' => $commandId,
+            'host' => $normalized,
+        ]);
     }
 
     protected function sendCommandToAllNodeClients(string $command, array $params = []): int {
@@ -458,11 +700,37 @@ trait GatewayClusterHeartbeatTrait {
                 $this->removeNodeClient($fd);
                 continue;
             }
+            $host = (string)($node['host'] ?? '');
+            if ($host === '') {
+                continue;
+            }
+            $commandId = $this->createSlaveCommandId($command, $host);
+            $dispatchParams = $params;
+            $dispatchParams['command_id'] = $commandId;
+            $this->appendSlaveCommandHistoryRecord([
+                'command_id' => $commandId,
+                'command' => $command,
+                'host' => $host,
+                'state' => 'accepted',
+                'message' => '指令已下发，等待 slave 回执',
+                'params' => $this->sanitizeSlaveCommandHistoryParams($dispatchParams),
+                'result' => [],
+                'source' => 'broadcast',
+                'created_at' => time(),
+                'updated_at' => time(),
+            ]);
             if ($this->server->push($fd, JsonHelper::toJson(['event' => 'command', 'data' => [
                 'command' => $command,
-                'params' => $params,
+                'params' => $dispatchParams,
             ]]))) {
                 $success++;
+            } else {
+                $this->updateSlaveCommandHistoryRecord($commandId, [
+                    'state' => 'failed',
+                    'message' => '指令下发失败',
+                    'error' => 'socket_push_failed',
+                    'updated_at' => time(),
+                ]);
             }
         }
         return $success;

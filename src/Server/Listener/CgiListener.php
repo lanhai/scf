@@ -2,27 +2,23 @@
 
 namespace Scf\Server\Listener;
 
-use Scf\Client\Http;
 use Scf\Core\Env;
 use Scf\Core\Exception;
 use Scf\Core\Key;
 use Scf\Core\Result;
+use Scf\Core\SecondWindowCounter;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
-use Scf\Helper\StringHelper;
 use Scf\Mode\Web\App;
 use Scf\Mode\Web\Exception\AppError;
 use Scf\Mode\Web\Exception\NotFoundException;
 use Scf\Mode\Web\Log;
 use Scf\Mode\Web\Request;
 use Scf\Mode\Web\Response;
-use Scf\Server\Controller\DashboardController;
 use Scf\Server\Http as Server;
 use Scf\Util\Date;
-use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
-use Scf\Util\Sn;
 use Swoole\Event;
 use Swoole\ExitException;
 use Throwable;
@@ -31,7 +27,6 @@ class CgiListener extends Listener {
 
     protected const UPSTREAM_CONTROL_HTTP_PROBE_PATH = '/_gateway/internal/upstream/http_probe';
     protected const UPSTREAM_CONTROL_CUTOVER_PROBE_PATH = '/_scf_internal/upstream/cutover_probe';
-    protected static int $requestCounterLastSecond = 0;
     protected static string $requestTodayBucket = '';
     protected static int $requestTodayBuffered = 0;
     protected static int $requestTodayLastFlushAt = 0;
@@ -85,8 +80,8 @@ class CgiListener extends Listener {
             return;
         }
         $requestMethod = strtoupper((string)($request->server['request_method'] ?? 'GET'));
-        $mysqlExecuteCount = (int)(Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0);
-        $requestCount = (int)(Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0);
+        $mysqlExecuteCount = SecondWindowCounter::mysqlCountOfSecond(time() - 1);
+        $requestCount = SecondWindowCounter::requestCountOfSecond(time() - 1);
         if ($this->shouldRejectForOverload($requestMethod, $requestCount, $mysqlExecuteCount, $request)) {
             Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
             $response->header("Content-Type", "application/json;charset=utf-8");
@@ -102,74 +97,73 @@ class CgiListener extends Listener {
         $workerId = Server::server()->worker_id + 1;
         //等待响应
         Counter::instance()->incr(Key::COUNTER_REQUEST_PROCESSING);
-        //并发请求
+        // 记录当前 worker 的秒级请求量，供上一秒 QPS 读侧汇总使用。
         $this->incrCurrentSecondRequestCounter();
-        if (!$this->dashboradTakeover($request, $response)) {
-            // 今日请求计数改为 worker 本地批量汇总，降低高 QPS 下共享计数原子开销。
-            $this->bufferTodayRequestCounterIncrement();
-            if (!Runtime::instance()->serverIsReady()) {
-                Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
-                $response->header("Content-Type", "application/json;charset=utf-8");
-                $response->status(503);
-                $response->end(JsonHelper::toJson([
-                    'errCode' => 'SERVICE_UNAVAILABLE',
-                    'message' => "服务暂不可用,请稍后重试",
-                    'data' => ""
-                ]));
+        // dashboard 入口已统一收敛到 gateway 控制面，这里只保留业务请求主链。
+        $this->bufferTodayRequestCounterIncrement();
+        if (!Runtime::instance()->serverIsReady()) {
+            Counter::instance()->incr(Key::COUNTER_REQUEST_REJECT_);
+            $response->header("Content-Type", "application/json;charset=utf-8");
+            $response->status(503);
+            $response->end(JsonHelper::toJson([
+                'errCode' => 'SERVICE_UNAVAILABLE',
+                'message' => "服务暂不可用,请稍后重试",
+                'data' => ""
+            ]));
+            goto Done;
+        }
+        $logger = Log::instance();
+        $app = App::instance();
+        Env::isDev() and $logger->enableDebug();
+        try {
+            $app->init();
+            $result = $app->run();
+            if ($result instanceof Result) {
+                if ($result->hasError()) {
+                    Response::error($result->getMessage(), $result->getErrCode(), $result->getData(), status: 200);
+                } else {
+                    Response::success($result->getData());
+                }
+            } else {
+                Response::instance()->status(200);
+                Response::instance()->end($result);
+            }
+        } catch (NotFoundException $e) {
+            $app->handleNotFound($e->getMessage());
+        } catch (Throwable $exception) {
+            $message = $exception->getMessage();
+            $code = $exception->getCode();
+            $file = $exception->getFile();
+            $line = $exception->getLine();
+            if ($exception instanceof ExitException) {
+                if (!Response::instance()->isEnd()) {
+                    $app->handleError([
+                        'code' => 501,
+                        'error' => $exception->getStatus(),
+                        'file' => $exception->getFile(),
+                        'line' => $exception->getLine(),
+                        'time' => date('Y-m-d H:i:s'),
+                        'trace' => Env::isDev() ? $exception->getTrace() : null,
+                        'ip' => Server::instance()->host()
+                    ]);
+                }
                 goto Done;
             }
-            $logger = Log::instance();
-            $app = App::instance();
-            Env::isDev() and $logger->enableDebug();
-            try {
-                $app->init();
-                $result = $app->run();
-                if ($result instanceof Result) {
-                    if ($result->hasError()) {
-                        Response::error($result->getMessage(), $result->getErrCode(), $result->getData(), status: 200);
-                    } else {
-                        Response::success($result->getData());
-                    }
-                } else {
-                    Response::instance()->status(200);
-                    Response::instance()->end($result);
-                }
-            } catch (NotFoundException $e) {
-                $app->handleNotFound($e->getMessage());
-            } catch (Throwable $exception) {
-                $message = $exception->getMessage();
-                $code = $exception->getCode();
-                $file = $exception->getFile();
-                $line = $exception->getLine();
-                if ($exception instanceof ExitException) {
-                    if (!Response::instance()->isEnd()) {
-                        $app->handleError([
-                            'code' => 501,
-                            'error' => $exception->getStatus(),
-                            'file' => $exception->getFile(),
-                            'line' => $exception->getLine(),
-                            'time' => date('Y-m-d H:i:s'),
-                            'trace' => Env::isDev() ? $exception->getTrace() : null,
-                            'ip' => Server::instance()->host()
-                        ]);
-                    }
-                    goto Done;
-                } elseif ($exception instanceof AppError) {
-                    $backTrace = $exception->getTrace();
-                    $file = $backTrace[0]['file'] ?? $file;
-                    $line = $backTrace[0]['line'] ?? $line;
-                }
-                $logger->error($exception);
-                $app->handleError([
-                    'code' => $code,
-                    'error' => $message,
-                    'file' => $file,
-                    'line' => $line,
-                    'time' => date('Y-m-d H:i:s'),
-                    'trace' => Env::isDev() ? $exception->getTrace() : null,
-                    'ip' => Server::instance()->host()
-                ]);
+            if ($exception instanceof AppError) {
+                $backTrace = $exception->getTrace();
+                $file = $backTrace[0]['file'] ?? $file;
+                $line = $backTrace[0]['line'] ?? $line;
             }
+            $logger->error($exception);
+            $app->handleError([
+                'code' => $code,
+                'error' => $message,
+                'file' => $file,
+                'line' => $line,
+                'time' => date('Y-m-d H:i:s'),
+                'trace' => Env::isDev() ? $exception->getTrace() : null,
+                'ip' => Server::instance()->host()
+            ]);
         }
         Done:
         Event::defer(function () use ($workerId) {
@@ -229,21 +223,12 @@ class CgiListener extends Listener {
     }
 
     /**
-     * 记录本秒请求量并执行轻量过期清理。
+     * 记录当前 worker 的秒级请求量。
      *
      * @return int
      */
     protected function incrCurrentSecondRequestCounter(): int {
-        $now = time();
-        if (self::$requestCounterLastSecond !== $now) {
-            // 每秒仅清理一次 3 秒前的桶，替代每秒创建 Timer::after 的做法。
-            $expiredSecond = $now - 3;
-            if ($expiredSecond > 0) {
-                Counter::instance()->delete(Key::COUNTER_REQUEST . $expiredSecond);
-            }
-            self::$requestCounterLastSecond = $now;
-        }
-        return Counter::instance()->incr(Key::COUNTER_REQUEST . $now);
+        return SecondWindowCounter::incrRequestSecondForWorker(Server::server()->worker_id + 1);
     }
 
     /**
@@ -354,91 +339,4 @@ class CgiListener extends Listener {
         return true;
     }
 
-    /**
-     * 代理控制面板访问
-     * @param \Swoole\Http\Request $request
-     * @param \Swoole\Http\Response $response
-     * @return bool
-     */
-    public function dashboradTakeover(\Swoole\Http\Request $request, \Swoole\Http\Response $response): bool {
-        if (str_starts_with($request->server['path_info'], '/~')) {
-            $isIndex = $request->server['path_info'] == '/~/' || $request->server['path_info'] == '/~';
-            $path = str_replace("/~", "", $request->server['path_info']);
-            $response->status(200);
-            if (in_array($path, DashboardController::$protectedActions)) {
-                $response->header('Content-Type', 'application/json');
-                $response->end(JsonHelper::toJson([
-                    'errCode' => 'UNAUTHORIZED',
-                    'message' => "未授权的访问",
-                    'data' => null
-                ]));
-            }
-            $controller = new DashboardController();
-            $method = 'action' . StringHelper::lower2camel(str_replace("/", "_", substr($path, 1)));
-            if (!$isIndex && !method_exists($controller, $method)) {
-                Request::resetPath($path);
-                return false;
-            }
-            $port = Runtime::instance()->dashboardPort();
-            $dashboardHost = PROTOCOL_HTTP . '127.0.0.1:' . $port;
-            if ($isIndex) {
-                $url = $dashboardHost . '/dashboard';
-            } else {
-                if (isset($request->server['query_string'])) {
-                    $path .= '?' . $request->server['query_string'];
-                }
-                $url = $dashboardHost . $path;
-            }
-            $client = Http::create($url);
-            foreach ($request->header as $key => $value) {
-                $client->setHeader($key, $value);
-            }
-            $client->setHeader('host', $request->header['host'] ?? 'localhost');
-            $client->setHeader('referer', $request->header['referer'] ?? 'localhost');
-            $sessionId = Request::cookie('_SESSIONID_');
-            if (!$sessionId) {
-                $sessionId = Sn::create_uuid();
-                Response::instance()->setCookie('_SESSIONID_', $sessionId);
-            }
-            $cookieFile = APP_PATH . '/tmp/dashboard_' . $sessionId . '.cookie';
-            if (file_exists($cookieFile)) {
-                $client->setHeader('Cookie', File::read($cookieFile));
-            }
-            if ($request->server['request_method'] == 'GET') {
-                $result = $client->get(600);
-            } else {
-                $result = $client->post(Request::post()->pack(), 600);
-            }
-            $response->header('Content-Type', 'application/json');
-            if ($result->hasError()) {
-                $response->end(JsonHelper::toJson([
-                    'errCode' => $result->getErrCode(),
-                    'message' => $result->getData('message') ?? "转发请求至控制面板失败:" . $result->getMessage(),
-                    'data' => [
-                        'host' => $dashboardHost,
-                        'url' => $url,
-                        'method' => $request->server['request_method'],
-                        'body' => $result->getData()
-                    ]
-                ]));
-            } else {
-                $headers = $client->responseHeaders();
-                $response->header('Content-Type', $headers['content-type']);
-                if (isset($headers['error-info'])) {
-                    $response->header('Error-Info', $headers['error-info']);
-                }
-                if (isset($headers['server'])) {
-                    $response->header('Server', $headers['server']);
-                }
-                $cookie = $headers['set-cookie'] ?? null;
-                $cookie && $sessionId and File::write($cookieFile, $cookie);
-                if ($path == '/logout' && file_exists($cookieFile)) {
-                    unlink($cookieFile);
-                }
-                $response->end($client->body());
-            }
-            return true;
-        }
-        return false;
-    }
 }

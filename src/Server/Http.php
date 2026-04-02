@@ -10,6 +10,7 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use Scf\Core\InflightCounter;
 use Scf\Core\Key;
+use Scf\Core\SecondWindowCounter;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\MemoryMonitorTable;
@@ -504,6 +505,7 @@ class Http extends \Scf\Core\Server {
             'Scf\Core\Table\LogTable',
             'Scf\Core\Table\Counter',
             'Scf\Core\Table\Runtime',
+            'Scf\Core\Table\SecondWindowCounterTable',
             'Scf\Core\Table\RouteTable',
             'Scf\Core\Table\RouteCache',
             'Scf\Core\Table\SocketRouteTable',
@@ -799,7 +801,7 @@ class Http extends \Scf\Core\Server {
             // 让控制面可以按代际精确识别“可复用实例”和“外部占用者”。
             'upstream_gateway_port' => $leaseBound ? $this->upstreamGatewayPort : 0,
             'upstream_owner_epoch' => $leaseBound ? $this->upstreamOwnerEpoch : 0,
-            'http_request_count_current' => Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0,
+            'http_request_count_current' => SecondWindowCounter::requestCountOfSecond(time() - 1),
             'http_request_count_today' => Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0,
             'http_request_reject' => Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0,
             'http_request_count' => Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0,
@@ -810,7 +812,7 @@ class Http extends \Scf\Core\Server {
             'mysql_inflight' => InflightCounter::mysqlInflight(),
             'redis_inflight' => InflightCounter::redisInflight(),
             'outbound_http_inflight' => InflightCounter::outboundHttpInflight(),
-            'mysql_execute_count' => Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0,
+            'mysql_execute_count' => SecondWindowCounter::mysqlCountOfSecond(time() - 1),
             'server_stats' => array_merge((array)$stats, [
                 'long_connection_num' => SocketConnectionTable::instance()->count(),
             ]),
@@ -1283,7 +1285,7 @@ class Http extends \Scf\Core\Server {
         $serverStats = $server->stats();
         $requestProcessing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
         $requestReject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
-        $mysqlProcessing = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
+        $mysqlProcessing = SecondWindowCounter::mysqlCountOfSecond(time() - 1);
         $nodeClients = ServerNodeTable::instance()->count();
         $dashboardClients = count(Runtime::instance()->get('DASHBOARD_CLIENTS') ?: []);
         $socketRoutes = SocketConnectionTable::instance()->count();

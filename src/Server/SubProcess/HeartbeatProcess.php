@@ -5,6 +5,7 @@ namespace Scf\Server\SubProcess;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Key;
+use Scf\Core\SecondWindowCounter;
 use Scf\Core\Table\ATable;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
@@ -184,10 +185,10 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
         $node->thread_status = Coroutine::stats();
         $node->server_stats = Runtime::instance()->get('SERVER_STATS') ?: [];
         $node->server_stats['long_connection_num'] = SocketConnectionTable::instance()->count();
-        $node->mysql_execute_count = Counter::instance()->get(Key::COUNTER_MYSQL_PROCESSING . (time() - 1)) ?: 0;
+        $node->mysql_execute_count = SecondWindowCounter::mysqlCountOfSecond(time() - 1);
         $node->http_request_reject = Counter::instance()->get(Key::COUNTER_REQUEST_REJECT_) ?: 0;
         $node->http_request_count = Counter::instance()->get(Key::COUNTER_REQUEST) ?: 0;
-        $node->http_request_count_current = Counter::instance()->get(Key::COUNTER_REQUEST . (time() - 1)) ?: 0;
+        $node->http_request_count_current = SecondWindowCounter::requestCountOfSecond(time() - 1);
         $node->http_request_count_today = Counter::instance()->get(Key::COUNTER_REQUEST . Date::today()) ?: 0;
         $node->http_request_processing = Counter::instance()->get(Key::COUNTER_REQUEST_PROCESSING) ?: 0;
         $node->memory_usage = MemoryMonitor::sum();
@@ -210,40 +211,78 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
         if ($command !== '') {
             Console::info("【GatewayCluster】收到master指令: command={$command}", false);
         }
+        $commandId = trim((string)($params['command_id'] ?? ''));
+        if ($commandId === '') {
+            $commandId = 'legacy_' . uniqid('cmd_', true);
+        }
         switch ($command) {
             case 'shutdown':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】收到 shutdown 指令");
                 $socket->push("【" . SERVER_HOST . "】start shutdown");
                 $this->call('trigger_shutdown');
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', "【" . SERVER_HOST . "】shutdown 指令已执行");
                 return true;
             case 'reload':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】收到 reload 指令");
                 $socket->push("【" . SERVER_HOST . "】start reload");
                 $this->call('trigger_reload');
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', "【" . SERVER_HOST . "】reload 指令已执行");
                 return true;
             case 'restart':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】收到 restart 指令");
                 $socket->push("【" . SERVER_HOST . "】start restart");
                 $this->call('trigger_restart');
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', "【" . SERVER_HOST . "】restart 指令已执行");
                 return true;
             case 'restart_redisqueue':
-                if ((bool)$this->call('dispatch_gateway_internal_command', 'restart_redisqueue', [], 1.0)) {
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始重启 RedisQueue");
+                $restartResult = (array)$this->call('restart_managed_processes', ['RedisQueue']);
+                if (!empty($restartResult['ok'])) {
                     $socket->push("【" . SERVER_HOST . "】start redisqueue restart");
-                    return true;
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', (string)($restartResult['message'] ?? 'RedisQueue 重启已提交'));
+                } else {
+                    $error = (string)($restartResult['message'] ?? 'dispatch failed');
+                    $socket->push("【" . SERVER_HOST . "】redisqueue restart failed:" . $error);
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'failed', "【" . SERVER_HOST . "】RedisQueue 重启失败", $error);
                 }
-                return false;
+                return true;
             case 'subprocess_restart':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始重启子进程");
                 $name = trim((string)($params['name'] ?? ''));
                 $restartResult = (array)$this->call('restart_managed_processes', $name === '' ? [] : [$name]);
-                $socket->push("【" . SERVER_HOST . "】" . (string)($restartResult['message'] ?? '子进程重启已提交'));
+                $resultMessage = (string)($restartResult['message'] ?? '子进程重启已提交');
+                $socket->push("【" . SERVER_HOST . "】" . $resultMessage);
+                if (!empty($restartResult['ok'])) {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', $resultMessage);
+                } else {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'failed', "【" . SERVER_HOST . "】子进程重启失败", $resultMessage);
+                }
                 return true;
             case 'subprocess_stop':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始停止子进程");
                 $name = trim((string)($params['name'] ?? ''));
                 $stopResult = (array)$this->call('stop_managed_processes', $name === '' ? [] : [$name]);
-                $socket->push("【" . SERVER_HOST . "】" . (string)($stopResult['message'] ?? '子进程停止已提交'));
+                $resultMessage = (string)($stopResult['message'] ?? '子进程停止已提交');
+                $socket->push("【" . SERVER_HOST . "】" . $resultMessage);
+                if (!empty($stopResult['ok'])) {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', $resultMessage);
+                } else {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'failed', "【" . SERVER_HOST . "】子进程停止失败", $resultMessage);
+                }
                 return true;
             case 'subprocess_restart_all':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始重启全部子进程");
                 $restartAllResult = (array)$this->call('restart_all_managed_processes');
-                $socket->push("【" . SERVER_HOST . "】" . (string)($restartAllResult['message'] ?? '全部子进程重启已提交'));
+                $resultMessage = (string)($restartAllResult['message'] ?? '全部子进程重启已提交');
+                $socket->push("【" . SERVER_HOST . "】" . $resultMessage);
+                if (!empty($restartAllResult['ok'])) {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', $resultMessage);
+                } else {
+                    $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'failed', "【" . SERVER_HOST . "】全部子进程重启失败", $resultMessage);
+                }
                 return true;
             case 'linux_crontab_sync':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始同步 Linux 排程");
                 try {
                     $result = LinuxCrontabManager::applyReplicationPayload((array)($params['config'] ?? []));
                     $sync = (array)($result['sync'] ?? []);
@@ -306,15 +345,33 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                         'item_count' => (int)($result['item_count'] ?? 0),
                         'sync' => $sync,
                     ], $node);
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        $state === 'failed' ? 'failed' : 'success',
+                        $message,
+                        $state === 'failed' ? $error : '',
+                        ['sync' => $sync]
+                    );
                 } catch (Throwable $throwable) {
                     Console::warning("【LinuxCrontab】同步排程配置失败:" . $throwable->getMessage(), false);
                     $this->reportLinuxCrontabSyncState($socket, 'failed', [
                         'message' => "【" . SERVER_HOST . "】Linux 排程同步失败:" . $throwable->getMessage(),
                         'error' => $throwable->getMessage(),
                     ], $node);
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        'failed',
+                        "【" . SERVER_HOST . "】Linux 排程同步失败",
+                        $throwable->getMessage()
+                    );
                 }
                 return true;
             case 'linux_crontab_installed_snapshot':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始上报 Linux 排程安装快照");
                 $requestId = trim((string)($params['request_id'] ?? ''));
                 try {
                     $snapshot = (new LinuxCrontabManager())->installedSnapshot();
@@ -323,21 +380,42 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                         'snapshot' => $snapshot,
                         'request_id' => $requestId,
                     ], $node);
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        'success',
+                        "【" . SERVER_HOST . "】Linux 排程本机快照已回报",
+                        '',
+                        ['request_id' => $requestId]
+                    );
                 } catch (Throwable $throwable) {
                     $this->reportLinuxCrontabInstalledState($socket, 'failed', [
                         'message' => "【" . SERVER_HOST . "】Linux 排程本机快照获取失败:" . $throwable->getMessage(),
                         'error' => $throwable->getMessage(),
                         'request_id' => $requestId,
                     ], $node);
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        'failed',
+                        "【" . SERVER_HOST . "】Linux 排程本机快照获取失败",
+                        $throwable->getMessage(),
+                        ['request_id' => $requestId]
+                    );
                 }
                 return true;
             case 'appoint_update':
                 $taskId = (string)($params['task_id'] ?? '');
                 $type = (string)($params['type'] ?? '');
                 $version = (string)($params['version'] ?? '');
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始更新 {$type} => {$version}");
                 $statePayload = [
                     'event' => 'node_update_state',
                     'data' => [
+                        'command_id' => $commandId,
+                        'command' => $command,
                         'task_id' => $taskId,
                         // 升级状态回报必须和 slave_node_report / heartbeat 使用同一 host 标识，
                         // 否则 master 汇总 task 状态时会把这个 slave 误判成一直 pending。
@@ -368,8 +446,22 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                         ]
                     ])));
                     $socket->push($finalMessage);
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        $finalState,
+                        $finalMessage,
+                        '',
+                        (array)($result['data'] ?? [])
+                    );
                 } else {
                     $error = (string)($result['message'] ?? '') ?: App::getLastUpdateError() ?: '未知原因';
+                    $businessRaw = (array)(($result['data'] ?? [])['business_command_raw'] ?? []);
+                    $internalError = trim((string)($businessRaw['message'] ?? ''));
+                    if ($internalError !== '' && !str_contains($error, $internalError)) {
+                        $error .= " ({$internalError})";
+                    }
                     $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                         'data' => [
                             'state' => 'failed',
@@ -379,6 +471,15 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                         ]
                     ])));
                     $socket->push("【" . SERVER_HOST . "】版本更新失败:{$type} => {$version},原因:{$error}");
+                    $this->reportRemoteCommandFeedback(
+                        $socket,
+                        $commandId,
+                        $command,
+                        'failed',
+                        "【" . SERVER_HOST . "】版本更新失败:{$type} => {$version}",
+                        $error,
+                        (array)($result['data'] ?? [])
+                    );
                 }
                 return true;
             default:
@@ -388,7 +489,66 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                 if ($command !== '') {
                     Console::warning("【GatewayCluster】未支持的远端命令，已拒绝: command={$command}", false);
                 }
+                $this->reportRemoteCommandFeedback(
+                    $socket,
+                    $commandId,
+                    $command,
+                    'failed',
+                    "【" . SERVER_HOST . "】未支持的远端命令",
+                    'unsupported_command'
+                );
                 return false;
+        }
+    }
+
+    /**
+     * 向 master 上报 slave 指令生命周期回执。
+     *
+     * 回执事件与 node_update_state 分离，避免升级场景和普通控制命令复用同一结构时
+     * 互相覆盖字段语义；master 会以 command_id 为主键更新历史状态。
+     *
+     * @param object $socket 当前 slave -> master 的 websocket 连接
+     * @param string $commandId 指令唯一 id
+     * @param string $command 指令名
+     * @param string $state accepted/running/success/failed/pending
+     * @param string $message 指令状态说明
+     * @param string $error 错误原因
+     * @param array<string, mixed> $result 额外结果 payload
+     * @return void
+     */
+    protected function reportRemoteCommandFeedback(
+        object $socket,
+        string $commandId,
+        string $command,
+        string $state,
+        string $message,
+        string $error = '',
+        array $result = []
+    ): void {
+        $commandId = trim($commandId);
+        if ($commandId === '') {
+            return;
+        }
+        $command = trim($command);
+        if ($command === '') {
+            $command = 'unknown';
+        }
+
+        try {
+            $socket->push(JsonHelper::toJson([
+                'event' => 'slave_command_feedback',
+                'data' => [
+                    'command_id' => $commandId,
+                    'command' => $command,
+                    'host' => APP_NODE_ID,
+                    'state' => trim($state) ?: 'running',
+                    'message' => $message,
+                    'error' => $error,
+                    'updated_at' => time(),
+                    'result' => $result,
+                ],
+            ]));
+        } catch (Throwable) {
         }
     }
 
@@ -403,16 +563,24 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
     protected function executeRemoteAppointUpdate(string $type, string $version, string $taskId): array {
         if ((bool)$this->call('has_process', 'GatewayBusinessCoordinator')) {
             Console::info("【GatewayCluster】转交业务编排执行升级: task={$taskId}, type={$type}, version={$version}", false);
-            $response = (array)$this->call('request_gateway_internal_command', 'appoint_update_remote', [
+            $response = (array)$this->call('request_gateway_business_command', 'appoint_update', [
                 'task_id' => $taskId,
                 'type' => $type,
                 'version' => $version,
             ], self::REMOTE_APPOINT_UPDATE_TIMEOUT_SECONDS + 5);
             if (empty($response['ok'])) {
+                $raw = (array)$response;
+                $errorDetail = trim((string)($raw['message'] ?? ''));
+                $message = (string)($response['message'] ?? 'Gateway 业务编排命令执行失败');
+                if ($errorDetail !== '' && !str_contains($message, $errorDetail)) {
+                    $message .= "({$errorDetail})";
+                }
                 return [
                     'ok' => false,
-                    'message' => (string)($response['message'] ?? 'Gateway 内部升级命令执行失败'),
-                    'data' => [],
+                    'message' => $message,
+                    'data' => [
+                        'business_command_raw' => $raw,
+                    ],
                     'updated_at' => time(),
                 ];
             }

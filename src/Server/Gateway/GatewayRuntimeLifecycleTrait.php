@@ -53,6 +53,7 @@ trait GatewayRuntimeLifecycleTrait {
             'Scf\Core\Table\LogTable',
             'Scf\Core\Table\Counter',
             'Scf\Core\Table\Runtime',
+            'Scf\Core\Table\SecondWindowCounterTable',
             'Scf\Core\Table\RouteTable',
             'Scf\Core\Table\RouteCache',
             'Scf\Core\Table\SocketRouteTable',
@@ -61,6 +62,7 @@ trait GatewayRuntimeLifecycleTrait {
             'Scf\Core\Table\MemoryMonitorTable',
             'Scf\Core\Table\ServerNodeTable',
             'Scf\Core\Table\ServerNodeStatusTable',
+            'Scf\Core\Table\GatewayCommandHistoryTable',
         ]);
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(false);

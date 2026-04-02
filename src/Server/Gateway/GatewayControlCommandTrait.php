@@ -94,9 +94,7 @@ trait GatewayControlCommandTrait {
         if ($resolvedNodeHost === 'localhost') {
             $result = $this->dispatchLocalGatewayCommand($command, $params);
         } elseif ($resolvedNodeHost !== null) {
-            $result = $this->hasConnectedNode($resolvedNodeHost)
-                ? $this->sendCommandToNodeClient($command, $resolvedNodeHost, $params)
-                : Result::error('节点不在线');
+            $result = $this->sendCommandToNodeClient($command, $resolvedNodeHost, $params);
         } else {
             $result = match ($command) {
                 'restart', 'reload' => $this->restartUpstreamsByHost($host),
@@ -595,11 +593,13 @@ trait GatewayControlCommandTrait {
             }
 
             $restartSummary = (array)($localData['restart_summary'] ?? [
+                'target_count' => 0,
                 'success_count' => 0,
                 'failed_nodes' => [],
             ]);
             $upstreamRollout = (array)($localData['upstream_rollout'] ?? [
-                'attempted' => $type !== 'public',
+                'attempted' => false,
+                'target_count' => (int)($restartSummary['target_count'] ?? 0),
                 'success' => count((array)($restartSummary['failed_nodes'] ?? [])) === 0,
                 'success_count' => (int)($restartSummary['success_count'] ?? 0),
                 'failed_count' => count((array)($restartSummary['failed_nodes'] ?? [])),
@@ -608,7 +608,10 @@ trait GatewayControlCommandTrait {
             $upstreamRollout['failed_nodes'] = array_values((array)($upstreamRollout['failed_nodes'] ?? []));
             $upstreamRollout['failed_count'] = (int)($upstreamRollout['failed_count'] ?? count($upstreamRollout['failed_nodes']));
             $upstreamRollout['success_count'] = (int)($upstreamRollout['success_count'] ?? 0);
-            $upstreamRollout['attempted'] = (bool)($upstreamRollout['attempted'] ?? ($type !== 'public'));
+            $upstreamRollout['target_count'] = (int)($upstreamRollout['target_count']
+                ?? ($upstreamRollout['success_count'] + $upstreamRollout['failed_count']));
+            $upstreamRollout['attempted'] = (bool)($upstreamRollout['attempted']
+                ?? ($type !== 'public' && $upstreamRollout['target_count'] > 0));
             $upstreamRollout['success'] = (bool)($upstreamRollout['success'] ?? ($upstreamRollout['failed_count'] === 0));
             if (!empty($localData['iterate_business_processes']) && !$localResult->hasError()) {
                 $this->logUpdateStage($taskId, $type, $version, 'iterate_business_processes');
@@ -675,12 +678,15 @@ trait GatewayControlCommandTrait {
             }
 
             if ($masterState === 'pending') {
+                $pendingMessage = $upstreamRollout['attempted']
+                    ? "【" . SERVER_HOST . "】业务实例升级结果:成功{$upstreamRollout['success_count']},失败{$upstreamRollout['failed_count']}，Gateway等待重启生效:{$type} => {$version}"
+                    : "【" . SERVER_HOST . "】本次升级未涉及业务实例滚动，Gateway等待重启生效:{$type} => {$version}";
                 $this->emitLocalNodeUpdateState(
                     $taskId,
                     $type,
                     $version,
                     'pending',
-                    "【" . SERVER_HOST . "】业务实例升级结果:成功{$upstreamRollout['success_count']},失败{$upstreamRollout['failed_count']}，Gateway等待重启生效:{$type} => {$version}",
+                    $pendingMessage,
                     '',
                     [
                         'upstream_rollout' => $upstreamRollout,
@@ -765,6 +771,7 @@ trait GatewayControlCommandTrait {
         Console::info("【Gateway】本地包应用完成: task={$taskId}, type={$type}, version={$version}");
 
         $restartSummary = [
+            'target_count' => 0,
             'success_count' => 0,
             'failed_nodes' => [],
         ];
@@ -789,11 +796,17 @@ trait GatewayControlCommandTrait {
                 : ($restartSummary['failed_nodes'] ? '部分业务实例升级失败' : ''),
         ];
         $upstreamFailedNodes = array_values((array)($restartSummary['failed_nodes'] ?? []));
+        $upstreamSuccessCount = (int)($restartSummary['success_count'] ?? 0);
+        $upstreamFailedCount = count($upstreamFailedNodes);
+        $upstreamTargetCount = (int)($restartSummary['target_count'] ?? ($upstreamSuccessCount + $upstreamFailedCount));
+        // 只有命中实际 active upstream 目标时，才视为“业务实例滚动已执行”。
+        $upstreamRolloutAttempted = $type !== 'public' && $upstreamTargetCount > 0;
         $upstreamRollout = [
-            'attempted' => $type !== 'public',
-            'success' => $type === 'public' ? true : count($upstreamFailedNodes) === 0,
-            'success_count' => (int)($restartSummary['success_count'] ?? 0),
-            'failed_count' => count($upstreamFailedNodes),
+            'attempted' => $upstreamRolloutAttempted,
+            'target_count' => $upstreamTargetCount,
+            'success' => !$upstreamRolloutAttempted || $upstreamFailedCount === 0,
+            'success_count' => $upstreamSuccessCount,
+            'failed_count' => $upstreamFailedCount,
             'failed_nodes' => $upstreamFailedNodes,
         ];
         $payload = [

@@ -65,6 +65,7 @@ class Key {
     public const COUNTER_REDIS_QUEUE_PROCESSING = 'c_rq_p';
     public const COUNTER_SERVER_RESTART = 'c_srv_rst';
     public const COUNTER_SERVER_ISRUNNING = 'c_srv_run';
+    public const COUNTER_GATEWAY_SLAVE_COMMAND_HISTORY_SEQ = 'c_gschs';
 
 
 }

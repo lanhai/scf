@@ -279,6 +279,8 @@ class GatewayNginxProxyHandler {
         $proxyIoTimeout = $proxyTimeouts['business_io_timeout'];
         $clientIoTimeout = $proxyTimeouts['client_io_timeout'];
         $buffering = (bool)($this->gateway->serverConfig()['gateway_nginx_proxy_buffering'] ?? true);
+        $variablesHashBucketSize = $this->resolveVariablesHashBucketSize();
+        $variablesHashMaxSize = $this->resolveVariablesHashMaxSize();
         $existing = $this->existingHttpDirectives();
 
         $lines = [
@@ -299,6 +301,10 @@ class GatewayNginxProxyHandler {
         $this->appendDirectiveIfMissing($lines, $existing, 'keepalive_requests', 'keepalive_requests 10000;');
         $this->appendDirectiveIfMissing($lines, $existing, 'reset_timedout_connection', 'reset_timedout_connection on;');
         $this->appendDirectiveIfMissing($lines, $existing, 'types_hash_max_size', 'types_hash_max_size 4096;');
+        // Gateway 生成的 map/proxy 变量会随 app/role/port 扩展，默认 64 在部分机器上
+        // 容易触发 "could not build variables_hash"。这里提供稳定的全局兜底。
+        $this->appendDirectiveIfMissing($lines, $existing, 'variables_hash_bucket_size', 'variables_hash_bucket_size ' . $variablesHashBucketSize . ';');
+        $this->appendDirectiveIfMissing($lines, $existing, 'variables_hash_max_size', 'variables_hash_max_size ' . $variablesHashMaxSize . ';');
         $this->appendDirectiveIfMissing($lines, $existing, 'proxy_http_version', 'proxy_http_version 1.1;');
         $this->appendDirectiveIfMissing($lines, $existing, 'proxy_request_buffering', 'proxy_request_buffering on;');
         $this->appendDirectiveIfMissing($lines, $existing, 'proxy_buffering', 'proxy_buffering ' . ($buffering ? 'on' : 'off') . ';');
@@ -522,6 +528,34 @@ class GatewayNginxProxyHandler {
             'control_io_timeout' => $controlIoTimeout,
             'dashboard_socket_io_timeout' => $dashboardSocketIoTimeout,
         ];
+    }
+
+    /**
+     * 解析 nginx variables_hash_bucket_size。
+     *
+     * Nginx bucket_size 对齐更偏好 2 的幂，且过小会在 `nginx -t` 阶段直接失败。
+     * 这里统一做最小值和幂次归一，降低环境差异带来的配置抖动。
+     *
+     * @return int
+     */
+    protected function resolveVariablesHashBucketSize(): int {
+        $configured = (int)($this->gateway->serverConfig()['gateway_nginx_variables_hash_bucket_size'] ?? 128);
+        $target = max(64, $configured);
+        $normalized = 64;
+        while ($normalized < $target && $normalized < 4096) {
+            $normalized <<= 1;
+        }
+        return min(4096, $normalized);
+    }
+
+    /**
+     * 解析 nginx variables_hash_max_size。
+     *
+     * @return int
+     */
+    protected function resolveVariablesHashMaxSize(): int {
+        $configured = (int)($this->gateway->serverConfig()['gateway_nginx_variables_hash_max_size'] ?? 2048);
+        return max(1024, min(65536, $configured));
     }
 
     /**

@@ -120,7 +120,8 @@ trait GatewayTelemetryTrait {
                     'total' => $logger->count('slow', date('Y-m-d')),
                     'list' => []
                 ]
-            ]
+            ],
+            'command_history' => $this->slaveCommandHistorySummary(),
         ];
     }
 

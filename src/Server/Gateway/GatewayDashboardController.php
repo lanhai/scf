@@ -66,6 +66,28 @@ class GatewayDashboardController extends DashboardController {
     }
 
     /**
+     * slave 指令历史分页查询入口。
+     *
+     * @return Result
+     */
+    public function actionCommandHistory(): Result {
+        Request::get([
+            'page',
+            'size',
+            'host',
+            'state',
+        ])->assign($page, $size, $host, $state);
+        return Result::success(
+            $this->gateway->dashboardCommandHistory(
+                (int)($page ?: 1),
+                (int)($size ?: 20),
+                (string)($host ?: ''),
+                (string)($state ?: '')
+            )
+        );
+    }
+
+    /**
      * dashboard 服务器状态接口，包含 socket 地址和运行态摘要。
      *
      * @return Result 服务器状态返回结果

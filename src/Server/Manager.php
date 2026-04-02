@@ -659,7 +659,12 @@ class Manager extends Component {
         if (ENV_MODE == MODE_CGI) {
             $nodes = ServerNodeStatusTable::instance()->rows();
         } else {
-            $client = Http::create(Dashboard::host() . '/nodes');
+            $dashboardPort = (int)(Runtime::instance()->dashboardPort() ?: File::read(SERVER_DASHBOARD_PORT_FILE));
+            if ($dashboardPort <= 0) {
+                Console::error('dashboard port not found');
+                return [];
+            }
+            $client = Http::create('http://localhost:' . $dashboardPort . '/nodes');
             $result = $client->get();
             if ($result->hasError()) {
                 Console::error($result->getMessage());

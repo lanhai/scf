@@ -1512,6 +1512,7 @@ class LinuxCrontabManager {
 
         return match ($normalized) {
             'prod' => 'production',
+            'release' => 'production',
             'develop', 'development' => 'dev',
             default => $normalized,
         };

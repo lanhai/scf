@@ -23,6 +23,8 @@ return [
     'gateway_nginx_conf_dir' => '',//Gateway生成的nginx配置目录,留空自动探测当前nginx include目录
     'gateway_nginx_server_name' => '_',//生成的nginx示例server_name
     'gateway_nginx_disable_global_logs' => true,//由Gateway生成http级nginx配置并关闭全局访问/错误日志
+    'gateway_nginx_variables_hash_bucket_size' => 128,//nginx http 变量哈希桶大小,缓解 variables_hash_bucket_size=64 导致的配置检测失败
+    'gateway_nginx_variables_hash_max_size' => 2048,//nginx http 变量哈希表容量上限
     'gateway_nginx_proxy_connect_timeout' => 3,//nginx到upstream建立连接超时时间(秒)
     'gateway_nginx_proxy_io_timeout' => 31536000,//nginx到upstream读写超时时间(秒),默认近似不限制
     'gateway_nginx_client_io_timeout' => 31536000,//客户端读写超时时间(秒),默认近似不限制

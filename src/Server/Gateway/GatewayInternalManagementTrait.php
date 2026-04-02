@@ -172,6 +172,14 @@ trait GatewayInternalManagementTrait {
 
             $this->json($response, 404, ['message' => 'not found']);
         } catch (Throwable $e) {
+            $requestUri = (string)($request->server['request_uri'] ?? '');
+            if ($requestUri === '/_gateway/internal/command') {
+                $command = trim((string)($payload['command'] ?? ''));
+                $commandLabel = $command === '' ? 'unknown' : $command;
+                \Scf\Core\Console::error(
+                    "【GatewayInternal】内部命令执行异常: command={$commandLabel}, error={$e->getMessage()}, at={$e->getFile()}:{$e->getLine()}"
+                );
+            }
             $this->json($response, 400, [
                 'message' => 'request failed',
                 'error' => $e->getMessage(),

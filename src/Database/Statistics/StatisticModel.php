@@ -26,12 +26,13 @@ use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\Math;
 use Swoole\Coroutine;
-use Swoole\Timer;
 use Symfony\Component\Yaml\Yaml;
 use Throwable;
 
 class StatisticModel {
     use ComponentTrait, Singleton;
+    protected const RUNTIME_GUARD_EXPIRE_SECONDS = 10;
+    protected const RUNTIME_GUARD_CLEANUP_INTERVAL = 60;
 
     protected string $_dbName = 'statistics';
     /**
@@ -39,6 +40,7 @@ class StatisticModel {
      */
     protected string $_table_daily = 'daily';
     protected string $_table_record = 'statistics_record';
+    protected static int $runtimeGuardLastCleanupAt = 0;
 
     public function updateDB(): void {
         if (!isset(Config::get('database')['mysql']['statistics']) || !isset(Config::get('database')['mysql']['history'])) {
@@ -130,31 +132,32 @@ class StatisticModel {
             if ($dailyId === false || StatisticsDailyDAO::unique($dailyId)->ar()->notExist()) {
                 $daily = StatisticsDailyDAO::select()->where(['search_key' => $dailySearchKey])->ar();
                 if ($daily->notExist()) {
-                    if (Runtime::instance()->get($dailyKey)) {
+                    if (!$this->acquireRuntimeStatisticGuard($dailyKey)) {
                         return false;
                     }
-                    //防并发写入
-                    Runtime::instance()->set($dailyKey, time());
-                    Timer::after(10000, function () use ($dailyKey) {
-                        Runtime::instance()->delete($dailyKey);
-                    });
-                    $daily = StatisticsDailyDAO::factory();
-                    $daily->mch_id = $mchID;
-                    $daily->scene = $scene;
-                    $daily->data_id = $dataId;
-                    $daily->day = $today;
-                    $daily->hour = $hour;
-                    $daily->uv = !$existUserRecord ? 1 : 0;
-                    $daily->pv = 1;
-                    $daily->value = $incValue;
-                    $daily->updated = time();
-                    $daily->search_key = $dailySearchKey;
-                    if (!$daily->save()) {
-                        return false;
-                        //Log::instance()->error($daily->getError());
+                    try {
+                        // 获取 guard 后重新查一次，避免并发插入已经由其他进程完成时重复落库。
+                        $daily = StatisticsDailyDAO::select()->where(['search_key' => $dailySearchKey])->ar();
+                        if ($daily->notExist()) {
+                            $daily = StatisticsDailyDAO::factory();
+                            $daily->mch_id = $mchID;
+                            $daily->scene = $scene;
+                            $daily->data_id = $dataId;
+                            $daily->day = $today;
+                            $daily->hour = $hour;
+                            $daily->uv = !$existUserRecord ? 1 : 0;
+                            $daily->pv = 1;
+                            $daily->value = $incValue;
+                            $daily->updated = time();
+                            $daily->search_key = $dailySearchKey;
+                            if (!$daily->save()) {
+                                return false;
+                            }
+                            $hasDailyRecord = false;
+                        }
+                    } finally {
+                        $this->releaseRuntimeStatisticGuard($dailyKey);
                     }
-                    $hasDailyRecord = false;
-
                 }
                 $dailyId = $daily->id;
                 Redis::pool()->set($dailyKey, $dailyId, 3600);
@@ -174,21 +177,24 @@ class StatisticModel {
                 'data_id' => $dataId,
             ])->ar();
             if (!$totalUv = StatisticsTotalUvDAO::select()->where(['user_key' => $userKey])->count()) {
-                if (Runtime::instance()->get('_STATISTICS_TOTAL_' . $userKey)) {
+                $totalGuardKey = '_STATISTICS_TOTAL_' . $userKey;
+                if (!$this->acquireRuntimeStatisticGuard($totalGuardKey)) {
                     return false;
                 }
-                //防并发写入
-                Runtime::instance()->set('_STATISTICS_TOTAL_' . $userKey, time());
-                Timer::after(10000, function () use ($userKey) {
-                    Runtime::instance()->delete('_STATISTICS_TOTAL_' . $userKey);
-                });
-                $totalUvAr = StatisticsTotalUvDAO::factory();
-                $totalUvAr->mch_id = $mchID;
-                $totalUvAr->scene = $scene;
-                $totalUvAr->data_id = $dataId;
-                $totalUvAr->user_key = $userKey;
-                $totalUvAr->created = time();
-                $totalUvAr->save();
+                try {
+                    $totalUv = StatisticsTotalUvDAO::select()->where(['user_key' => $userKey])->count();
+                    if (!$totalUv) {
+                        $totalUvAr = StatisticsTotalUvDAO::factory();
+                        $totalUvAr->mch_id = $mchID;
+                        $totalUvAr->scene = $scene;
+                        $totalUvAr->data_id = $dataId;
+                        $totalUvAr->user_key = $userKey;
+                        $totalUvAr->created = time();
+                        $totalUvAr->save();
+                    }
+                } finally {
+                    $this->releaseRuntimeStatisticGuard($totalGuardKey);
+                }
             }
             if ($total->notExist()) {
                 $total = StatisticsTotalDAO::factory();
@@ -209,6 +215,77 @@ class StatisticModel {
             Log::instance()->error("埋点统计记录失败:" . $exception->getMessage() . ";params:" . implode(',', func_get_args()));
             return false;
         }
+    }
+
+    /**
+     * 申请一个带过期时间的 Runtime 统计 guard。
+     *
+     * 设计意图：
+     * 1. 继续沿用 Runtime 作为轻量级进程内共享 guard；
+     * 2. 不再依赖 Timer::after 删除，避免进程退出后动态 key 长期残留；
+     * 3. 在读取时顺带回收过期 guard，确保历史脏 key 会被渐进清理。
+     *
+     * @param string $guardKey guard key。
+     * @param int $expireSeconds 过期秒数。
+     * @return bool 是否成功申请。
+     */
+    protected function acquireRuntimeStatisticGuard(string $guardKey, int $expireSeconds = self::RUNTIME_GUARD_EXPIRE_SECONDS): bool {
+        $this->cleanupExpiredRuntimeStatisticGuards();
+        $now = time();
+        $lockedAt = (int)(Runtime::instance()->get($guardKey) ?: 0);
+        if ($lockedAt > 0 && ($now - $lockedAt) < $expireSeconds) {
+            return false;
+        }
+        if ($lockedAt > 0) {
+            Runtime::instance()->delete($guardKey);
+        }
+        return Runtime::instance()->set($guardKey, $now);
+    }
+
+    /**
+     * 释放 Runtime 统计 guard。
+     *
+     * @param string $guardKey guard key。
+     * @return void
+     */
+    protected function releaseRuntimeStatisticGuard(string $guardKey): void {
+        Runtime::instance()->delete($guardKey);
+    }
+
+    /**
+     * 清理过期的 Runtime 统计 guard。
+     *
+     * 只清理统计模块自己写入的 `_STATISTICS_*` guard，避免误删其他运行态 key。
+     *
+     * @return void
+     */
+    protected function cleanupExpiredRuntimeStatisticGuards(): void {
+        $now = time();
+        if (($now - self::$runtimeGuardLastCleanupAt) < self::RUNTIME_GUARD_CLEANUP_INTERVAL) {
+            return;
+        }
+        foreach (Runtime::instance()->rows() as $key => $value) {
+            $key = (string)$key;
+            if (!$this->isStatisticRuntimeGuardKey($key)) {
+                continue;
+            }
+            $lockedAt = is_numeric($value) ? (int)$value : 0;
+            if ($lockedAt <= 0 || ($now - $lockedAt) >= self::RUNTIME_GUARD_EXPIRE_SECONDS) {
+                Runtime::instance()->delete($key);
+            }
+        }
+        self::$runtimeGuardLastCleanupAt = $now;
+    }
+
+    /**
+     * 判断某个 Runtime key 是否属于统计模块的短期 guard。
+     *
+     * @param string $key Runtime key。
+     * @return bool
+     */
+    protected function isStatisticRuntimeGuardKey(string $key): bool {
+        return str_starts_with($key, '_STATISTICS_')
+            || str_starts_with($key, '_STATISTICS_TOTAL_');
     }
 
     /**

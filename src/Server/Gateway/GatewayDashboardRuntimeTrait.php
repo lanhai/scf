@@ -432,6 +432,7 @@ trait GatewayDashboardRuntimeTrait {
             '/server' => ['GET'],
             '/nodes' => ['GET'],
             '/command' => ['POST'],
+            '/command_history' => ['GET'],
             '/update' => ['POST'],
             '/versions' => ['GET'],
             '/update_dashboard' => ['POST'],
