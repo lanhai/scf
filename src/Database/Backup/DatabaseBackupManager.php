@@ -604,20 +604,37 @@ class DatabaseBackupManager {
             return;
         }
 
-        $command = implode(' ', [
-            escapeshellarg($mysqldumpPath),
-            '--single-transaction',
-            '--quick',
-            '--skip-lock-tables',
-            '--set-gtid-purged=OFF',
-            '--default-character-set=' . escapeshellarg((string)$server['charset']),
-            '--host=' . escapeshellarg((string)$server['host']),
-            '--port=' . (int)$server['port'],
-            '--user=' . escapeshellarg((string)$server['username']),
-            escapeshellarg((string)$server['db_name']),
-            escapeshellarg($tableName),
-        ]);
+        $dumpResult = $this->executeMysqldumpToFile($mysqldumpPath, $server, $tableName, $targetFile, true);
+        if ($dumpResult['exit_code'] !== 0 && $this->isUnsupportedSetGtidPurgedError($dumpResult['stderr'], $dumpResult['stdout'])) {
+            // MariaDB/部分兼容客户端不识别该参数，自动降级后重试，兼容 docker 里安装的 default-mysql-client。
+            $dumpResult = $this->executeMysqldumpToFile($mysqldumpPath, $server, $tableName, $targetFile, false);
+        }
 
+        if ($dumpResult['exit_code'] !== 0) {
+            @unlink($targetFile);
+            throw new Exception('导出表失败(' . $tableName . '): ' . trim((string)($dumpResult['stderr'] ?: $dumpResult['stdout'])));
+        }
+    }
+
+    /**
+     * 执行一次 mysqldump，并把结果写入目标文件。
+     *
+     * @param string $mysqldumpPath mysqldump 路径
+     * @param array<string, mixed> $server 数据库连接配置
+     * @param string $tableName 表名
+     * @param string $targetFile 导出目标文件
+     * @param bool $includeSetGtidPurged 是否带上 GTID 参数
+     * @return array{exit_code:int,stdout:string,stderr:string}
+     * @throws Exception
+     */
+    protected function executeMysqldumpToFile(
+        string $mysqldumpPath,
+        array $server,
+        string $tableName,
+        string $targetFile,
+        bool $includeSetGtidPurged
+    ): array {
+        $command = $this->buildMysqldumpCommand($mysqldumpPath, $server, $tableName, $includeSetGtidPurged);
         if ($this->canUseSwooleCoroutine()) {
             $stderrFile = tempnam(sys_get_temp_dir(), 'scf_db_dump_err_');
             if ($stderrFile === false) {
@@ -630,15 +647,14 @@ class DatabaseBackupManager {
                     . ' > ' . escapeshellarg($targetFile)
                     . ' 2> ' . escapeshellarg($stderrFile)
                 );
-                $stderr = (string)(@file_get_contents($stderrFile) ?: '');
-                if ($shellResult['exit_code'] !== 0) {
-                    @unlink($targetFile);
-                    throw new Exception('导出表失败(' . $tableName . '): ' . trim($stderr ?: $shellResult['stdout']));
-                }
+                return [
+                    'exit_code' => (int)$shellResult['exit_code'],
+                    'stdout' => (string)$shellResult['stdout'],
+                    'stderr' => (string)(@file_get_contents($stderrFile) ?: ''),
+                ];
             } finally {
                 @unlink($stderrFile);
             }
-            return;
         }
 
         $descriptor = [
@@ -650,13 +666,62 @@ class DatabaseBackupManager {
             throw new Exception('启动 mysqldump 失败: ' . $tableName);
         }
 
-        $stderr = stream_get_contents($pipes[2]);
+        $stderr = (string)stream_get_contents($pipes[2]);
         fclose($pipes[2]);
-        $exitCode = proc_close($process);
-        if ($exitCode !== 0) {
-            @unlink($targetFile);
-            throw new Exception('导出表失败(' . $tableName . '): ' . trim((string)$stderr));
+        $exitCode = (int)proc_close($process);
+
+        return [
+            'exit_code' => $exitCode,
+            'stdout' => '',
+            'stderr' => $stderr,
+        ];
+    }
+
+    /**
+     * 构建 mysqldump 命令。
+     *
+     * @param string $mysqldumpPath mysqldump 路径
+     * @param array<string, mixed> $server 数据库连接配置
+     * @param string $tableName 表名
+     * @param bool $includeSetGtidPurged 是否带上 GTID 参数
+     * @return string
+     */
+    protected function buildMysqldumpCommand(
+        string $mysqldumpPath,
+        array $server,
+        string $tableName,
+        bool $includeSetGtidPurged
+    ): string {
+        $parts = [
+            escapeshellarg($mysqldumpPath),
+            '--single-transaction',
+            '--quick',
+            '--skip-lock-tables',
+        ];
+        if ($includeSetGtidPurged) {
+            $parts[] = '--set-gtid-purged=OFF';
         }
+        $parts[] = '--default-character-set=' . escapeshellarg((string)$server['charset']);
+        $parts[] = '--host=' . escapeshellarg((string)$server['host']);
+        $parts[] = '--port=' . (int)$server['port'];
+        $parts[] = '--user=' . escapeshellarg((string)$server['username']);
+        $parts[] = escapeshellarg((string)$server['db_name']);
+        $parts[] = escapeshellarg($tableName);
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * 判断 mysqldump 失败是否由 set-gtid-purged 参数不兼容触发。
+     *
+     * @param string $stderr 标准错误
+     * @param string $stdout 标准输出
+     * @return bool
+     */
+    protected function isUnsupportedSetGtidPurgedError(string $stderr, string $stdout = ''): bool {
+        $message = strtolower(trim($stderr ?: $stdout));
+        return str_contains($message, 'set-gtid-purged')
+            && (str_contains($message, 'unknown variable') || str_contains($message, 'unknown option'));
     }
 
     /**
