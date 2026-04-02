@@ -70,6 +70,16 @@ class LinuxCrontabManager {
     private const COMMAND_TIMEOUT_KILL_AFTER_SECONDS = 5;
 
     /**
+     * 年份约束允许的最小值。
+     */
+    private const YEAR_MIN = 1970;
+
+    /**
+     * 年份约束允许的最大值。
+     */
+    private const YEAR_MAX = 2199;
+
+    /**
      * 支持的调度类型。
      *
      * - interval: 每 N 分钟执行一次
@@ -161,9 +171,8 @@ class LinuxCrontabManager {
             'env_options' => $this->envOptions(),
             'weekday_options' => $this->weekdayOptions(),
             'schedule_type_options' => [
-                ['label' => '每隔 N 分钟', 'value' => 'interval'],
-                ['label' => '每日定时', 'value' => 'daily'],
-                ['label' => '每周定时', 'value' => 'weekly'],
+                ['label' => '循环执行', 'value' => 'interval'],
+                ['label' => '定时执行', 'value' => 'daily'],
             ],
         ];
     }
@@ -235,6 +244,9 @@ class LinuxCrontabManager {
         $role = '';
         $times = [];
         $weekdays = [];
+        $monthDays = [];
+        $months = [];
+        $years = [];
         $isInterval = false;
         $intervalMinutes = 5;
         $lockEnabled = false;
@@ -248,6 +260,9 @@ class LinuxCrontabManager {
             }
             if ($role === '' && preg_match("/-role='([^']+)'/", $line, $matches)) {
                 $role = trim((string)$matches[1]);
+            }
+            if (!$years && preg_match("/-years='([^']+)'/", $line, $matches)) {
+                $years = $this->parseYearFilter((string)$matches[1]);
             }
             if (!$lockEnabled && str_contains($line, 'flock')) {
                 $lockEnabled = true;
@@ -263,9 +278,11 @@ class LinuxCrontabManager {
                 continue;
             }
 
-            [$minute, $hour, , , $weekdayField] = array_slice($parts, 0, 5);
+            [$minute, $hour, $dayOfMonthField, $monthField, $weekdayField] = array_slice($parts, 0, 5);
             $minute = trim((string)$minute);
             $hour = trim((string)$hour);
+            $dayOfMonthField = trim((string)$dayOfMonthField);
+            $monthField = trim((string)$monthField);
             $weekdayField = trim((string)$weekdayField);
 
             if (preg_match('/^\*\/(\d+)$/', $minute, $matches)) {
@@ -284,6 +301,24 @@ class LinuxCrontabManager {
                     $weekdays[] = (int)$day;
                 }
             }
+            if ($dayOfMonthField !== '*' && $dayOfMonthField !== '') {
+                foreach (explode(',', $dayOfMonthField) as $day) {
+                    $day = trim($day);
+                    if ($day === '' || !is_numeric($day)) {
+                        continue;
+                    }
+                    $monthDays[] = (int)$day;
+                }
+            }
+            if ($monthField !== '*' && $monthField !== '') {
+                foreach (explode(',', $monthField) as $month) {
+                    $month = trim($month);
+                    if ($month === '' || !is_numeric($month)) {
+                        continue;
+                    }
+                    $months[] = (int)$month;
+                }
+            }
         }
 
         if ($namespace === '') {
@@ -294,6 +329,10 @@ class LinuxCrontabManager {
         sort($times);
         $weekdays = array_values(array_unique($weekdays));
         sort($weekdays);
+        $monthDays = array_values(array_unique($monthDays));
+        sort($monthDays);
+        $months = array_values(array_unique($months));
+        sort($months);
 
         $scheduleType = $isInterval ? 'interval' : (!empty($weekdays) ? 'weekly' : 'daily');
 
@@ -305,6 +344,9 @@ class LinuxCrontabManager {
             'interval_minutes' => $intervalMinutes,
             'times' => $scheduleType === 'interval' ? [] : $times,
             'weekdays' => $weekdays,
+            'month_days' => $monthDays,
+            'months' => $months,
+            'years' => $years,
             'lock_enabled' => $lockEnabled ? 1 : 0,
             'enabled' => 1,
             'env' => $env !== '' ? $env : $this->scopeEnv(),
@@ -797,6 +839,11 @@ class LinuxCrontabManager {
                 'roles' => [NODE_ROLE_MASTER],
             ];
         }
+        $items[] = [
+            'name' => '应用数据库备份',
+            'namespace' => '\Scf\Database\Backup\DatabaseBackupCrontab',
+            'roles' => [NODE_ROLE_MASTER],
+        ];
 
         foreach ($this->loadCgiModules() as $module) {
             foreach (($module['crontabs'] ?? $module['background_tasks'] ?? []) as $task) {
@@ -1195,6 +1242,21 @@ class LinuxCrontabManager {
             array_filter((array)($payload['weekdays'] ?? []), static fn(mixed $day): bool => $day !== '' && $day !== null)
         )));
         sort($weekdays);
+        $monthDays = array_values(array_unique(array_map(
+            static fn(mixed $day): int => (int)$day,
+            array_filter((array)($payload['month_days'] ?? []), static fn(mixed $day): bool => $day !== '' && $day !== null)
+        )));
+        sort($monthDays);
+        $months = array_values(array_unique(array_map(
+            static fn(mixed $month): int => (int)$month,
+            array_filter((array)($payload['months'] ?? []), static fn(mixed $month): bool => $month !== '' && $month !== null)
+        )));
+        sort($months);
+        $years = array_values(array_unique(array_map(
+            static fn(mixed $year): int => (int)$year,
+            array_filter((array)($payload['years'] ?? []), static fn(mixed $year): bool => $year !== '' && $year !== null)
+        )));
+        sort($years);
 
         $entry = [
             'id' => trim((string)($payload['id'] ?? '')) ?: $this->generateEntryId(),
@@ -1204,6 +1266,9 @@ class LinuxCrontabManager {
             'interval_minutes' => max(1, (int)($payload['interval_minutes'] ?? 5)),
             'times' => $times,
             'weekdays' => $weekdays,
+            'month_days' => $monthDays,
+            'months' => $months,
+            'years' => $years,
             'lock_enabled' => array_key_exists('lock_enabled', $payload)
                 ? ((int)($payload['lock_enabled'] ?? 0) === 1 ? 1 : 0)
                 : 1,
@@ -1243,6 +1308,21 @@ class LinuxCrontabManager {
                 throw new Exception('星期几配置非法');
             }
         }
+        foreach ($monthDays as $day) {
+            if ($day < 1 || $day > 31) {
+                throw new Exception('日期约束配置非法');
+            }
+        }
+        foreach ($months as $month) {
+            if ($month < 1 || $month > 12) {
+                throw new Exception('月份约束配置非法');
+            }
+        }
+        foreach ($years as $year) {
+            if ($year < self::YEAR_MIN || $year > self::YEAR_MAX) {
+                throw new Exception('年份约束配置非法');
+            }
+        }
 
         switch ($entry['schedule_type']) {
             case 'interval':
@@ -1253,7 +1333,7 @@ class LinuxCrontabManager {
                 break;
             case 'daily':
                 if (!$entry['times']) {
-                    throw new Exception('每日定时至少需要一个执行时间');
+                    throw new Exception('定时执行至少需要一个执行时间');
                 }
                 break;
             case 'weekly':
@@ -1314,6 +1394,15 @@ class LinuxCrontabManager {
 
         if ($entry['schedule_type'] !== 'weekly' && !empty($entry['weekdays'])) {
             $summary .= '（仅限 ' . implode('、', $this->weekdayLabels($entry['weekdays'])) . '）';
+        }
+        if (!empty($entry['month_days'])) {
+            $summary .= '（日期 ' . implode('、', array_map('intval', (array)$entry['month_days'])) . '）';
+        }
+        if (!empty($entry['months'])) {
+            $summary .= '（月份 ' . implode('、', array_map('intval', (array)$entry['months'])) . '）';
+        }
+        if (!empty($entry['years'])) {
+            $summary .= '（年份 ' . implode('、', array_map('intval', (array)$entry['years'])) . '）';
         }
 
         if ($this->isLockRequested($entry)) {
@@ -1419,16 +1508,18 @@ class LinuxCrontabManager {
      * @return array
      */
     protected function buildExpressions(array $entry): array {
-        $weekdaySuffix = $this->buildWeekdayCronSuffix($entry);
+        $dayOfMonthField = $this->buildDayOfMonthCronField($entry);
+        $monthField = $this->buildMonthCronField($entry);
+        $weekdayField = $this->buildWeekdayCronField($entry);
 
         return match ($entry['schedule_type']) {
-            'interval' => ['*/' . $entry['interval_minutes'] . ' * * *' . $weekdaySuffix],
+            'interval' => ['*/' . $entry['interval_minutes'] . ' * ' . $dayOfMonthField . ' ' . $monthField . ' ' . $weekdayField],
             'daily' => array_values(array_map(
-                fn(string $time): string => $this->timeToCron($time) . ' * *' . $weekdaySuffix,
+                fn(string $time): string => $this->timeToCron($time) . ' ' . $dayOfMonthField . ' ' . $monthField . ' ' . $weekdayField,
                 $entry['times']
             )),
             'weekly' => array_values(array_map(
-                fn(string $time): string => $this->timeToCron($time) . ' * *' . $weekdaySuffix,
+                fn(string $time): string => $this->timeToCron($time) . ' ' . $dayOfMonthField . ' ' . $monthField . ' ' . $weekdayField,
                 $entry['times']
             )),
             default => [],
@@ -1436,22 +1527,49 @@ class LinuxCrontabManager {
     }
 
     /**
-     * 构建 cron 表达式里的星期字段后缀。
+     * 构建 cron 表达式里的“日期”字段。
      *
      * 该约束独立于调度类型存在：
-     * - interval: 可限制只在指定星期几按固定分钟间隔执行
-     * - daily: 可限制只在指定星期几的固定时间执行
-     * - weekly: 继续保持“必须选择星期几”的显式语义
+     * - interval: 可限制只在指定日期执行分钟循环
+     * - daily/weekly: 可限制只在指定日期执行定时任务
      *
      * @param array $entry 排程配置
      * @return string
      */
-    protected function buildWeekdayCronSuffix(array $entry): string {
-        if (empty($entry['weekdays']) || !is_array($entry['weekdays'])) {
-            return ' *';
+    protected function buildDayOfMonthCronField(array $entry): string {
+        if (empty($entry['month_days']) || !is_array($entry['month_days'])) {
+            return '*';
         }
 
-        return ' ' . implode(',', array_map('intval', $entry['weekdays']));
+        return implode(',', array_map('intval', (array)$entry['month_days']));
+    }
+
+    /**
+     * 构建 cron 表达式里的“月份”字段。
+     *
+     * @param array $entry 排程配置
+     * @return string
+     */
+    protected function buildMonthCronField(array $entry): string {
+        if (empty($entry['months']) || !is_array($entry['months'])) {
+            return '*';
+        }
+
+        return implode(',', array_map('intval', (array)$entry['months']));
+    }
+
+    /**
+     * 构建 cron 表达式里的“星期”字段。
+     *
+     * @param array $entry 排程配置
+     * @return string
+     */
+    protected function buildWeekdayCronField(array $entry): string {
+        if (empty($entry['weekdays']) || !is_array($entry['weekdays'])) {
+            return '*';
+        }
+
+        return implode(',', array_map('intval', (array)$entry['weekdays']));
     }
 
     /**
@@ -1527,6 +1645,9 @@ class LinuxCrontabManager {
 
         $command .= ' -entry_id=' . escapeshellarg((string)$entry['id']);
         $command .= ' ' . escapeshellarg($this->shortClassName((string)$entry['namespace']));
+        if (!empty($entry['years']) && is_array($entry['years'])) {
+            $command .= ' -years=' . escapeshellarg(implode(',', array_map('intval', (array)$entry['years'])));
+        }
 
         $timeoutPath = $this->resolveTimeoutPath();
         if ($timeoutPath !== '') {
@@ -2218,6 +2339,34 @@ class LinuxCrontabManager {
     protected function timeToCron(string $time): string {
         [$hour, $minute] = explode(':', $time, 2);
         return (int)$minute . ' ' . (int)$hour;
+    }
+
+    /**
+     * 解析年份过滤字符串。
+     *
+     * Linux 原生 cron 没有 year 字段，这里通过命令参数携带年份列表，
+     * 在执行器里做二次过滤。该方法负责统一把字符串归一成整数列表。
+     *
+     * @param string $rawYears 形如 `2026,2027`
+     * @return array<int, int>
+     */
+    protected function parseYearFilter(string $rawYears): array {
+        $years = [];
+        foreach (preg_split('/[,\s]+/', trim($rawYears)) ?: [] as $token) {
+            $token = trim((string)$token);
+            if ($token === '' || !preg_match('/^\d{4}$/', $token)) {
+                continue;
+            }
+            $year = (int)$token;
+            if ($year < self::YEAR_MIN || $year > self::YEAR_MAX) {
+                continue;
+            }
+            $years[] = $year;
+        }
+
+        $years = array_values(array_unique($years));
+        sort($years);
+        return $years;
     }
 
     /**

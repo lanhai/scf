@@ -73,6 +73,7 @@ class Crontab implements CommandInterface {
         $commandHelp->addActionOpt('-role', '运行角色【master|slave】, 默认 master');
         $commandHelp->addActionOpt('-namespace', '显式指定完整命名空间, 优先级高于 classname');
         $commandHelp->addActionOpt('-entry_id', 'Linux 系统排程条目 id, 用于回写最近运行时间');
+        $commandHelp->addActionOpt('-years', '年份过滤列表，逗号分隔（例如 2026,2027）');
         $commandHelp->addActionOpt('-n', '查看最后 N 行日志（默认 100）');
         $commandHelp->addActionOpt('-lines', '同 -n');
         $commandHelp->addActionOpt('-f', '开启实时跟随（等价于 -follow=1）');
@@ -296,6 +297,12 @@ class Crontab implements CommandInterface {
      * @return string|null
      */
     protected function runTask(string $identifier): ?string {
+        // Linux 原生 cron 没有 year 字段。系统排程链路通过 `-years=...` 传入
+        // 年份过滤后，这里在真正执行脚本前做一次快速判定，不命中则静默跳过。
+        if (!$this->yearFilterAllowsRun()) {
+            return null;
+        }
+
         // Linux crontab 场景下优先确认业务端口确实在线，避免因为残留 pid 文件
         // 或手工停服导致离线节点仍继续跑一次性任务。
         if (!$this->isApplicationOnline()) {
@@ -334,6 +341,49 @@ class Crontab implements CommandInterface {
             $entryId !== '' && LinuxCrontabManager::markRunFinished($entryId, false, $throwable->getMessage());
             return Color::danger('【Crontab】任务执行失败: ' . $throwable->getMessage());
         }
+    }
+
+    /**
+     * 判断当前年份是否命中执行过滤。
+     *
+     * @return bool
+     */
+    protected function yearFilterAllowsRun(): bool {
+        $years = $this->parseYearFilter();
+        if (!$years) {
+            return true;
+        }
+
+        return in_array((int)date('Y'), $years, true);
+    }
+
+    /**
+     * 解析命令行里的年份过滤列表。
+     *
+     * @return array<int, int>
+     */
+    protected function parseYearFilter(): array {
+        $raw = trim((string)Manager::instance()->getOpt('years', ''));
+        if ($raw === '') {
+            return [];
+        }
+
+        $years = [];
+        foreach (preg_split('/[,\s]+/', $raw) ?: [] as $token) {
+            $token = trim((string)$token);
+            if ($token === '' || !preg_match('/^\d{4}$/', $token)) {
+                continue;
+            }
+            $year = (int)$token;
+            if ($year < 1970 || $year > 2199) {
+                continue;
+            }
+            $years[] = $year;
+        }
+
+        $years = array_values(array_unique($years));
+        sort($years);
+        return $years;
     }
 
     /**
@@ -662,6 +712,15 @@ class Crontab implements CommandInterface {
                 'mode' => TaskCrontab::RUN_MODE_LOOP,
                 'interval' => $serverConfig['db_statistics_interval'] ?? 3,
                 'timeout' => 3600,
+                'status' => STATUS_ON,
+            ]);
+        }
+        if (App::isMaster()) {
+            $tasks[] = $this->normalizeTask([
+                'name' => '应用数据库备份',
+                'namespace' => '\Scf\Database\Backup\DatabaseBackupCrontab',
+                'mode' => TaskCrontab::RUN_MODE_ONECE,
+                'timeout' => 7200,
                 'status' => STATUS_ON,
             ]);
         }

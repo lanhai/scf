@@ -15,6 +15,8 @@ use Scf\Core\Log;
 use Scf\Core\Result;
 use Scf\Core\Table\RouteTable;
 use Scf\Core\Table\Runtime;
+use Scf\Database\Backup\DatabaseBackupManager;
+use Scf\Database\Backup\DatabaseBackupRestoreManager;
 use Scf\Database\Dao;
 use Scf\Helper\ArrayHelper;
 use Scf\Helper\JsonHelper;
@@ -28,12 +30,15 @@ use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Manager;
 use Scf\Server\Task\CrontabManager;
 use Scf\Server\Task\RQueue;
+use Scf\Service\Enum\QueueStatus;
+use Scf\Service\Struct\QueueStruct;
 use Scf\Util\Auth;
 use Scf\Util\Date;
 use Scf\Util\Des;
 use Scf\Util\File;
 use Scf\Util\Random;
 use Swoole\Coroutine;
+use Swoole\Coroutine\Channel;
 use Throwable;
 
 class DashboardController extends Controller {
@@ -286,6 +291,89 @@ class DashboardController extends Controller {
         try {
             $manager = new LinuxCrontabManager();
             return Result::success($manager->sync());
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * DB 备份概览与快照列表。
+     *
+     * @return Result
+     */
+    public function actionDbBackups(): Result {
+        try {
+            $manager = new DatabaseBackupManager();
+            return Result::success($manager->overview());
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 立即执行一次数据库备份。
+     *
+     * @return Result
+     */
+    public function actionDbBackupRun(): Result {
+        Request::post()->pack($payload);
+        $dbNames = $payload['db_names'] ?? [];
+        if (is_string($dbNames)) {
+            $dbNames = array_values(array_filter(array_map(
+                static fn(string $item): string => trim($item),
+                explode(',', $dbNames)
+            )));
+        }
+        if (!is_array($dbNames)) {
+            $dbNames = [];
+        }
+
+        try {
+            $manager = new DatabaseBackupManager();
+            return Result::success($manager->runBackup($dbNames));
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 从快照恢复数据库或单表。
+     *
+     * @return Result
+     */
+    public function actionDbBackupRestore(): Result {
+        if (!Env::isDev()) {
+            return Result::error('数据库恢复只允许在测试环境执行');
+        }
+        Request::post([
+            'db_name' => Request\Validator::required('数据库名称不能为空'),
+            'snapshot' => Request\Validator::required('快照不能为空'),
+            'table',
+        ])->assign($dbName, $snapshot, $table);
+
+        try {
+            $manager = new DatabaseBackupRestoreManager();
+            return Result::success($manager->restore((string)$dbName, (string)$snapshot, $table ? (string)$table : null));
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 删除备份快照或单表备份文件。
+     *
+     * @return Result
+     */
+    public function actionDbBackupDelete(): Result {
+        Request::post([
+            'db_name' => Request\Validator::required('数据库名称不能为空'),
+            'snapshot' => Request\Validator::required('快照不能为空'),
+            'table',
+        ])->assign($dbName, $snapshot, $table);
+
+        try {
+            $manager = new DatabaseBackupManager();
+            return Result::success($manager->deleteBackup((string)$dbName, (string)$snapshot, $table ? (string)$table : null));
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
         }
@@ -770,29 +858,231 @@ class DashboardController extends Controller {
     }
 
     /**
-     * 队列管理
+     * RedisQueue 队列管理列表。
+     *
+     * 该接口为 dashboard 的 RQ 页面提供状态筛选、日期分桶和分页能力。
+     * 底层数据仍直接来自 Redis 列表，这里负责把原始任务结构整理成适合前端展示的稳定格式。
+     *
      * @return Result
      */
     public function actionQueue(): Result {
         Request::get([
-            'status' => 0,
+            'status' => QueueStatus::IN->value,
             'day' => Date::today('Y-m-d'),
             'page' => 1,
-            'size' => 500
+            'size' => 20
         ])->assign($status, $day, $page, $size);
+        $status = (int)$status;
+        $page = max(1, (int)$page);
+        $size = min(max(1, (int)$size), 200);
+        $day = (string)$day;
         $rq = RQueue::instance();
-        $count = $rq->count($status, $day);
-        $totalPage = ceil($count / $size);
         $start = ($page - 1) * $size;
-        $end = $start + $size;
-        $list = $rq->lRange($start, $end, $status, $day);
+        $end = $start + $size - 1;
+        $count = 0;
+        $items = [];
+
+        if ($this->canUseSwooleDashboardQuery()) {
+            $channel = new Channel(2);
+            // 分页总数与当前页内容是两个独立 Redis 调用，协程并发可以减少 dashboard 等待时间。
+            Coroutine::create(function () use ($channel, $rq, $status, $day): void {
+                $channel->push([
+                    'type' => 'count',
+                    'value' => $rq->count($status, $day),
+                ]);
+            });
+            Coroutine::create(function () use ($channel, $rq, $start, $end, $status, $day): void {
+                $channel->push([
+                    'type' => 'items',
+                    'value' => $rq->lRange($start, $end, $status, $day),
+                ]);
+            });
+            for ($i = 0; $i < 2; $i++) {
+                $payload = $channel->pop();
+                if (!is_array($payload)) {
+                    continue;
+                }
+                if (($payload['type'] ?? '') === 'count') {
+                    $count = (int)($payload['value'] ?? 0);
+                } elseif (($payload['type'] ?? '') === 'items') {
+                    $items = (array)($payload['value'] ?? []);
+                }
+            }
+        } else {
+            $count = $rq->count($status, $day);
+            $items = (array)$rq->lRange($start, $end, $status, $day);
+        }
+
+        $totalPage = $count > 0 ? (int)ceil($count / $size) : 0;
+        if ($totalPage > 0 && $page > $totalPage) {
+            $page = $totalPage;
+            $start = ($page - 1) * $size;
+            $end = $start + $size - 1;
+            $items = (array)$rq->lRange($start, $end, $status, $day);
+        }
+        $list = [];
+        if ($count > 0) {
+            foreach ($items as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $list[] = $this->normalizeQueueRecord($item, $status, $day);
+            }
+        }
         return Result::success([
+            'status' => $status,
             'day' => $day,
             'total' => $count,
             'pn' => $page,
             'pages' => $totalPage,
+            'size' => $size,
+            'status_options' => $this->queueStatusOptions(),
             'list' => $list
         ]);
+    }
+
+    /**
+     * 手动重新投递历史 RedisQueue 任务。
+     *
+     * 该操作只允许针对已完成/已失败任务进行，执行时复制一份新的待执行任务入队，
+     * 不会删除或覆盖原来的历史记录。
+     *
+     * @return Result
+     */
+    public function actionQueueRedeliver(): Result {
+        Request::post([
+            'task_id' => Request\Validator::required('任务ID不能为空'),
+            'status' => Request\Validator::required('任务状态不能为空'),
+            'day' => Date::today('Y-m-d')
+        ])->assign($taskId, $status, $day);
+        $status = (int)$status;
+        $day = (string)$day;
+        if (!in_array($status, [QueueStatus::FINISHED->value, QueueStatus::FAILED->value], true)) {
+            return Result::error('仅已完成或失败队列支持手动重新投递');
+        }
+        try {
+            $result = RQueue::instance()->redeliver((string)$taskId, $status, $day);
+            return Result::success($result);
+        } catch (Throwable $throwable) {
+            return Result::error($throwable->getMessage());
+        }
+    }
+
+    /**
+     * 返回 dashboard 使用的队列状态选项。
+     *
+     * 完成/失败队列按日期分桶，前端需要根据该标记决定是否展示日期筛选器。
+     *
+     * @return array<int, array<string, int|string|bool>>
+     */
+    protected function queueStatusOptions(): array {
+        return [
+            [
+                'label' => '队列中',
+                'value' => QueueStatus::IN->value,
+                'uses_day' => false,
+            ],
+            [
+                'label' => '已完成',
+                'value' => QueueStatus::FINISHED->value,
+                'uses_day' => true,
+            ],
+            [
+                'label' => '待重试',
+                'value' => QueueStatus::DELAY->value,
+                'uses_day' => false,
+            ],
+            [
+                'label' => '失败',
+                'value' => QueueStatus::FAILED->value,
+                'uses_day' => true,
+            ],
+        ];
+    }
+
+    /**
+     * 将 Redis 中的原始队列结构整理成 dashboard 展示结构。
+     *
+     * 这里保留原始 payload/result，便于前端详情抽屉直接查看，同时补充可读的状态标签、
+     * 摘要文案和是否允许重投等 UI 元信息，避免页面自行推断底层语义。
+     *
+     * @param array $item Redis 中读取出的单条队列任务
+     * @param int $fallbackStatus 列表筛选状态，用于兜底原始结构缺失 status 时显示
+     * @param string $day 当前查询的日期分桶
+     * @return array<string, mixed>
+     */
+    protected function normalizeQueueRecord(array $item, int $fallbackStatus, string $day): array {
+        $queue = QueueStruct::factory($item);
+        $status = is_numeric($queue->status) ? (int)$queue->status : $fallbackStatus;
+        return [
+            'id' => (string)($queue->id ?? ''),
+            'handler' => (string)($queue->handler ?? ''),
+            'status' => $status,
+            'status_label' => $this->queueStatusLabel($status),
+            'queue_day' => $day,
+            'retry' => (int)($queue->retry ?? 0),
+            'try_times' => (int)($queue->try_times ?? 0),
+            'try_limit' => (int)($queue->try_limit ?? 0),
+            'created' => (int)($queue->created ?? 0),
+            'updated' => (int)($queue->updated ?? 0),
+            'next_try' => (int)($queue->next_try ?? 0),
+            'finished' => (int)($queue->finished ?? 0),
+            'start' => (int)($queue->start ?? 0),
+            'end' => (int)($queue->end ?? 0),
+            'duration' => (int)($queue->duration ?? 0),
+            'remark' => (string)($queue->remark ?? ''),
+            'data' => $queue->data ?: [],
+            'result' => $queue->result ?: [],
+            'data_preview' => $this->queuePayloadPreview($queue->data),
+            'result_preview' => $this->queuePayloadPreview($queue->result),
+            'can_redeliver' => in_array($status, [QueueStatus::FINISHED->value, QueueStatus::FAILED->value], true),
+        ];
+    }
+
+    /**
+     * 将队列状态值转换为固定中文文案。
+     *
+     * @param int $status
+     * @return string
+     */
+    protected function queueStatusLabel(int $status): string {
+        return match ($status) {
+            QueueStatus::FINISHED->value => '已完成',
+            QueueStatus::DELAY->value => '待重试',
+            QueueStatus::FAILED->value => '失败',
+            default => '队列中',
+        };
+    }
+
+    /**
+     * 为列表页生成一段紧凑的 payload 摘要。
+     *
+     * 队列任务的 data/result 可能较大，列表只展示预览文本，详细内容交由抽屉查看。
+     *
+     * @param mixed $payload
+     * @return string
+     */
+    protected function queuePayloadPreview(mixed $payload): string {
+        if (is_null($payload) || $payload === '' || $payload === []) {
+            return '--';
+        }
+        $text = is_scalar($payload) ? (string)$payload : JsonHelper::toJson($payload);
+        $text = trim((string)preg_replace('/\s+/', ' ', $text));
+        if (mb_strlen($text) > 140) {
+            return mb_substr($text, 0, 140) . '...';
+        }
+        return $text;
+    }
+
+    /**
+     * 当前是否处于适合执行 dashboard Redis 并发查询的协程上下文。
+     *
+     * @return bool
+     */
+    protected function canUseSwooleDashboardQuery(): bool {
+        return class_exists(Coroutine::class)
+            && class_exists(Channel::class)
+            && Coroutine::getCid() > 0;
     }
 
     /**
@@ -966,6 +1256,54 @@ class DashboardController extends Controller {
                         'meta' => [
                             'title' => 'Linux 排程',
                             'icon' => 'time-line',
+                            'noColumn' => true,
+                            'noClosable' => true
+                        ],
+                    ],
+                ]
+            ],
+            [
+                'path' => '/db-backup-root',
+                'name' => 'DbBackupRoot',
+                'component' => 'Layout',
+                'meta' => [
+                    'title' => 'DB',
+                    'icon' => 'database-2-line',
+                    'levelHidden' => true,
+                    'breadcrumbHidden' => true
+                ],
+                'children' => [
+                    [
+                        'path' => '/db-backups',
+                        'name' => 'DbBackups',
+                        'component' => '/@/views/db-backups/index.vue',
+                        'meta' => [
+                            'title' => 'DB 备份',
+                            'icon' => 'database-2-line',
+                            'noColumn' => true,
+                            'noClosable' => true
+                        ],
+                    ],
+                ]
+            ],
+            [
+                'path' => '/rqueue-root',
+                'name' => 'RQueueRoot',
+                'component' => 'Layout',
+                'meta' => [
+                    'title' => 'RQ',
+                    'icon' => 'todo-line',
+                    'levelHidden' => true,
+                    'breadcrumbHidden' => true
+                ],
+                'children' => [
+                    [
+                        'path' => '/rqueue',
+                        'name' => 'RQueue',
+                        'component' => '/@/views/rqueue/index.vue',
+                        'meta' => [
+                            'title' => 'RedisQueue',
+                            'icon' => 'todo-line',
                             'noColumn' => true,
                             'noClosable' => true
                         ],

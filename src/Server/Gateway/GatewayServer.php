@@ -278,6 +278,10 @@ class GatewayServer {
         });
 
         $this->server->on('WorkerStart', function (Server $server, int $workerId) {
+            // Gateway worker 也会直接执行 dashboard controller action。
+            // 这些 action 里会读取应用 cache/database 配置，因此必须和 upstream worker 一样
+            // 在 worker 生命周期起点完成 App::mount()，避免退回框架默认配置。
+            App::mount();
             if ($workerId !== 0) {
                 return;
             }
