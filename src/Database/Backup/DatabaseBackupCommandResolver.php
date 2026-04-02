@@ -11,6 +11,9 @@ use Scf\Core\Exception;
  * 统一处理守护进程 PATH 精简场景，避免上层业务重复写命令探测逻辑。
  */
 class DatabaseBackupCommandResolver {
+    protected const MYSQL_BINARIES = ['mysql', 'mariadb'];
+    protected const MYSQL_DUMP_BINARIES = ['mysqldump', 'mariadb-dump'];
+
     /**
      * mysql 可执行路径缓存。
      *
@@ -34,9 +37,21 @@ class DatabaseBackupCommandResolver {
     public function mysql(): string {
         $path = $this->resolveMysqlPath();
         if ($path === '') {
-            throw new Exception('系统未找到 mysql 命令，请先安装 MySQL Client');
+            throw new Exception('系统未找到 mysql/mariadb 命令，请先安装 MySQL Client');
         }
         return $path;
+    }
+
+    /**
+     * 返回 mysql 命令路径；未找到时返回空字符串而不是抛异常。
+     *
+     * backup/restore 在 docker 运行时允许回退到 PHP 数据库扩展实现，
+     * 因此上层需要一个“可探测但不抛错”的接口来决定是否走命令行分支。
+     *
+     * @return string
+     */
+    public function mysqlOrNull(): string {
+        return $this->resolveMysqlPath();
     }
 
     /**
@@ -48,9 +63,18 @@ class DatabaseBackupCommandResolver {
     public function mysqldump(): string {
         $path = $this->resolveMysqldumpPath();
         if ($path === '') {
-            throw new Exception('系统未找到 mysqldump 命令，请先安装 MySQL Client');
+            throw new Exception('系统未找到 mysqldump/mariadb-dump 命令，请先安装 MySQL Client');
         }
         return $path;
+    }
+
+    /**
+     * 返回 mysqldump 命令路径；未找到时返回空字符串而不是抛异常。
+     *
+     * @return string
+     */
+    public function mysqldumpOrNull(): string {
+        return $this->resolveMysqldumpPath();
     }
 
     /**
@@ -62,7 +86,7 @@ class DatabaseBackupCommandResolver {
         if (!is_null($this->mysqlPath)) {
             return $this->mysqlPath;
         }
-        $this->mysqlPath = $this->resolveCommand('mysql');
+        $this->mysqlPath = $this->resolveCommandAliases(self::MYSQL_BINARIES);
         return $this->mysqlPath;
     }
 
@@ -75,8 +99,28 @@ class DatabaseBackupCommandResolver {
         if (!is_null($this->mysqldumpPath)) {
             return $this->mysqldumpPath;
         }
-        $this->mysqldumpPath = $this->resolveCommand('mysqldump');
+        $this->mysqldumpPath = $this->resolveCommandAliases(self::MYSQL_DUMP_BINARIES);
         return $this->mysqldumpPath;
+    }
+
+    /**
+     * 依次尝试一组等价命令名。
+     *
+     * 部分 docker 镜像内安装的是 MariaDB Client，二进制名会变成
+     * `mariadb` / `mariadb-dump`，这里统一做兼容探测。
+     *
+     * @param array<int, string> $binaryNames
+     * @return string
+     */
+    protected function resolveCommandAliases(array $binaryNames): string {
+        foreach ($binaryNames as $binaryName) {
+            $resolved = $this->resolveCommand($binaryName);
+            if ($resolved !== '') {
+                return $resolved;
+            }
+        }
+
+        return '';
     }
 
     /**

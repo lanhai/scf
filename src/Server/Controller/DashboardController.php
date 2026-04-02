@@ -342,14 +342,22 @@ class DashboardController extends Controller {
      * @return Result
      */
     public function actionDbBackupRestore(): Result {
-        if (!Env::isDev()) {
-            return Result::error('数据库恢复只允许在测试环境执行');
-        }
         Request::post([
             'db_name' => Request\Validator::required('数据库名称不能为空'),
             'snapshot' => Request\Validator::required('快照不能为空'),
             'table',
-        ])->assign($dbName, $snapshot, $table);
+            'confirm' => Request\Validator::required('恢复确认信息不能为空'),
+        ])->assign($dbName, $snapshot, $table, $confirm);
+
+        // 恢复会直接写回数据库，接口层必须再次校验前端输入的确认串，避免被误触发或绕过按钮态。
+        $expectedConfirm = $this->buildDbBackupRestoreConfirmation(
+            (string)$dbName,
+            (string)$snapshot,
+            $table ? (string)$table : null
+        );
+        if ((string)$confirm !== $expectedConfirm) {
+            return Result::error('恢复确认信息不匹配');
+        }
 
         try {
             $manager = new DatabaseBackupRestoreManager();
@@ -357,6 +365,21 @@ class DashboardController extends Controller {
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
         }
+    }
+
+    /**
+     * 生成数据库恢复操作的确认串。
+     *
+     * 恢复属于高风险写操作，dashboard 必须把数据库、快照和表名
+     * 拼成一条显式确认信息，前后端各自校验一次后才允许执行。
+     *
+     * @param string $dbName 数据库名称
+     * @param string $snapshot 快照目录名称
+     * @param string|null $table 可选的单表名称
+     * @return string
+     */
+    protected function buildDbBackupRestoreConfirmation(string $dbName, string $snapshot, ?string $table = null): string {
+        return $table ? "{$dbName}/{$snapshot}/{$table}" : "{$dbName}/{$snapshot}";
     }
 
     /**

@@ -3,8 +3,10 @@
 namespace Scf\Database\Backup;
 
 use Scf\Core\Exception;
+use mysqli;
 use Swoole\Coroutine;
 use Swoole\Coroutine\System;
+use Throwable;
 
 /**
  * 数据库备份恢复管理器。
@@ -45,7 +47,8 @@ class DatabaseBackupRestoreManager {
      * @throws Exception
      */
     public function restore(string $dbName, string $snapshot, ?string $table = null): array {
-        $dbName = $this->backupManager->assertDbName($dbName);
+        // 恢复入口允许传真实库名或 database.mysql 别名，先归一化再查找快照目录和连接配置。
+        $dbName = $this->backupManager->resolveConfiguredDatabaseName($dbName);
         $snapshot = $this->backupManager->assertSnapshot($snapshot);
         $tableFile = is_null($table) || trim($table) === '' ? null : $this->backupManager->assertTableFile($table);
         $snapshotDir = $this->backupManager->snapshotDirectory($dbName, $snapshot);
@@ -109,7 +112,12 @@ class DatabaseBackupRestoreManager {
      * @throws Exception
      */
     protected function restoreFromSqlFile(array $server, string $sqlFile): void {
-        $mysql = $this->commandResolver->mysql();
+        $mysql = $this->commandResolver->mysqlOrNull();
+        if ($mysql === '') {
+            $this->restoreFromSqlFileViaMysqli($server, $sqlFile);
+            return;
+        }
+
         $command = implode(' ', [
             escapeshellarg($mysql),
             '--host=' . escapeshellarg((string)$server['host']),
@@ -230,6 +238,163 @@ class DatabaseBackupRestoreManager {
         }
         sort($files, SORT_STRING);
         return $files;
+    }
+
+    /**
+     * 使用 mysqli 执行 SQL 文件恢复。
+     *
+     * docker 运行镜像缺少 mysql 客户端时，恢复仍可借助 mysqli 扩展逐条执行 SQL。
+     * 这里按语句边界流式解析文件，避免整份 SQL 一次性读入内存。
+     *
+     * @param array<string, mixed> $server 数据库连接配置
+     * @param string $sqlFile SQL 文件路径
+     * @return void
+     * @throws Exception
+     */
+    protected function restoreFromSqlFileViaMysqli(array $server, string $sqlFile): void {
+        $mysqli = $this->openMysqliConnection($server);
+
+        try {
+            foreach ($this->readSqlStatements($sqlFile) as $statement) {
+                if (!@$mysqli->query($statement)) {
+                    throw new Exception('恢复失败: ' . $mysqli->error);
+                }
+            }
+        } finally {
+            $mysqli->close();
+        }
+    }
+
+    /**
+     * 从 SQL 文件中逐条读取语句。
+     *
+     * 解析时会跳过常见注释，并识别字符串/反引号上下文，确保不会在值里的分号处误切分。
+     * 这足以覆盖本项目备份文件以及常规 mysqldump 产出的绝大部分 SQL。
+     *
+     * @param string $sqlFile SQL 文件路径
+     * @return \Generator<int, string>
+     * @throws Exception
+     */
+    protected function readSqlStatements(string $sqlFile): \Generator {
+        $handle = @fopen($sqlFile, 'rb');
+        if (!$handle) {
+            throw new Exception('读取备份文件失败: ' . $sqlFile);
+        }
+
+        $statement = '';
+        $inSingleQuote = false;
+        $inDoubleQuote = false;
+        $inBacktick = false;
+        $inBlockComment = false;
+        $inLineComment = false;
+        $escaped = false;
+
+        try {
+            while (($line = fgets($handle)) !== false) {
+                $length = strlen($line);
+                for ($index = 0; $index < $length; $index++) {
+                    $char = $line[$index];
+                    $next = $index + 1 < $length ? $line[$index + 1] : '';
+                    $prev = $index > 0 ? $line[$index - 1] : '';
+
+                    if ($inLineComment) {
+                        if ($char === "\n") {
+                            $inLineComment = false;
+                        }
+                        continue;
+                    }
+
+                    if ($inBlockComment) {
+                        if ($char === '*' && $next === '/') {
+                            $inBlockComment = false;
+                            $index++;
+                        }
+                        continue;
+                    }
+
+                    if (!$inSingleQuote && !$inDoubleQuote && !$inBacktick) {
+                        if ($char === '-' && $next === '-' && ($index + 2 >= $length || ctype_space($line[$index + 2]))) {
+                            $inLineComment = true;
+                            $index++;
+                            continue;
+                        }
+                        if ($char === '#') {
+                            $inLineComment = true;
+                            continue;
+                        }
+                        if ($char === '/' && $next === '*') {
+                            $inBlockComment = true;
+                            $index++;
+                            continue;
+                        }
+                    }
+
+                    if ($char === "'" && !$inDoubleQuote && !$inBacktick && !$escaped) {
+                        $inSingleQuote = !$inSingleQuote;
+                    } elseif ($char === '"' && !$inSingleQuote && !$inBacktick && !$escaped) {
+                        $inDoubleQuote = !$inDoubleQuote;
+                    } elseif ($char === '`' && !$inSingleQuote && !$inDoubleQuote) {
+                        $inBacktick = !$inBacktick;
+                    }
+
+                    $statement .= $char;
+
+                    if ($char === ';' && !$inSingleQuote && !$inDoubleQuote && !$inBacktick) {
+                        $trimmed = trim($statement);
+                        if ($trimmed !== '') {
+                            yield $trimmed;
+                        }
+                        $statement = '';
+                    }
+
+                    $escaped = $char === '\\' && !$escaped && ($inSingleQuote || $inDoubleQuote) && $prev !== '\\';
+                    if ($char !== '\\') {
+                        $escaped = false;
+                    }
+                }
+
+                $inLineComment = false;
+            }
+
+            $tail = trim($statement);
+            if ($tail !== '') {
+                yield $tail;
+            }
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /**
+     * 打开一条 mysqli 直连。
+     *
+     * @param array<string, mixed> $server 数据库连接配置
+     * @return mysqli
+     * @throws Exception
+     */
+    protected function openMysqliConnection(array $server): mysqli {
+        $mysqli = mysqli_init();
+        if (!$mysqli instanceof mysqli) {
+            throw new Exception('初始化 mysqli 失败');
+        }
+
+        if (!@$mysqli->real_connect(
+            (string)$server['host'],
+            (string)$server['username'],
+            (string)$server['password'],
+            (string)$server['db_name'],
+            (int)$server['port']
+        )) {
+            throw new Exception('连接数据库失败(' . $server['db_name'] . '): ' . mysqli_connect_error());
+        }
+
+        if (!$mysqli->set_charset((string)$server['charset'])) {
+            $error = $mysqli->error;
+            $mysqli->close();
+            throw new Exception('设置数据库字符集失败(' . $server['db_name'] . '): ' . $error);
+        }
+
+        return $mysqli;
     }
 
     /**
