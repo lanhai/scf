@@ -74,12 +74,14 @@ class DatabaseBackupManager {
      * @throws Exception
      */
     public function overview(): array {
+        $runtimeDiagnostics = $this->runtimeDiagnostics();
         return [
             'app' => APP_DIR_NAME,
             'env' => SERVER_RUN_ENV,
             'app_src_type' => APP_SRC_TYPE,
             'app_src' => App::src(),
             'database_config_source' => $this->databaseConfigSource(),
+            'runtime_diagnostics' => $runtimeDiagnostics,
             'backup_root' => $this->backupRoot(),
             'retention_limit' => self::RETENTION_LIMIT,
             'configured_databases' => array_values(array_map(
@@ -93,6 +95,33 @@ class DatabaseBackupManager {
                 $this->databaseServers()
             )),
             'databases' => $this->listBackupSnapshots(),
+        ];
+    }
+
+    /**
+     * 返回当前运行时的数据库备份/恢复执行诊断信息。
+     *
+     * dashboard 需要把“当前是否有 MySQL Client”以及“备份/恢复会走哪条方案”
+     * 直接展示给运维人员，避免在容器环境里看到失败后还要再翻日志确认现场。
+     *
+     * @return array<string, mixed>
+     */
+    public function runtimeDiagnostics(): array {
+        $mysqlCommand = $this->commandResolver->mysqlOrNull();
+        $mysqldumpCommand = $this->commandResolver->mysqldumpOrNull();
+
+        return [
+            'mysql_command' => $mysqlCommand,
+            'mysqldump_command' => $mysqldumpCommand,
+            'mysql_client_available' => $mysqlCommand !== '' && $mysqldumpCommand !== '',
+            'mysql_client_status' => match (true) {
+                $mysqlCommand !== '' && $mysqldumpCommand !== '' => '完整可用',
+                $mysqlCommand !== '' || $mysqldumpCommand !== '' => '部分可用',
+                default => '不可用',
+            },
+            'backup_strategy' => $mysqldumpCommand !== '' ? 'mysqldump' : 'mysqli 直连兜底',
+            'restore_strategy' => $mysqlCommand !== '' ? 'mysql client' : 'mysqli 直连兜底',
+            'php_mysqli_available' => extension_loaded('mysqli'),
         ];
     }
 
