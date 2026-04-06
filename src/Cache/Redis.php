@@ -589,6 +589,49 @@ class Redis extends Cache {
     }
 
     /**
+     * 批量获取存储在哈希表中多个字段的值。
+     *
+     * 这里保持和单条 `hget()` 一致的行为边界：
+     * - 自动补 key 前缀；
+     * - 自动把 JSON 字符串恢复成数组；
+     * - 返回值按传入 field 顺序映射回 field => value，避免调用方自己猜底层驱动返回格式。
+     *
+     * @param string $key
+     * @param array<int, string> $hashKeys
+     * @return array<string, mixed>|false
+     */
+    public function hmget(string $key, array $hashKeys): array|false {
+        $logger = ProcessLife::instance();
+        $hashKeys = array_values(array_filter(array_map(static fn($field) => trim((string)$field), $hashKeys)));
+        if (!$hashKeys) {
+            return [];
+        }
+        try {
+            $data = $this->connection->hMget($this->setPrefix($key), $hashKeys);
+            if ($data === false) {
+                $logger->hitRedis(false);
+                return false;
+            }
+        } catch (Throwable $exception) {
+            $this->onExecuteError($exception);
+            return false;
+        }
+        $logger->hitRedis();
+        if (!is_array($data)) {
+            return false;
+        }
+        $items = [];
+        $isSequential = array_keys($data) === range(0, count($data) - 1);
+        foreach ($hashKeys as $index => $field) {
+            $value = $isSequential ? ($data[$index] ?? false) : ($data[$field] ?? false);
+            $items[$field] = is_string($value) && StringHelper::isJson($value)
+                ? JsonHelper::recover($value)
+                : $value;
+        }
+        return $items;
+    }
+
+    /**
      * 获取存储在哈希表中所有字段的值
      * @param string $key
      * @return array|false|mixed
@@ -638,7 +681,10 @@ class Redis extends Cache {
      */
     public function hScan(string $key, int $cursor = 0, int $count = 200): array|false {
         try {
-            $iterator = max(0, $cursor);
+            // phpredis 的首轮 HSCAN 需要传 null 作为游标；
+            // 如果这里把首轮游标硬塞成 0，非空 hash 也会直接返回 false，
+            // 进而让依赖 hScan 的 bucket 索引重建和 hash fallback 全部失效。
+            $iterator = $cursor > 0 ? $cursor : null;
             $rawItems = $this->connection->hScan($this->setPrefix($key), $iterator, null, $count > 0 ? $count : null);
             if ($rawItems === false) {
                 return false;
@@ -663,7 +709,7 @@ class Redis extends Cache {
                 }
             }
             return [
-                'cursor' => (int)$iterator,
+                'cursor' => (int)($iterator ?? 0),
                 'items' => $items,
             ];
         } catch (Throwable $exception) {

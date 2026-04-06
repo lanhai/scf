@@ -17,12 +17,42 @@ class RedisLogger implements LoggerInterface {
      * @return void
      */
     public function trace(float $time, string $cmd, array $args, ?Throwable $exception): void {
+        $argSummary = $this->buildArgSummary($args);
         if (ProcessLife::enabled()) {
-            ProcessLife::instance()->addRedis("{$cmd} {$args[0]} " . ($args[1] ?? ""), $time);
+            ProcessLife::instance()->addRedis("{$cmd} {$argSummary}", $time);
         }
-        PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? "") . "t={$time}ms");
+        PRINT_REDIS_LOG and Console::info("【Redis】{$cmd} {$argSummary}t={$time}ms");
         if (!is_null($exception)) {
-            Console::error("【Redis】{$cmd} {$args[0]} " . ($args[1] ?? " ") . "[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile(), false);
+            Console::error("【Redis】{$cmd} {$argSummary}[{$exception->getMessage()}]" . ";file:" . $exception->getLine() . "@" . $exception->getFile(), false);
         }
+    }
+
+    /**
+     * 把 Redis 命令参数压成可安全输出的单行摘要。
+     *
+     * logger 不能假设参数永远是标量；像 HMGET 这类命令会把 field 数组整体透传到底层。
+     * 这里只做日志用途的轻量序列化，避免数组直接拼接触发 “Array to string conversion”。
+     *
+     * @param array $args
+     * @return string
+     */
+    protected function buildArgSummary(array $args): string {
+        $parts = array_map(function ($arg): string {
+            if (is_array($arg)) {
+                $json = json_encode($arg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                return is_string($json) ? $json : '[array]';
+            }
+            if (is_bool($arg)) {
+                return $arg ? 'true' : 'false';
+            }
+            if ($arg === null) {
+                return 'null';
+            }
+            if (is_scalar($arg)) {
+                return (string)$arg;
+            }
+            return '[' . get_debug_type($arg) . ']';
+        }, $args);
+        return trim(implode(' ', $parts)) . ' ';
     }
 }

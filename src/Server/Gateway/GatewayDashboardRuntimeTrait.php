@@ -308,7 +308,7 @@ trait GatewayDashboardRuntimeTrait {
                     $this->sendCommandToAllNodeClients('reload');
                     $this->pushDashboardEvent([
                         'event' => 'console',
-                        'message' => ['data' => '已向所有节点发送业务重启指令，当前 Gateway 开始重启本地业务平面'],
+                        'message' => ['data' => '已向所有节点发送实例重启指令，当前 Gateway 开始重启本地业务实例'],
                         'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);
@@ -317,25 +317,33 @@ trait GatewayDashboardRuntimeTrait {
                     if ($result->hasError()) {
                         $this->pushDashboardEvent([
                             'event' => 'console',
-                            'message' => ['data' => '本地业务平面重载失败: ' . $result->getMessage()],
+                            'message' => ['data' => '本地业务实例重启失败: ' . $result->getMessage()],
                             'time' => Console::timestamp(),
                             'node' => SERVER_HOST,
                         ], $frame->fd);
                     }
                 });
                 break;
-            case 'restartRedisQueueAll':
+            case 'reloadGatewayAll':
                 Coroutine::create(function () use ($frame) {
                     Console::info("【Gateway】Dashboard Socket命令: {$frame->data}");
-                    $this->sendCommandToAllNodeClients('restart_redisqueue');
+                    $this->sendCommandToAllNodeClients('reload_gateway');
                     $this->pushDashboardEvent([
                         'event' => 'console',
-                        'message' => ['data' => '已向所有子节点发送 RedisQueue 重启指令，当前 Gateway 开始重启本地 RedisQueue 子进程'],
+                        'message' => ['data' => '已向所有子节点发送 Gateway reload 指令，当前 Gateway 开始 reload 并重拉本地子进程'],
                         'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);
                     $this->pushDashboardStatus();
-                    $this->dispatchLocalGatewayCommand('restart_redisqueue');
+                    $result = $this->dispatchLocalGatewayCommand('reload_gateway');
+                    if ($result->hasError()) {
+                        $this->pushDashboardEvent([
+                            'event' => 'console',
+                            'message' => ['data' => '本地 Gateway reload 失败: ' . $result->getMessage()],
+                            'time' => Console::timestamp(),
+                            'node' => SERVER_HOST,
+                        ], $frame->fd);
+                    }
                 });
                 break;
             case 'restartAll':
@@ -344,7 +352,7 @@ trait GatewayDashboardRuntimeTrait {
                     $this->sendCommandToAllNodeClients('restart', ['preserve_managed_upstreams' => false]);
                     $this->pushDashboardEvent([
                         'event' => 'console',
-                        'message' => ['data' => '已向所有子节点发送重启指令，当前 Gateway 开始重启'],
+                        'message' => ['data' => '已向所有子节点发送 Reboot 指令，当前 Gateway 开始 shutdown，等待外部 boot 重新拉起'],
                         'time' => Console::timestamp(),
                         'node' => SERVER_HOST,
                     ], $frame->fd);

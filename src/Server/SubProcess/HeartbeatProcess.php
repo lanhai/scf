@@ -177,7 +177,9 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
         $node->public_version = App::publicVersion() ?: (App::info()?->toArray()['public_version'] ?? (App::profile()->public_version ?: '--'));
         $node->framework_build_version = FRAMEWORK_BUILD_VERSION;
         $node->heart_beat = time();
-        $node->framework_update_ready = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
+        // The framework package becomes usable after the instance restart itself, so heartbeat payloads
+        // should not continue advertising a separate "upgrade ready / waiting for Gateway restart" state.
+        $node->framework_update_ready = false;
         $node->tables = ATable::list();
         $node->restart_times = Counter::instance()->get(Key::COUNTER_SERVER_RESTART) ?: 0;
         $node->stack_useage = memory_get_usage(true);
@@ -227,6 +229,12 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                 $socket->push("【" . SERVER_HOST . "】start reload");
                 $this->call('trigger_reload');
                 $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', "【" . SERVER_HOST . "】reload 指令已执行");
+                return true;
+            case 'reload_gateway':
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】收到 reload_gateway 指令");
+                $socket->push("【" . SERVER_HOST . "】start gateway reload");
+                $this->call('trigger_gateway_reload', (bool)($params['restart_managed_upstreams'] ?? false));
+                $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'success', "【" . SERVER_HOST . "】reload_gateway 指令已执行");
                 return true;
             case 'restart':
                 $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】收到 restart 指令");
@@ -434,10 +442,8 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                 $result = $this->executeRemoteAppointUpdate($type, $version, $taskId);
                 $reportedState = (string)(($result['data'] ?? [])['master']['state'] ?? '');
                 if (!empty($result['ok']) && $reportedState !== 'failed') {
-                    $finalState = $reportedState === 'pending' ? 'pending' : 'success';
-                    $finalMessage = $finalState === 'pending'
-                        ? "【" . SERVER_HOST . "】版本更新已完成，等待重启生效:{$type} => {$version}"
-                        : "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}";
+                    $finalState = 'success';
+                    $finalMessage = "【" . SERVER_HOST . "】版本更新成功:{$type} => {$version}";
                     $socket->push(JsonHelper::toJson(array_replace_recursive($statePayload, [
                         'data' => [
                             'state' => $finalState,

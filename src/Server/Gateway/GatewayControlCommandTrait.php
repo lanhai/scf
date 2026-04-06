@@ -169,12 +169,13 @@ trait GatewayControlCommandTrait {
         switch ($command) {
             case 'reload':
                 return [
-                    'result' => $this->dispatchGatewayBusinessCommand('reload', [], false, 0, '业务实例与业务子进程已开始重启'),
+                    'result' => $this->dispatchGatewayBusinessCommand('reload', [], false, 0, '业务实例已开始重启'),
                     'internal_error_status' => 409,
                     'internal_success_status' => 200,
                 ];
             case 'reload_gateway':
-                $reservation = $this->reserveGatewayReload();
+                $restartManagedUpstreams = (bool)($params['restart_managed_upstreams'] ?? false);
+                $reservation = $this->reserveGatewayReload($restartManagedUpstreams);
                 if (!$reservation['accepted']) {
                     return [
                         'result' => Result::error($reservation['message']),
@@ -251,17 +252,20 @@ trait GatewayControlCommandTrait {
             case 'restart':
                 if ($this->gatewayShutdownScheduled) {
                     return [
-                        'result' => Result::error('Gateway 已进入关闭流程，无法再发起重启'),
+                        'result' => Result::error('Gateway 已进入关闭流程，无法再发起 Reboot'),
                         'internal_error_status' => 409,
                     ];
                 }
-                // restart 默认走“先回收业务实例，再重启 gateway 控制面”。
-                // 仅当显式传入 preserve_managed_upstreams=true 时才保留 upstream。
+                // restart 在 dashboard 里对应 Reboot。
+                // 语义是先 shutdown 当前 gateway，再等待外部 boot 重新拉起。
                 $preserveManagedUpstreams = (bool)($params['preserve_managed_upstreams'] ?? false);
                 return [
-                    'result' => Result::success($preserveManagedUpstreams ? 'Gateway 控制面已开始重启' : 'Gateway 与业务实例已开始重启'),
+                    'result' => Result::success($preserveManagedUpstreams
+                        ? 'Gateway 已开始 Reboot，保留业务实例等待外部 boot 拉起'
+                        : 'Gateway 已开始 Reboot，等待外部 boot 重新拉起'
+                    ),
                     'internal_success_status' => 200,
-                    'internal_message' => $preserveManagedUpstreams ? 'gateway control-plane restart started' : 'gateway full restart started',
+                    'internal_message' => $preserveManagedUpstreams ? 'gateway control-plane reboot started' : 'gateway reboot started',
                     'after_write' => function () use ($preserveManagedUpstreams): void {
                         $this->scheduleGatewayShutdown($preserveManagedUpstreams);
                     },
@@ -529,6 +533,23 @@ trait GatewayControlCommandTrait {
         ];
     }
 
+    /**
+     * 构建 dashboard 升级任务的 accepted 文案。
+     *
+     * 这里反馈的是“已向多少个 slave 下发升级指令”，而不是最终升级成功数。
+     * 当当前集群没有 slave 时，明确提示仅本机开始执行，避免前端误展示 `0/0`。
+     *
+     * @param int $slaveCount 已下发升级指令的 slave 节点数
+     * @return string
+     */
+    protected function buildDashboardUpdateAcceptedMessage(int $slaveCount): string {
+        if ($slaveCount > 0) {
+            return "升级任务已开始，已向 {$slaveCount} 个 slave 节点发送指令，请留意节点状态";
+        }
+
+        return '升级任务已开始，当前无 slave 节点，已在本机执行';
+    }
+
     public function dashboardInstall(string $key, string $role = 'master'): Result {
         $key = trim($key);
         $role = trim($role) ?: 'master';
@@ -551,15 +572,13 @@ trait GatewayControlCommandTrait {
         if ($type === 'framework' && !FRAMEWORK_IS_PHAR) {
             return Result::error('当前为源码模式,框架在线升级不可用');
         }
-        if ($type === 'framework' && function_exists('scf_framework_update_ready') && scf_framework_update_ready()) {
-            return Result::error('正在等待升级,请重启服务器');
-        }
 
         Console::info("【Gateway】开始执行升级: type={$type}, version={$version}");
         $taskId = uniqid('gateway_update_', true);
         $slaveHosts = $this->connectedSlaveHosts();
+        $slaveCount = count($slaveHosts);
         $this->clearNodeUpdateTaskStates($taskId, $slaveHosts);
-        $this->logUpdateStage($taskId, $type, $version, 'dispatch_cluster', ['slaves' => count($slaveHosts)]);
+        $this->logUpdateStage($taskId, $type, $version, 'dispatch_cluster', ['slaves' => $slaveCount]);
         if ($slaveHosts) {
             $this->sendCommandToAllNodeClients('appoint_update', [
                 'type' => $type,
@@ -677,25 +696,6 @@ trait GatewayControlCommandTrait {
                 return;
             }
 
-            if ($masterState === 'pending') {
-                $pendingMessage = $upstreamRollout['attempted']
-                    ? "【" . SERVER_HOST . "】业务实例升级结果:成功{$upstreamRollout['success_count']},失败{$upstreamRollout['failed_count']}，Gateway等待重启生效:{$type} => {$version}"
-                    : "【" . SERVER_HOST . "】本次升级未涉及业务实例滚动，Gateway等待重启生效:{$type} => {$version}";
-                $this->emitLocalNodeUpdateState(
-                    $taskId,
-                    $type,
-                    $version,
-                    'pending',
-                    $pendingMessage,
-                    '',
-                    [
-                        'upstream_rollout' => $upstreamRollout,
-                        'gateway_pending_restart' => $gatewayPendingRestart,
-                    ]
-                );
-                return;
-            }
-
             $this->emitLocalNodeUpdateState(
                 $taskId,
                 $type,
@@ -711,7 +711,7 @@ trait GatewayControlCommandTrait {
         });
 
         $this->logUpdateStage($taskId, $type, $version, 'accepted', [
-            'slaves' => count($slaveHosts),
+            'slaves' => $slaveCount,
             'request_id' => $requestId,
         ]);
         return Result::success([
@@ -719,8 +719,8 @@ trait GatewayControlCommandTrait {
             'task_id' => $taskId,
             'type' => $type,
             'version' => $version,
-            'message' => '升级任务已开始，请留意节点状态',
-            'slave_count' => count($slaveHosts),
+            'message' => $this->buildDashboardUpdateAcceptedMessage($slaveCount),
+            'slave_count' => $slaveCount,
         ]);
     }
 
@@ -784,16 +784,15 @@ trait GatewayControlCommandTrait {
         if ($type !== 'public' && $restartSummary['success_count'] > 0 && !$restartSummary['failed_nodes']) {
             Counter::instance()->incr(Key::COUNTER_SERVER_RESTART);
         }
-        // framework 升级后 gateway 控制面只进入 pending restart，
-        // 不在这一步迭代 gateway 托管子进程，避免控制面过早命中新框架包。
+        // framework 升级只滚动业务实例，让新框架包在业务平面生效即可。
+        // gateway 控制面继续留在当前进程，不再把“active.json 已切新包”视为
+        // 一次必须立即 reboot 的 pending 状态，这样可以连续继续拉取下一版框架包。
         $iterateBusinessProcesses = $type === 'app' && !$restartSummary['failed_nodes'];
 
         $master = [
             'host' => SERVER_HOST,
-            'state' => $type === 'framework' ? 'pending' : ($restartSummary['failed_nodes'] ? 'failed' : 'success'),
-            'error' => $type === 'framework'
-                ? 'Gateway 需重启后才会加载新框架版本'
-                : ($restartSummary['failed_nodes'] ? '部分业务实例升级失败' : ''),
+            'state' => $restartSummary['failed_nodes'] ? 'failed' : 'success',
+            'error' => $restartSummary['failed_nodes'] ? '部分业务实例升级失败' : '',
         ];
         $upstreamFailedNodes = array_values((array)($restartSummary['failed_nodes'] ?? []));
         $upstreamSuccessCount = (int)($restartSummary['success_count'] ?? 0);
@@ -814,7 +813,7 @@ trait GatewayControlCommandTrait {
             'master' => $master,
             'iterate_business_processes' => $iterateBusinessProcesses,
             'upstream_rollout' => $upstreamRollout,
-            'gateway_pending_restart' => $type === 'framework',
+            'gateway_pending_restart' => false,
         ];
         if ($restartSummary['failed_nodes']) {
             return Result::error('部分业务实例升级失败', 'SERVICE_ERROR', $payload);

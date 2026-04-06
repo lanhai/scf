@@ -651,7 +651,9 @@ trait GatewayTelemetryTrait {
             'app_version' => $appVersion,
             'public_version' => $publicVersion,
             'framework_build_version' => FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => function_exists('scf_framework_update_ready') && scf_framework_update_ready(),
+            // Framework updates now take effect after rolling instance restarts, so we no longer expose
+            // a "pending Gateway restart" state through dashboard telemetry.
+            'framework_update_ready' => false,
             'swoole_version' => swoole_version(),
             'scf_version' => SCF_COMPOSER_VERSION,
             'manager_pid' => $this->serverManagerPid ?: '--',
@@ -842,7 +844,8 @@ trait GatewayTelemetryTrait {
             'app_version' => $appVersion,
             'public_version' => $publicVersion,
             'framework_build_version' => FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => function_exists('scf_framework_update_ready') && scf_framework_update_ready(),
+            // Instance restarts are enough to consume the latest framework package on business nodes.
+            'framework_update_ready' => false,
             'swoole_version' => swoole_version(),
             'scf_version' => SCF_COMPOSER_VERSION,
             'manager_pid' => (int)($metadata['manager_pid'] ?? 0) ?: '--',
@@ -1041,7 +1044,7 @@ trait GatewayTelemetryTrait {
         return [
             'app_version' => $base['app_version'] ?? '--',
             'framework_build_version' => $base['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION,
-            'framework_update_ready' => (bool)($base['framework_update_ready'] ?? false),
+            'framework_update_ready' => false,
             'swoole_version' => $base['swoole_version'] ?? swoole_version(),
             'scf_version' => $base['scf_version'] ?? SCF_COMPOSER_VERSION,
             'server_stats' => $serverStats,
@@ -1529,7 +1532,6 @@ trait GatewayTelemetryTrait {
         $activeRecord = function_exists('scf_read_framework_active_record') ? scf_read_framework_active_record() : null;
         $activeFrameworkVersion = (string)($activeRecord['version'] ?? $selected[0]['framework_build_version'] ?? FRAMEWORK_BUILD_VERSION);
         $activeFrameworkBuild = (string)($activeRecord['build'] ?? FRAMEWORK_BUILD_TIME);
-        $activeFrameworkReady = function_exists('scf_framework_update_ready') && scf_framework_update_ready();
 
         return [
             'is_phar' => FRAMEWORK_IS_PHAR,
@@ -1539,8 +1541,8 @@ trait GatewayTelemetryTrait {
             'build' => FRAMEWORK_BUILD_TIME,
             'gateway_version' => FRAMEWORK_BUILD_VERSION,
             'gateway_build' => FRAMEWORK_BUILD_TIME,
-            'gateway_pending_restart' => $activeFrameworkReady,
-            'update_ready' => $activeFrameworkReady,
+            'gateway_pending_restart' => false,
+            'update_ready' => false,
         ];
     }
 

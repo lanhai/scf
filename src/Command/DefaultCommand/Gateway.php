@@ -47,8 +47,9 @@ class Gateway implements CommandInterface {
     public function help(Help $commandHelp): Help {
         $commandHelp->addAction('start', '启动代理网关');
         $commandHelp->addAction('stop', '停止代理网关');
-        $commandHelp->addAction('reload', '重启业务平面');
-        $commandHelp->addAction('restart', '重启代理网关');
+        $commandHelp->addAction('reload', '重启业务实例');
+        $commandHelp->addAction('reload_gateway', '重载代理网关并重拉 gateway 子进程');
+        $commandHelp->addAction('restart', 'Reboot 代理网关');
         $commandHelp->addAction('restart_crontab', '重启 Gateway 排程子进程');
         $commandHelp->addAction('restart_redisqueue', '重启 Gateway Redis 队列子进程');
         $commandHelp->addAction('status', '查看代理网关状态');
@@ -75,7 +76,7 @@ class Gateway implements CommandInterface {
      */
     public function exec(): ?string {
         $action = (string)(Manager::instance()->getArg(0) ?: 'start');
-        if (in_array($action, ['start', 'stop', 'reload', 'restart', 'restart_crontab', 'restart_redisqueue', 'status'], true)) {
+        if (in_array($action, ['start', 'stop', 'reload', 'reload_gateway', 'restart', 'restart_crontab', 'restart_redisqueue', 'status'], true)) {
             Env::initialize(MODE_CGI);
         }
         if ($action === 'stop') {
@@ -83,6 +84,9 @@ class Gateway implements CommandInterface {
         }
         if ($action === 'reload') {
             return $this->control('reload');
+        }
+        if ($action === 'reload_gateway') {
+            return $this->control('reload_gateway');
         }
         if ($action === 'restart') {
             return $this->control('restart');
@@ -233,10 +237,13 @@ class Gateway implements CommandInterface {
             return 'Gateway 指令发送失败:' . ($result['body'] ?: ('HTTP ' . $result['status']));
         }
         if ($command === 'restart') {
-            return '已发送 Gateway 重启指令';
+            return '已发送 Gateway Reboot 指令';
+        }
+        if ($command === 'reload_gateway') {
+            return '已发送 Gateway reload 指令';
         }
         if ($command === 'reload') {
-            return '已发送 Gateway 业务平面重启指令';
+            return '已发送业务实例重启指令';
         }
         if ($command === 'restart_crontab') {
             return '已发送 Gateway Crontab 子进程重启指令';

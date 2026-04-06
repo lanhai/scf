@@ -11,8 +11,7 @@ use Scf\Core\Table\ServerNodeStatusTable;
 use Scf\Core\Table\ServerNodeTable;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
-use Swoole\Coroutine\Channel;
-use Swoole\Timer;
+use Swoole\Coroutine;
 use Swoole\WebSocket\Frame;
 use Swoole\WebSocket\Server;
 
@@ -766,17 +765,33 @@ trait GatewayClusterHeartbeatTrait {
             return $summary;
         }
 
-        $waitCh = new Channel(1);
-        $round = 1;
-        Timer::tick(5000, function (int $timerId) use ($taskId, $hosts, $timeout, &$summary, &$round, $waitCh) {
+        $timeout = max(1, $timeout);
+        $deadlineAt = microtime(true) + $timeout;
+
+        // 这里不再使用 Timer::tick + Channel::pop 组合等待。
+        // Gateway 进入 shutdown 时，tick 计时器可能已经被 runtime 清理，
+        // pop 会失去唤醒源并触发 "all coroutines are asleep" 死锁。
+        while (true) {
             $summary = $this->summarizeNodeUpdateTask($taskId, $hosts);
-            if ($summary['finished'] || $round >= max(1, (int)($timeout / 5))) {
-                Timer::clear($timerId);
-                $waitCh->push(true);
+            if ($summary['finished']) {
+                break;
             }
-            $round++;
-        });
-        $waitCh->pop($timeout + 3);
+
+            // 进入关停流程时直接结束等待，避免升级状态协程阻塞 gateway 退出链路。
+            if ($this->gatewayShutdownScheduled || !Runtime::instance()->serverIsAlive()) {
+                break;
+            }
+            if (microtime(true) >= $deadlineAt) {
+                break;
+            }
+
+            if (Coroutine::getCid() > 0) {
+                Coroutine::sleep(1.0);
+            } else {
+                usleep(1_000_000);
+            }
+        }
+
         return $summary;
     }
 

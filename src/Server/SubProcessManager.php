@@ -180,6 +180,7 @@ class SubProcessManager {
             'trigger_shutdown' => fn() => $this->triggerShutdown(),
             'trigger_restart' => fn() => $this->triggerRestart(),
             'trigger_reload' => fn() => $this->triggerReload(),
+            'trigger_gateway_reload' => fn(bool $restartManagedUpstreams = false) => $this->triggerGatewayReload($restartManagedUpstreams),
             'request_gateway_business_command' => fn(string $command, array $params = [], int $timeoutSeconds = 30): array => $this->requestGatewayBusinessCommand($command, $params, $timeoutSeconds),
             'restart_managed_processes' => fn(array $names = []): array => $this->restartManagedProcesses($names),
             'stop_managed_processes' => fn(array $names = []): array => $this->stopManagedProcesses($names),
@@ -1069,6 +1070,25 @@ class SubProcessManager {
             return;
         }
         Http::instance()->reload();
+    }
+
+    /**
+     * 触发 gateway 控制面 reload。
+     *
+     * 该动作必须走 gateway pipe，才能让 worker 侧按既定顺序同时刷新
+     * Swoole worker 和 gateway 附属子进程。若 pipe 不可用，则退回 restart，
+     * 至少保证控制面会完整重拉，而不是错误地只做业务实例 reload。
+     *
+     * @param bool $restartManagedUpstreams 是否同时滚动业务实例
+     * @return void
+     */
+    protected function triggerGatewayReload(bool $restartManagedUpstreams = false): void {
+        if ($this->sendGatewayPipeMessage('gateway_control_reload_gateway', [
+            'restart_managed_upstreams' => $restartManagedUpstreams,
+        ])) {
+            return;
+        }
+        $this->triggerRestart();
     }
 
     protected function triggerRestart(): void {

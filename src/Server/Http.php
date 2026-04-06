@@ -326,14 +326,29 @@ class Http extends \Scf\Core\Server {
         $this->upstreamGatewayLeaseFenceTriggered = true;
         Console::warning("【Server】Gateway lease失效，开始自回收: {$reason}", false);
         $masterPid = (int)($this->server->master_pid ?? getmypid());
-        $managerPid = (int)($this->server->manager_pid ?? 0);
+        $managerPid = $this->resolveUpstreamManagerPid($masterPid);
         $this->quiesceBusinessPlane();
         $this->shutdown();
+
+        $currentPid = (int)getmypid();
+        $runningInManager = $managerPid > 0 && $managerPid === $currentPid;
+        if ($runningInManager) {
+            // 在 manager 自身触发围栏时，若先批量 SIGKILL worker，会被 manager 立刻补拉，
+            // 表现为“明明在回收，worker 又启动完成”。这里改为直接回收 master+manager，
+            // 让整棵 upstream 进程树一次性退出，避免重复拉起。
+            if ($masterPid > 0 && $masterPid !== $currentPid && @Process::kill($masterPid, 0)) {
+                Console::warning("【Server】执行 lease 围栏即时回收 master: pid={$masterPid}", false);
+                @Process::kill($masterPid, SIGKILL);
+            }
+            Console::warning("【Server】执行 lease 围栏即时回收 manager(self): pid={$currentPid}", false);
+            @Process::kill($currentPid, SIGKILL);
+            return;
+        }
 
         // 这里是 orphan fence 的收口路径：如果 master 先退而 manager 仍存活，
         // manager/worker 会变成孤儿继续占端口。先尝试立刻回收 manager，避免
         // 只关掉 master 却留下服务平面残留。
-        if ($managerPid > 0 && $managerPid !== getmypid() && @Process::kill($managerPid, 0)) {
+        if ($managerPid > 0 && $managerPid !== $currentPid && @Process::kill($managerPid, 0)) {
             Console::warning("【Server】执行 lease 围栏即时回收 manager: pid={$managerPid}", false);
             @Process::kill($managerPid, SIGKILL);
         }
@@ -358,6 +373,38 @@ class Http extends \Scf\Core\Server {
                 @Process::kill($pid, SIGKILL);
             }
         });
+    }
+
+    /**
+     * 解析当前 upstream 进程树中的 manager PID。
+     *
+     * 说明：
+     * 1. 部分运行时上下文下，`$this->server->manager_pid` 可能短暂不可用；
+     * 2. lease 围栏若拿不到 manager PID，可能出现“先杀 worker -> manager 补拉 worker”的假回收；
+     * 3. 这里用 `master_pid + posix_getppid()` 推导 manager 身份，确保围栏优先命中 manager/master。
+     *
+     * @param int $masterPid upstream master PID。
+     * @return int manager PID，无法确定时返回 0。
+     */
+    protected function resolveUpstreamManagerPid(int $masterPid): int {
+        $managerPid = (int)($this->server->manager_pid ?? 0);
+        if ($managerPid > 0) {
+            return $managerPid;
+        }
+        if (!function_exists('posix_getppid')) {
+            return 0;
+        }
+        $currentPid = (int)getmypid();
+        $parentPid = (int)posix_getppid();
+        if ($masterPid > 0 && $parentPid === $masterPid && $currentPid !== $masterPid) {
+            // 当前进程的父进程是 master，则当前进程就是 manager。
+            return $currentPid;
+        }
+        if ($masterPid > 0 && $parentPid > 0 && $parentPid !== $masterPid) {
+            // 当前进程不是 manager（通常是 worker），其父进程即 manager。
+            return $parentPid;
+        }
+        return 0;
     }
 
     /**

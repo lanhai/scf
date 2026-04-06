@@ -414,9 +414,6 @@ class DashboardController extends Controller {
         if ($type == 'framework' && !FRAMEWORK_IS_PHAR) {
             return Result::error('当前为源码模式,框架在线升级不可用');
         }
-        if ($type == 'framework' && function_exists('scf_framework_update_ready') && scf_framework_update_ready()) {
-            return Result::error('正在等待升级,请重启服务器');
-        }
         $manager = new NodeManager();
         //向节点推送版本更新指令
         $result = $manager->appointUpdate($type, $version);

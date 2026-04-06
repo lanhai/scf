@@ -19,10 +19,15 @@ use Swoole\WebSocket\Server;
 use Throwable;
 use Scf\Mode\Rpc\App as Rpc;
 
+/**
+ * 负责承接 Swoole worker 级生命周期事件。
+ *
+ * 该监听器位于 SCF server 运行时边界，用来处理 worker 启动、异常退出、
+ * 正常退出时的运行态修复与诊断输出，避免 worker 级异常只留下模糊的
+ * “退出了”结果，难以和上层业务日志做关联定位。
+ */
 class WorkerListener extends Listener {
 
-    /**
-     */
     protected function onWorkerStart(Server $server, $workerId): void {
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
@@ -113,6 +118,49 @@ INFO;
     }
 
     /**
+     * 记录 worker 异常退出的进程级诊断信息。
+     *
+     * Swoole 的 workerError 回调运行在管理进程侧，这里拿不到出错 worker 的
+     * PHP 异常堆栈，只能拿到退出码、信号和进程号等元数据。这里把这些信息
+     * 同步写到控制台和 error.log，便于和 worker 内 shutdown/fatal 日志对照排查。
+     *
+     * @param Server $server 当前 server 实例。
+     * @param int $worker_id 异常退出的 worker id。
+     * @param int $worker_pid 异常退出的 worker pid。
+     * @param int $exit_code 进程退出码。
+     * @param int $signal 触发退出的信号值。
+     * @return void
+     */
+    protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
+        // workerError 是 manager 侧收到的进程退出事件，这里先落进程级元信息，
+        // 后续再继续执行 inflight 回补与 stop 兜底，不改变现有生命周期语义。
+        $message = "【Worker】进程异常退出: worker_id={$worker_id}, pid={$worker_pid}, exit_code={$exit_code}, signal={$signal}";
+        Console::error($message, false);
+        $this->cleanupInflightResidueByPid($worker_pid, $worker_id, 'worker_error');
+        Timer::after(3000, function () use ($server, $worker_id) {
+            if (!Process::kill($server->master_pid, 0)) {
+                $server->stop($worker_id);
+            }
+        });
+    }
+
+    /**
+     * worker 退出时回补该进程遗留的 inflight 计数。
+     *
+     * 正常路径下 finally 会把 inflight 归零；若 worker 在 I/O 中途退出，
+     * begin 后未执行到 finally，会遗留“脏在途”。这里在退出钩子按 pid
+     * 执行一次回补，避免全局 inflight 长期悬挂。
+     *
+     * @param Server $server 当前 server。
+     * @param int $workerId 退出 worker id。
+     * @return void
+     */
+    protected function onWorkerExit(Server $server, int $workerId): void {
+        $pid = (int)($server->worker_pid ?? getmypid());
+        $this->cleanupInflightResidueByPid($pid, $workerId, 'worker_exit');
+    }
+
+    /**
      * 为 upstream 的 server worker / task worker 注册内存监控行。
      *
      * upstream.memory_rows 与 heartbeat 聚合展示都依赖 MemoryMonitorTable 的进程行。
@@ -142,30 +190,6 @@ INFO;
         MemoryMonitor::start($processName, 2000, $workerMemoryLimit, $autoRestart);
     }
 
-    protected function onWorkerError(Server $server, int $worker_id, int $worker_pid, int $exit_code, int $signal): void {
-        $this->cleanupInflightResidueByPid($worker_pid, $worker_id, 'worker_error');
-        Timer::after(3000, function () use ($server, $worker_id) {
-            if (!Process::kill($server->master_pid, 0)) {
-                $server->stop($worker_id);
-            }
-        });
-    }
-
-    /**
-     * worker 退出时回补该进程遗留的 inflight 计数。
-     *
-     * 正常路径下 finally 会把 inflight 归零；若 worker 在 I/O 中途退出，
-     * begin 后未执行到 finally，会遗留“脏在途”。这里在退出钩子按 pid
-     * 执行一次回补，避免全局 inflight 长期悬挂。
-     *
-     * @param Server $server 当前 server。
-     * @param int $workerId 退出 worker id。
-     * @return void
-     */
-    protected function onWorkerExit(Server $server, int $workerId): void {
-        $pid = (int)($server->worker_pid ?? getmypid());
-        $this->cleanupInflightResidueByPid($pid, $workerId, 'worker_exit');
-    }
 
     /**
      * 按 PID 清理 inflight 残留并输出诊断日志。
@@ -180,15 +204,15 @@ INFO;
             return;
         }
         $released = InflightCounter::cleanupProcessInflightByPid($pid);
-        $total = (int)($released['total'] ?? 0);
+        $total = $released['total'] ?? 0;
         if ($total <= 0) {
             return;
         }
         Console::warning(
             "【Worker】检测到 inflight 残留并已回补: phase={$phase}, worker_id={$workerId}, pid={$pid}"
-            . ", mysql=" . (int)($released['mysql'] ?? 0)
-            . ", redis=" . (int)($released['redis'] ?? 0)
-            . ", outbound_http=" . (int)($released['outbound_http'] ?? 0)
+            . ", mysql=" . ($released['mysql'] ?? 0)
+            . ", redis=" . ($released['redis'] ?? 0)
+            . ", outbound_http=" . ($released['outbound_http'] ?? 0)
             . ", total={$total}",
             false
         );

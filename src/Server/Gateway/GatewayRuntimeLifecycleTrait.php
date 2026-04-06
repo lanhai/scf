@@ -2,7 +2,6 @@
 
 namespace Scf\Server\Gateway;
 
-use Scf\Command\Color;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Console;
@@ -1164,11 +1163,28 @@ trait GatewayRuntimeLifecycleTrait {
         }
     }
 
-    protected function reloadGateway(bool $restartManagedUpstreams = true): void {
+    /**
+     * 重载 gateway 控制面，并按需重拉 gateway 子进程与业务实例。
+     *
+     * 这条链路服务于 dashboard 的“重启网关”操作：
+     * - 一定会重拉 gateway 附属子进程，让 RedisQueue/Heartbeat 等跟随控制面刷新；
+     * - 只有显式要求时才额外滚动业务实例，避免把“重启网关”和“重启实例”重新耦合。
+     *
+     * @param bool $restartManagedUpstreams 是否同时滚动业务实例
+     * @return void
+     */
+    protected function reloadGateway(bool $restartManagedUpstreams = false): void {
         Runtime::instance()->serverIsReady(false);
         Runtime::instance()->serverIsDraining(true);
-        Console::info('【Gateway】正在重启服务');
-        $this->iterateGatewayBusinessProcesses();
+        Console::info('【Gateway】正在重载 Gateway 控制面');
+        if ($this->subProcessManager) {
+            $restartResult = $this->subProcessManager->restartAllManagedProcesses();
+            if (!empty($restartResult['ok'])) {
+                Console::info('【Gateway】Gateway 子进程重启指令已投递: ' . implode(',', (array)($restartResult['targets'] ?? [])));
+            } else {
+                Console::warning('【Gateway】Gateway 子进程重启指令投递失败: ' . (string)($restartResult['message'] ?? 'unknown'));
+            }
+        }
         if ($restartManagedUpstreams) {
             $summary = $this->restartManagedUpstreams();
             if ($summary['failed_nodes']) {
@@ -1181,7 +1197,7 @@ trait GatewayRuntimeLifecycleTrait {
         $this->server->reload();
     }
 
-    protected function reserveGatewayReload(bool $restartManagedUpstreams = true): array {
+    protected function reserveGatewayReload(bool $restartManagedUpstreams = false): array {
         if ($this->gatewayShutdownScheduled) {
             return [
                 'accepted' => false,
@@ -1204,14 +1220,14 @@ trait GatewayRuntimeLifecycleTrait {
         return [
             'accepted' => true,
             'message' => $restartManagedUpstreams
-                ? 'Gateway 与业务实例已开始重载'
-                : 'Gateway 已开始重载',
+                ? 'Gateway 已开始重载，gateway 子进程与业务实例将一起刷新'
+                : 'Gateway 已开始重载，gateway 子进程将重新拉起',
             'scheduled' => true,
             'restart_managed_upstreams' => $restartManagedUpstreams,
         ];
     }
 
-    protected function scheduleReservedGatewayReload(bool $restartManagedUpstreams = true): void {
+    protected function scheduleReservedGatewayReload(bool $restartManagedUpstreams = false): void {
         Timer::after(1, function () use ($restartManagedUpstreams): void {
             try {
                 $this->reloadGateway($restartManagedUpstreams);
@@ -1452,9 +1468,7 @@ trait GatewayRuntimeLifecycleTrait {
         if ($formattedResultRows) {
             $infoLines = array_merge($infoLines, $formattedResultRows);
         }
-        $infoLines[] = '--------------------------------------------------';
-        $info = implode("\n", $infoLines);
-        Console::write(Color::cyan($info));
+        $this->writeGatewaySummaryBlock('Gateway启动完成', array_slice($infoLines, 1));
     }
 
     protected function createBusinessTrafficListener(): void {

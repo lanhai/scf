@@ -347,6 +347,9 @@ class GatewayServer {
             case 'gateway_control_reload':
                 $this->restartGatewayBusinessPlane();
                 break;
+            case 'gateway_control_reload_gateway':
+                $this->reloadGateway((bool)($payload['restart_managed_upstreams'] ?? false));
+                break;
             case 'gateway_control_restart':
                 $this->shutdownGateway((bool)($payload['preserve_managed_upstreams'] ?? false));
                 break;
@@ -835,10 +838,25 @@ class GatewayServer {
             return;
         }
 
-        $info = "------------------Nginx挂载实例完成------------------\n"
+        $this->writeGatewaySummaryBlock('Nginx挂载实例完成', $lines);
+    }
+
+    /**
+     * 用 gateway 主色输出多行摘要块。
+     *
+     * 这类摘要不会以 `【Gateway】` 开头，因此不会命中 Console::log() 里
+     * 对 gateway 日志的自动着色逻辑。这里显式复用 gateway 主色，确保
+     * 启动完成、切流完成等摘要块和常规 gateway 日志保持同一视觉归属。
+     *
+     * @param string $title 摘要标题。
+     * @param array<int, string> $lines 摘要正文行。
+     * @return void
+     */
+    protected function writeGatewaySummaryBlock(string $title, array $lines): void {
+        $info = "------------------{$title}------------------\n"
             . implode("\n", $lines)
             . "\n--------------------------------------------------";
-        Console::write(Color::cyan($info));
+        Console::write(Color::gateway($info));
     }
 
     /**
