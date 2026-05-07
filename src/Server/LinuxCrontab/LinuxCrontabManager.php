@@ -8,6 +8,7 @@ use Scf\Core\Exception;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;
+use Swoole\Process;
 
 /**
  * Linux crontab 独立管理器。
@@ -62,7 +63,7 @@ class LinuxCrontabManager {
     /**
      * 一次性 crontab 命令最大执行时长（秒）。
      */
-    private const COMMAND_TIMEOUT_SECONDS = 180;
+    private const COMMAND_TIMEOUT_SECONDS = 1800;
 
     /**
      * 超时后额外等待再强制终止的宽限时间（秒）。
@@ -476,9 +477,9 @@ class LinuxCrontabManager {
      * @return array<string, mixed>
      * @throws Exception
      */
-    public static function applyReplicationPayload(array $payload): array {
+    public static function applyReplicationPayload(array $payload, array $terminate = []): array {
         $manager = new self();
-        return $manager->applyReplicatedConfig($payload);
+        return $manager->applyReplicatedConfig($payload, $terminate);
     }
 
     /**
@@ -614,13 +615,127 @@ class LinuxCrontabManager {
     }
 
     /**
+     * 终止一组 Linux 排程条目当前正在运行的一次性进程。
+     *
+     * @param array<int, array<string, mixed>> $entries 排程条目快照
+     * @param bool $forceTerminate 是否在 SIGTERM 后继续 SIGKILL 兜底
+     * @return array<string, mixed>
+     */
+    public function terminateRunningProcessesForEntries(array $entries, bool $forceTerminate = false): array {
+        $results = [];
+        $matched = 0;
+        $terminated = 0;
+        $remaining = 0;
+
+        foreach ($entries as $entry) {
+            $normalized = $this->normalizeEntry((array)$entry, false);
+            $result = $this->terminateRunningProcessesForEntry($normalized, $forceTerminate);
+            $results[] = $result;
+            $matched += (int)($result['matched_count'] ?? 0);
+            $terminated += (int)($result['terminated_count'] ?? 0);
+            $remaining += (int)($result['remaining_count'] ?? 0);
+        }
+
+        return [
+            'force' => $forceTerminate,
+            'entry_count' => count($results),
+            'matched_count' => $matched,
+            'terminated_count' => $terminated,
+            'remaining_count' => $remaining,
+            'items' => $results,
+        ];
+    }
+
+    /**
+     * 按 entry_id 精确终止当前节点上某条 Linux 排程已经拉起的进程链。
+     *
+     * 这里只匹配命令行里带 `-entry_id=<id>` 且明显属于 SCF crontab 启动链的进程，
+     * 避免误伤 PHP worker、系统 cron 守护进程或其它应用命令。
+     *
+     * @param array<string, mixed> $entry 排程条目快照
+     * @param bool $forceTerminate 是否在 SIGTERM 后继续 SIGKILL 兜底
+     * @return array<string, mixed>
+     */
+    public function terminateRunningProcessesForEntry(array $entry, bool $forceTerminate = false): array {
+        $entryId = trim((string)($entry['id'] ?? ''));
+        if ($entryId === '') {
+            return [
+                'id' => '',
+                'force' => $forceTerminate,
+                'matched_count' => 0,
+                'terminated_count' => 0,
+                'remaining_count' => 0,
+                'error' => 'empty_entry_id',
+            ];
+        }
+
+        $processes = $this->listSystemProcesses();
+        $matchedPids = [];
+        foreach ($processes as $pid => $process) {
+            if ($pid === getmypid()) {
+                continue;
+            }
+            if ($this->processCommandMatchesEntry((string)($process['command'] ?? ''), $entry)) {
+                $matchedPids[$pid] = $pid;
+            }
+        }
+
+        if (!$matchedPids) {
+            return [
+                'id' => $entryId,
+                'name' => (string)($entry['name'] ?? ''),
+                'force' => $forceTerminate,
+                'matched_count' => 0,
+                'terminated_count' => 0,
+                'remaining_count' => 0,
+                'processes' => [],
+            ];
+        }
+
+        $targetPids = $this->expandProcessDescendants($matchedPids, $processes);
+        $this->sendSignalToPids($targetPids, SIGTERM);
+        $this->waitForPidsExited($targetPids, 3);
+
+        $remainingPids = $this->filterAlivePids($targetPids);
+        if ($forceTerminate && $remainingPids) {
+            $this->sendSignalToPids($remainingPids, SIGKILL);
+            $this->waitForPidsExited($remainingPids, 2);
+            $remainingPids = $this->filterAlivePids($targetPids);
+        }
+
+        $terminatedCount = max(0, count($targetPids) - count($remainingPids));
+        if ($terminatedCount > 0 && !$remainingPids) {
+            self::updateRuntimeState($entryId, [
+                'last_finish_at' => time(),
+                'last_run_status' => 'stopped',
+                'last_run_message' => $forceTerminate ? '已强制结束运行中进程' : '已结束运行中进程',
+            ]);
+        }
+
+        return [
+            'id' => $entryId,
+            'name' => (string)($entry['name'] ?? ''),
+            'namespace' => (string)($entry['namespace'] ?? ''),
+            'force' => $forceTerminate,
+            'matched_count' => count($matchedPids),
+            'target_count' => count($targetPids),
+            'terminated_count' => $terminatedCount,
+            'remaining_count' => count($remainingPids),
+            'matched_pids' => array_values($matchedPids),
+            'target_pids' => array_values($targetPids),
+            'remaining_pids' => array_values($remainingPids),
+            'processes' => array_slice(array_values(array_intersect_key($processes, array_flip($targetPids))), 0, 20),
+        ];
+    }
+
+    /**
      * 删除一条排程配置，并从系统 crontab 中移除。
      *
      * @param string $id 排程 id
      * @return array
      * @throws Exception
      */
-    public function delete(string $id): array {
+    public function delete(string $id, bool $terminateRunning = false, bool $forceTerminate = false): array {
         $id = trim($id);
         if ($id === '') {
             throw new Exception('排程 ID 不能为空');
@@ -647,7 +762,10 @@ class LinuxCrontabManager {
         if ($deletedEntry && $this->entryAffectsCurrentNode(null, $deletedEntry)) {
             $sync = $this->sync();
         }
-        return ['id' => $id, 'sync' => $sync];
+        $termination = $terminateRunning && $deletedEntry
+            ? $this->terminateRunningProcessesForEntry($deletedEntry, $forceTerminate)
+            : [];
+        return ['id' => $id, 'entry' => $deletedEntry, 'sync' => $sync, 'termination' => $termination];
     }
 
     /**
@@ -658,7 +776,7 @@ class LinuxCrontabManager {
      * @return array
      * @throws Exception
      */
-    public function setEnabled(string $id, bool $enabled): array {
+    public function setEnabled(string $id, bool $enabled, bool $terminateRunning = false, bool $forceTerminate = false): array {
         $config = $this->readConfig();
         $items = $config['items'] ?? [];
         $updated = null;
@@ -688,7 +806,14 @@ class LinuxCrontabManager {
         if ($updated && $this->entryAffectsCurrentNode($normalizedUpdated, $previousEntry)) {
             $this->sync();
         }
-        return $updated;
+        $termination = (!$enabled && $terminateRunning && $previousEntry)
+            ? $this->terminateRunningProcessesForEntry($previousEntry, $forceTerminate)
+            : [];
+        return [
+            'entry' => $updated,
+            'previous_entry' => $previousEntry,
+            'termination' => $termination,
+        ];
     }
 
     /**
@@ -892,20 +1017,23 @@ class LinuxCrontabManager {
                 'name' => '统计数据入库',
                 'namespace' => '\Scf\Database\Statistics\StatisticCrontab',
                 'roles' => [NODE_ROLE_MASTER],
+                'timeout' => 3600,
             ];
         }
         $items[] = [
             'name' => '应用数据库备份',
             'namespace' => '\Scf\Database\Backup\DatabaseBackupCrontab',
             'roles' => [NODE_ROLE_MASTER],
+            'timeout' => 7200,
         ];
 
-        foreach ($this->loadCgiModules() as $module) {
+        foreach (App::getCrontabModules() as $module) {
             foreach (($module['crontabs'] ?? $module['background_tasks'] ?? []) as $task) {
                 $items[] = [
                     'name' => (string)($task['name'] ?? $this->shortClassName((string)($task['namespace'] ?? ''))),
                     'namespace' => '\\' . ltrim((string)($task['namespace'] ?? ''), '\\'),
                     'roles' => [NODE_ROLE_MASTER, NODE_ROLE_SLAVE],
+                    'timeout' => max(1, (int)($task['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS)),
                 ];
             }
 
@@ -914,6 +1042,7 @@ class LinuxCrontabManager {
                     'name' => (string)($task['name'] ?? $this->shortClassName((string)($task['namespace'] ?? ''))),
                     'namespace' => '\\' . ltrim((string)($task['namespace'] ?? ''), '\\'),
                     'roles' => [NODE_ROLE_MASTER],
+                    'timeout' => max(1, (int)($task['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS)),
                 ];
             }
 
@@ -922,6 +1051,7 @@ class LinuxCrontabManager {
                     'name' => (string)($task['name'] ?? $this->shortClassName((string)($task['namespace'] ?? ''))),
                     'namespace' => '\\' . ltrim((string)($task['namespace'] ?? ''), '\\'),
                     'roles' => [NODE_ROLE_SLAVE],
+                    'timeout' => max(1, (int)($task['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS)),
                 ];
             }
         }
@@ -944,6 +1074,7 @@ class LinuxCrontabManager {
                     'namespace' => $namespace,
                     'short_name' => $this->shortClassName($namespace),
                     'roles' => $roles ?: [NODE_ROLE_MASTER, NODE_ROLE_SLAVE],
+                    'timeout' => max(1, (int)($item['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS)),
                 ];
                 continue;
             }
@@ -953,55 +1084,14 @@ class LinuxCrontabManager {
                 $roles
             )));
             sort($indexed[$namespace]['roles']);
+            $indexed[$namespace]['timeout'] = max(
+                (int)($indexed[$namespace]['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS),
+                max(1, (int)($item['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS))
+            );
         }
 
         ksort($indexed);
         return array_values($indexed);
-    }
-
-    /**
-     * 读取 CGI 模式下的模块配置，并在未预加载时主动兜底加载。
-     *
-     * dashboard 请求不一定命中过依赖模块列表的业务链路，
-     * 因此这里不能假设 `App::getModules()` 一定已经有值。
-     *
-     * @return array
-     */
-    protected function loadCgiModules(): array {
-        $srcLibPath = App::src() . '/lib';
-        if (!is_dir($srcLibPath)) {
-            return [];
-        }
-
-        $depth = (is_dir($srcLibPath . '/Controller') || is_dir($srcLibPath . '/Cli') || is_dir($srcLibPath . '/Crontab') || is_dir($srcLibPath . '/Rpc')) ? 3 : 2;
-        $files = array_unique(Dir::scan($srcLibPath, $depth));
-        $allowFiles = [
-            'config.php',
-            '_config.php',
-            '_module_.php',
-        ];
-        $modules = [];
-
-        foreach ($files as $file) {
-            if (!in_array(basename($file), $allowFiles, true)) {
-                continue;
-            }
-
-            $config = require $file;
-            if (!is_array($config)) {
-                continue;
-            }
-
-            $allowMode = $config['mode'] ?? MODE_CGI;
-            $allowModes = is_array($allowMode) ? $allowMode : [$allowMode];
-            if (!in_array(MODE_CGI, $allowModes, true)) {
-                continue;
-            }
-
-            $modules[] = $config;
-        }
-
-        return $modules;
     }
 
     /**
@@ -1254,7 +1344,7 @@ class LinuxCrontabManager {
      * @return array<string, mixed>
      * @throws Exception
      */
-    protected function applyReplicatedConfig(array $payload): array {
+    protected function applyReplicatedConfig(array $payload, array $terminate = []): array {
         $incomingItems = array_values(is_array($payload['items'] ?? null) ? $payload['items'] : []);
 
         $nextItems = [];
@@ -1267,10 +1357,18 @@ class LinuxCrontabManager {
             'items' => $nextItems,
         ]);
         $sync = $this->sync();
+        $termination = [];
+        if ((int)($terminate['terminate_running'] ?? 0) === 1) {
+            $termination = $this->terminateRunningProcessesForEntries(
+                (array)($terminate['entries'] ?? []),
+                (int)($terminate['force_terminate'] ?? 0) === 1
+            );
+        }
 
         return [
             'item_count' => count($nextItems),
             'sync' => $sync,
+            'termination' => $termination,
         ];
     }
 
@@ -1317,6 +1415,9 @@ class LinuxCrontabManager {
             'id' => trim((string)($payload['id'] ?? '')) ?: $this->generateEntryId(),
             'name' => $name ?: $this->shortClassName($namespace),
             'namespace' => $namespace,
+            // Linux crontab 会在系统层包一层 timeout。这里把任务自身声明的超时一起持久化，
+            // 避免大任务在独立排程链路里被错误套用统一的 180 秒硬超时。
+            'timeout' => $this->normalizeEntryTimeout($payload['timeout'] ?? null, $namespace),
             'schedule_type' => $scheduleType,
             'interval_minutes' => max(1, (int)($payload['interval_minutes'] ?? 5)),
             'times' => $times,
@@ -1730,9 +1831,10 @@ class LinuxCrontabManager {
         $timeoutPath = $this->resolveTimeoutPath();
         if ($timeoutPath !== '') {
             // 给一次性命令增加硬超时，避免异常阻塞导致锁长时间不释放。
+            $timeoutSeconds = max(1, (int)($entry['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS));
             $command = escapeshellarg($timeoutPath)
                 . ' -k ' . self::COMMAND_TIMEOUT_KILL_AFTER_SECONDS . 's '
-                . self::COMMAND_TIMEOUT_SECONDS . 's '
+                . $timeoutSeconds . 's '
                 . $command;
         }
 
@@ -1900,6 +2002,158 @@ class LinuxCrontabManager {
         }
 
         return $kept;
+    }
+
+    /**
+     * 读取当前系统进程快照。
+     *
+     * @return array<int, array{pid:int,ppid:int,command:string}>
+     */
+    protected function listSystemProcesses(): array {
+        $output = [];
+        @exec('ps -eo pid=,ppid=,command= 2>/dev/null', $output);
+        $processes = [];
+        foreach ($output as $line) {
+            if (!preg_match('/^\s*(\d+)\s+(\d+)\s+(.*)$/', (string)$line, $matches)) {
+                continue;
+            }
+            $pid = (int)$matches[1];
+            if ($pid <= 0) {
+                continue;
+            }
+            $processes[$pid] = [
+                'pid' => $pid,
+                'ppid' => (int)$matches[2],
+                'command' => trim((string)$matches[3]),
+            ];
+        }
+        return $processes;
+    }
+
+    /**
+     * 判断进程命令行是否属于指定 Linux 排程条目。
+     *
+     * @param string $command 进程命令行
+     * @param array<string, mixed> $entry 排程条目
+     * @return bool
+     */
+    protected function processCommandMatchesEntry(string $command, array $entry): bool {
+        $entryId = trim((string)($entry['id'] ?? ''));
+        if ($entryId === '' || $command === '') {
+            return false;
+        }
+        if (!preg_match('/(?:^|\s)-entry_id=(["\']?)' . preg_quote($entryId, '/') . '\1(?:\s|$)/', $command)) {
+            return false;
+        }
+        if (!str_contains($command, 'SCF_FROM_CRON')
+            && !str_contains($command, '/bin/crontab')
+            && !str_contains($command, ' boot crontab ')) {
+            return false;
+        }
+
+        $app = preg_quote(APP_DIR_NAME, '/');
+        return !preg_match('/(?:^|\s)-app=(["\']?)([^"\'\s]+)\1(?:\s|$)/', $command, $matches)
+            || (string)($matches[2] ?? '') === APP_DIR_NAME
+            || preg_match('/(?:^|\s)-app=(["\']?)' . $app . '\1(?:\s|$)/', $command) === 1;
+    }
+
+    /**
+     * 扩展目标 PID，补齐其子孙进程，返回子进程优先的 PID 列表。
+     *
+     * @param array<int, int> $rootPids 根进程 PID
+     * @param array<int, array{pid:int,ppid:int,command:string}> $processes 进程快照
+     * @return array<int, int>
+     */
+    protected function expandProcessDescendants(array $rootPids, array $processes): array {
+        $childrenByParent = [];
+        foreach ($processes as $pid => $process) {
+            $ppid = (int)($process['ppid'] ?? 0);
+            $childrenByParent[$ppid][] = $pid;
+        }
+
+        $visited = [];
+        $walk = function (int $pid) use (&$walk, &$visited, $childrenByParent): void {
+            if (isset($visited[$pid])) {
+                return;
+            }
+            $visited[$pid] = $pid;
+            foreach ((array)($childrenByParent[$pid] ?? []) as $childPid) {
+                $walk((int)$childPid);
+            }
+        };
+        foreach ($rootPids as $pid) {
+            $walk((int)$pid);
+        }
+
+        $pids = array_values($visited);
+        usort($pids, static function (int $left, int $right) use ($processes): int {
+            $leftDepth = 0;
+            $rightDepth = 0;
+            $cursor = $left;
+            while (isset($processes[$cursor]) && (int)$processes[$cursor]['ppid'] > 0) {
+                $leftDepth++;
+                $cursor = (int)$processes[$cursor]['ppid'];
+            }
+            $cursor = $right;
+            while (isset($processes[$cursor]) && (int)$processes[$cursor]['ppid'] > 0) {
+                $rightDepth++;
+                $cursor = (int)$processes[$cursor]['ppid'];
+            }
+            return $rightDepth <=> $leftDepth;
+        });
+        return $pids;
+    }
+
+    /**
+     * 向一组 PID 发送信号。
+     *
+     * @param array<int, int> $pids PID 列表
+     * @param int $signal 信号
+     * @return void
+     */
+    protected function sendSignalToPids(array $pids, int $signal): void {
+        foreach ($pids as $pid) {
+            $pid = (int)$pid;
+            if ($pid <= 0 || $pid === getmypid() || !Process::kill($pid, 0)) {
+                continue;
+            }
+            @Process::kill($pid, $signal);
+        }
+    }
+
+    /**
+     * 等待 PID 退出。
+     *
+     * @param array<int, int> $pids PID 列表
+     * @param int $timeoutSeconds 最长等待秒数
+     * @return bool
+     */
+    protected function waitForPidsExited(array $pids, int $timeoutSeconds): bool {
+        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        do {
+            if (!$this->filterAlivePids($pids)) {
+                return true;
+            }
+            usleep(200 * 1000);
+        } while (microtime(true) < $deadline);
+        return !$this->filterAlivePids($pids);
+    }
+
+    /**
+     * 过滤仍存活的 PID。
+     *
+     * @param array<int, int> $pids PID 列表
+     * @return array<int, int>
+     */
+    protected function filterAlivePids(array $pids): array {
+        $alive = [];
+        foreach ($pids as $pid) {
+            $pid = (int)$pid;
+            if ($pid > 0 && $pid !== getmypid() && Process::kill($pid, 0)) {
+                $alive[$pid] = $pid;
+            }
+        }
+        return array_values($alive);
     }
 
     /**
@@ -2316,6 +2570,32 @@ class LinuxCrontabManager {
 
         $this->timeoutPath = '';
         return $this->timeoutPath;
+    }
+
+    /**
+     * 归一化单条 Linux 排程的命令超时配置。
+     *
+     * 排程配置可能来自前端保存、节点复制或系统 crontab 恢复。若 payload 未携带 timeout，
+     * 这里就回落到当前已注册任务声明，保证 Linux 排程链路与一次性命令入口保持同一超时语义。
+     *
+     * @param mixed $timeout 原始超时值
+     * @param string $namespace 任务命名空间
+     * @return int
+     */
+    protected function normalizeEntryTimeout(mixed $timeout, string $namespace): int {
+        $normalized = (int)$timeout;
+        if ($normalized > 0) {
+            return $normalized;
+        }
+
+        foreach ($this->availableTasks() as $task) {
+            if ((string)($task['namespace'] ?? '') !== $namespace) {
+                continue;
+            }
+            return max(1, (int)($task['timeout'] ?? self::COMMAND_TIMEOUT_SECONDS));
+        }
+
+        return self::COMMAND_TIMEOUT_SECONDS;
     }
 
     /**

@@ -59,7 +59,7 @@ class CrontabManager {
                 'status' => STATUS_ON,
             ];
         }
-        if (!$modules = App::getModules()) {
+        if (!$modules = App::getCrontabModules()) {
             if ($list) {
                 goto init;
             }

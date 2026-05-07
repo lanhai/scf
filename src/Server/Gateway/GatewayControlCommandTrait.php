@@ -42,9 +42,10 @@ trait GatewayControlCommandTrait {
     /**
      * 向所有在线 slave 广播 Linux crontab 配置快照。
      *
+     * @param array<string, mixed> $terminate 需要随同步下发到 slave 的运行中进程终止策略
      * @return array{target_count:int,accepted_count:int}
      */
-    public function replicateLinuxCrontabConfigToSlaveNodes(): array {
+    public function replicateLinuxCrontabConfigToSlaveNodes(array $terminate = []): array {
         $targets = $this->connectedSlaveHosts();
         if (!$targets) {
             return [
@@ -66,6 +67,7 @@ trait GatewayControlCommandTrait {
             $payload = $manager->replicationPayload(NODE_ROLE_SLAVE, $targetEnv !== '' ? $targetEnv : null);
             $result = $this->sendCommandToNodeClient('linux_crontab_sync', (string)$host, [
                 'config' => $payload,
+                'terminate' => $terminate,
             ]);
             if (!$result->hasError()) {
                 $accepted++;

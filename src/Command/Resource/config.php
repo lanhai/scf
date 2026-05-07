@@ -4,7 +4,6 @@ return [
     // 应用配置,在运行时赋值
     'app' => [
         'master_host' => 'localhost',
-        'worker_limit_mb' => 256//单个worker内存占用限制(MB),超过设置值会重启worker进程
     ],
     // 默认主题名
     'default_theme' => 'default',
@@ -80,11 +79,27 @@ return [
                     'regionId' => 'cn-shanghai',
                 ]
             ],
+        ],
+        //百炼DashScope大模型服务
+        'Scf\Cloud\Ali\LLM' => [
+            'api_key' => '',
+            'base_url' => 'https://dashscope.aliyuncs.com/api/v1',
+            'compatible_base_url' => 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            'timeout' => 300,
         ]
     ],
     // 组件配置
     'components' => [
-        //日志推送服务配置
+        //日志推送配置
+        'Scf\Core\Log' => [
+            'dingtalk_enable_notify' => true,
+            'dingtalk_client_id' => 'dingyfd356g67h2zz2ma',
+            'dingtalk_secret' => 'OC8-0yCS2RjHtZhoW_QaGl2YAFkt_5iTQnt8x6h3Ix_BNMYnrw5pRJTSY1E6Vumr',
+            'dingtalk_group_template' => 'cab33aba-11e8-4b5c-ac08-da9c42e761e6',
+            'dingtalk_robot_code' => 'dCGC4B2lMrd0AK217501333354291004',
+            'dingtalk_group_id' => 'cid9V6s/Cz6m47UJwIkbcjajw==',
+            'dingtalk_uid' => 51163134674311
+        ],
         'Scf\Component\SocketMessager' => [
             'broker' => 'mqtt.lkyapp.com',
             'port' => 1883,

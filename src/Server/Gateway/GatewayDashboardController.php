@@ -194,13 +194,20 @@ class GatewayDashboardController extends DashboardController {
     public function actionLinuxCrontabDelete(): Result {
         Request::post([
             'id' => Request\Validator::required('排程 ID 不能为空'),
-        ])->assign($id);
+            'terminate_running',
+            'force_terminate',
+        ])->assign($id, $terminateRunning, $forceTerminate);
         try {
             $manager = new LinuxCrontabManager();
-            $result = $manager->delete((string)$id);
+            $result = $manager->delete(
+                (string)$id,
+                (int)$terminateRunning === 1,
+                (int)$forceTerminate === 1
+            );
+            $terminate = $this->linuxCrontabTerminatePayload($result, (int)$terminateRunning === 1, (int)$forceTerminate === 1);
             return Result::success([
                 'result' => $result,
-                'replication' => $this->gateway->replicateLinuxCrontabConfigToSlaveNodes(),
+                'replication' => $this->gateway->replicateLinuxCrontabConfigToSlaveNodes($terminate),
             ]);
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
@@ -216,17 +223,49 @@ class GatewayDashboardController extends DashboardController {
         Request::post([
             'id' => Request\Validator::required('排程 ID 不能为空'),
             'enabled' => Request\Validator::required('启用状态不能为空'),
-        ])->assign($id, $enabled);
+            'terminate_running',
+            'force_terminate',
+        ])->assign($id, $enabled, $terminateRunning, $forceTerminate);
         try {
             $manager = new LinuxCrontabManager();
-            $result = $manager->setEnabled((string)$id, (int)$enabled === 1);
+            $isEnabled = (int)$enabled === 1;
+            $result = $manager->setEnabled(
+                (string)$id,
+                $isEnabled,
+                !$isEnabled && (int)$terminateRunning === 1,
+                (int)$forceTerminate === 1
+            );
+            $terminate = $this->linuxCrontabTerminatePayload($result, !$isEnabled && (int)$terminateRunning === 1, (int)$forceTerminate === 1);
             return Result::success([
                 'result' => $result,
-                'replication' => $this->gateway->replicateLinuxCrontabConfigToSlaveNodes(),
+                'replication' => $this->gateway->replicateLinuxCrontabConfigToSlaveNodes($terminate),
             ]);
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
         }
+    }
+
+    /**
+     * 构建随 slave 同步一起下发的运行中排程终止策略。
+     *
+     * @param array<string, mixed> $result 本机操作结果
+     * @param bool $terminateRunning 是否终止运行中任务
+     * @param bool $forceTerminate 是否强制兜底
+     * @return array<string, mixed>
+     */
+    protected function linuxCrontabTerminatePayload(array $result, bool $terminateRunning, bool $forceTerminate): array {
+        if (!$terminateRunning) {
+            return [];
+        }
+        $entry = (array)($result['previous_entry'] ?? $result['entry'] ?? []);
+        if (!$entry) {
+            return [];
+        }
+        return [
+            'terminate_running' => 1,
+            'force_terminate' => $forceTerminate ? 1 : 0,
+            'entries' => [$entry],
+        ];
     }
 
     /**

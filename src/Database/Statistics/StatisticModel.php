@@ -364,10 +364,10 @@ class StatisticModel {
                     }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($day['date'])->init()->sum($sum)->getData();
                         $m['result'] = $result[0]['sum'];
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($day['date'])->init()->count($m['primary'] ?? 'id')->getData();
                         $m['result'] = $result[0]['count'];
                     }
                 }
@@ -389,10 +389,10 @@ class StatisticModel {
                     }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($day['date'])->init()->sum($sum)->getData();
                         $m['result'] = $result[0]['sum'];
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($day['date'])->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($day['date'])->init()->count($m['primary'] ?? 'id')->getData();
                         $m['result'] = $result[0]['count'];
                     }
                 }
@@ -417,12 +417,12 @@ class StatisticModel {
                     }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->end($end)->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->end($end)->init()->sum($sum)->getData();
                         foreach ($result as $d) {
                             $m['result'] += $d['sum'];
                         }
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->end($end)->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->end($end)->init()->count($m['primary'] ?? 'id')->getData();
                         foreach ($result as $d) {
                             $m['result'] += $d['count'];
                         }
@@ -447,12 +447,12 @@ class StatisticModel {
                     }
                     $sum = $m['sum'] ?? '';
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($date)->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($date)->init()->sum($sum)->getData();
                         foreach ($result as $d) {
                             $m['result'] += $d['sum'];
                         }
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($date)->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($date)->init()->count($m['primary'] ?? 'id')->getData();
                         foreach ($result as $d) {
                             $m['result'] += $d['count'];
                         }
@@ -606,9 +606,9 @@ class StatisticModel {
                         goto compute;
                     }
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('hour')->start($day['date'] . ' 00:00:00')->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('hour')->start($day['date'] . ' 00:00:00')->init()->sum($sum)->getData();
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('hour')->start($day['date'] . ' 00:00:00')->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('hour')->start($day['date'] . ' 00:00:00')->init()->count($m['primary'] ?? 'id')->getData();
                     }
                     compute:
                     for ($i = 0; $i <= $thisHour; $i++) {
@@ -749,9 +749,9 @@ class StatisticModel {
                         goto computeDay2;
                     }
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('hour')->start($day['date'] . ' 00:00:00')->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('hour')->start($day['date'] . ' 00:00:00')->init()->sum($sum)->getData();
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('hour')->start($day['date'] . ' 00:00:00')->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('hour')->start($day['date'] . ' 00:00:00')->init()->count($m['primary'] ?? 'id')->getData();
                     }
                     computeDay2:
                     for ($i = 0; $i <= 23; $i++) {
@@ -913,9 +913,9 @@ class StatisticModel {
                         goto computeDay3;
                     }
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->end($end)->init()->sum($sum)->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->end($end)->init()->sum($sum)->getData();
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->end($end)->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->end($end)->init()->count($m['primary'] ?? 'id')->getData();
                     }
                     computeDay3:
                     foreach ($days as $dn => &$item) {
@@ -1122,9 +1122,11 @@ class StatisticModel {
                         goto computeDefault;
                     }
                     if ($sum) {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->init()->sum($sum)->getData();
+                        // “最近 N 天”这条默认分支和今天/昨天/自定义本质上是同一种按天分桶统计，
+                        // 因此也必须继承 is_timestamp 口径，否则时间戳字段会被当成日期字符串查询。
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->init()->sum($sum)->getData();
                     } else {
-                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->type('day')->start($start)->init()->count($m['primary'] ?? 'id')->getData();
+                        $result = StatisticsComponent::factory()->db($m['db'])->table($m['table'])->where($condition)->key($m['prop'])->timestamp((bool)($m['is_timestamp'] ?? false))->type('day')->start($start)->init()->count($m['primary'] ?? 'id')->getData();
                     }
                     computeDefault:
                     foreach ($days as $dn => &$item) {

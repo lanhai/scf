@@ -379,10 +379,15 @@ class Log extends Component {
     }
 
     /**
-     * 记录日志
-     * @param string $type
-     * @param mixed $log
-     * @return bool|int
+     * 记录一条日志，并把日志送到当前节点可达的最终落盘链路。
+     *
+     * HTTP Server 常驻进程会优先走内存表/Redis 中转，交给 master 统一落盘；
+     * 当当前节点无法访问 Redis 且处于一次性 CLI 进程时，需要直接本地落盘，
+     * 否则 dashboard 详情页可以看到文件内容，但今日计数缓存不会同步更新。
+     *
+     * @param string $type 日志类型，支持 info/error/slow/crontab
+     * @param mixed $log 已格式化的日志载荷
+     * @return bool|int Redis 入队成功时返回队列长度，本地落盘返回 bool
      */
     public function push(string $type, mixed $log): bool|int {
         if (App::isMaster()) {
@@ -396,20 +401,14 @@ class Log extends Component {
             //TODO 日志推送到master节点
             $masterDB = Redis::pool($this->_config['service_center_server'] ?? 'main');
             if ($masterDB instanceof NullPool) {
-                //非server 日志本地化
+                // 一次性 CLI 任务无法依赖 Redis 补传时，也要复用 saveToFile，
+                // 让“真实文件内容”和“今日计数缓存”始终走同一条链路。
                 if (!IS_HTTP_SERVER) {
-                    if ($type == 'crontab') {
-                        $dir = APP_LOG_PATH . '/' . $type . '/' . $log['task'] . '/';
-                        $content = $log['message'];
-                    } else {
-                        $dir = APP_LOG_PATH . '/' . $type . '/';
-                        $content = $log;
-                    }
-                    $fileName = $dir . date('Y-m-d', strtotime(Date::today())) . '.log';
-                    if (!is_dir($dir)) {
-                        mkdir($dir, 0775, true);
-                    }
-                    File::write($fileName, !is_string($content) ? JsonHelper::toJson($content) : $content, true);
+                    return $this->saveToFile($type, [
+                        'day' => Date::today(),
+                        'host' => SERVER_HOST,
+                        'log' => $log,
+                    ]);
                 }
                 return false;
             }
@@ -425,9 +424,14 @@ class Log extends Component {
     }
 
     /**
-     * @param string $type
-     * @param array $log
-     * @return bool
+     * 把单条日志落到本地文件，并在需要时同步更新今日日志计数缓存。
+     *
+     * 这是日志文件的统一落盘入口。只要日志最终写进本机 `APP_LOG_PATH`，
+     * 就应该经过这里，确保 dashboard 首页统计和详情抽屉读取的是同一份事实源。
+     *
+     * @param string $type 日志目录类型
+     * @param array $log 标准化后的日志记录，至少包含 day 与 log 字段
+     * @return bool true 表示文件写入成功
      */
     protected function saveToFile(string $type, array $log): bool {
         $message = $log['log'] ?? $log['message'];
@@ -460,11 +464,16 @@ class Log extends Component {
     }
 
     /**
-     * 统计日志
-     * @param string $type
-     * @param string $day
-     * @param ?string $taskName
-     * @return int
+     * 统计指定日志域在某一天的真实条数。
+     *
+     * dashboard 首页卡片和详情抽屉都会依赖这里的结果。对“今日”日志除了读缓存，
+     * 还要再对照真实文件行数做一次校正，避免历史上绕过 saveToFile 的写入路径
+     * 把缓存留在旧值，导致“统计值小于详情列表”的偏差。
+     *
+     * @param string $type 日志目录类型
+     * @param string $day 目标日期，格式 Y-m-d
+     * @param string|null $taskName crontab 子目录名
+     * @return int 真实日志条数
      */
     public function count(string $type, string $day, ?string $taskName = null): int {
         if ($taskName) {
@@ -478,16 +487,19 @@ class Log extends Component {
             [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
             $todayStamp = (int)date('Ymd');
             $savedStamp = (int)(Counter::instance()->get($todayStampKey) ?: 0);
+            $cachedCount = null;
             if ($savedStamp === $todayStamp && Counter::instance()->exist($todayCountKey)) {
-                return (int)(Counter::instance()->get($todayCountKey) ?: 0);
+                $cachedCount = (int)(Counter::instance()->get($todayCountKey) ?: 0);
             }
+            $count = $this->countFileLines($fileName);
+            if ($cachedCount === null || $cachedCount !== $count) {
+                Counter::instance()->set($todayCountKey, $count);
+                Counter::instance()->set($todayStampKey, $todayStamp);
+            }
+            return $count;
         }
+
         $count = $this->countFileLines($fileName);
-        if ($day === $today) {
-            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
-            Counter::instance()->set($todayCountKey, $count);
-            Counter::instance()->set($todayStampKey, (int)date('Ymd'));
-        }
         return $count;
     }
 

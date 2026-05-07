@@ -255,10 +255,16 @@ class DashboardController extends Controller {
     public function actionLinuxCrontabDelete(): Result {
         Request::post([
             'id' => Request\Validator::required('排程 ID 不能为空'),
-        ])->assign($id);
+            'terminate_running',
+            'force_terminate',
+        ])->assign($id, $terminateRunning, $forceTerminate);
         try {
             $manager = new LinuxCrontabManager();
-            return Result::success($manager->delete((string)$id));
+            return Result::success($manager->delete(
+                (string)$id,
+                (int)$terminateRunning === 1,
+                (int)$forceTerminate === 1
+            ));
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
         }
@@ -273,10 +279,18 @@ class DashboardController extends Controller {
         Request::post([
             'id' => Request\Validator::required('排程 ID 不能为空'),
             'enabled' => Request\Validator::required('启用状态不能为空'),
-        ])->assign($id, $enabled);
+            'terminate_running',
+            'force_terminate',
+        ])->assign($id, $enabled, $terminateRunning, $forceTerminate);
         try {
             $manager = new LinuxCrontabManager();
-            return Result::success($manager->setEnabled((string)$id, (int)$enabled === 1));
+            $isEnabled = (int)$enabled === 1;
+            return Result::success($manager->setEnabled(
+                (string)$id,
+                $isEnabled,
+                !$isEnabled && (int)$terminateRunning === 1,
+                (int)$forceTerminate === 1
+            ));
         } catch (Throwable $throwable) {
             return Result::error($throwable->getMessage());
         }

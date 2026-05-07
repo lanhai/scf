@@ -365,6 +365,7 @@ class Oss extends Aliyun {
             'xls' => 'file',
             'doc' => 'file',
             'docx' => 'file',
+            'pdf' => 'file',
             'zip' => 'file',
             'gzip' => 'file',
             'tar' => 'file',

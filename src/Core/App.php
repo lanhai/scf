@@ -36,6 +36,16 @@ class App {
         MODE_NATIVE => [],
         MODE_SOCKET => []
     ];
+    /**
+     * 当前应用里声明了 crontab 注册的模块。
+     *
+     * 这份缓存独立于 `$_modules[MODE_*]`：
+     * - 普通模块加载仍然严格遵守运行模式过滤
+     * - crontab 发现链只关心“模块是否声明了任务”，不应该再被 CGI/CLI 模式误伤
+     *
+     * @var array<int,array>
+     */
+    protected static array $_crontabModules = [];
     protected static ?string $appid = null;
     protected static string $path;
     protected static bool $_ready = false;
@@ -571,6 +581,23 @@ class App {
     }
 
     /**
+     * 获取当前应用里声明了 crontab 的模块。
+     *
+     * crontab 任务最终仍在 CGI 运行时里执行，但“任务声明放在哪个模块”不应被
+     * `mode=MODE_CGI` 限死。这里专门提供一条按任务键发现模块的链路，让
+     * `boot crontab`、dashboard 和常驻 CrontabManager 都能看到 CLI-only 模块里的任务。
+     *
+     * @return array<int,array>
+     */
+    public static function getCrontabModules(): array {
+        if (self::$_crontabModules) {
+            return self::$_crontabModules;
+        }
+
+        return self::loadCrontabModules();
+    }
+
+    /**
      * 加载模块
      * @param string $mode
      * @return array
@@ -610,6 +637,66 @@ class App {
         }
         self::$_modules[$mode] = $modules;
         return $modules;
+    }
+
+    /**
+     * 读取当前应用里定义了 crontab 注册的模块配置。
+     *
+     * 这里复用 `_module_.php/_config.php/config.php` 的扫描规则，但不再要求模块声明
+     * 必须包含 `MODE_CGI`。只要模块配置里显式定义了 `crontabs/background_tasks/
+     * master_crontabs/slave_crontabs` 之一，就应当进入调度发现链。
+     *
+     * @return array<int,array>
+     */
+    public static function loadCrontabModules(): array {
+        if (self::$_crontabModules) {
+            return self::$_crontabModules;
+        }
+
+        spl_autoload_register([__CLASS__, 'autoload']);
+        $entryScripts = array_unique(Dir::scan(
+            APP_LIB_PATH,
+            (is_dir(APP_LIB_PATH . '/Controller') || is_dir(APP_LIB_PATH . '/Cli') || is_dir(APP_LIB_PATH . '/Crontab') || is_dir(APP_LIB_PATH . '/Rpc')) ? 3 : 2
+        ));
+
+        $modules = [];
+        $allowFiles = [
+            'config.php',
+            '_config.php',
+            '_module_.php',
+        ];
+
+        foreach ($entryScripts as $file) {
+            if (!in_array(basename($file), $allowFiles, true)) {
+                continue;
+            }
+
+            $config = require $file;
+            if (!is_array($config) || !self::hasCrontabRegistrations($config)) {
+                continue;
+            }
+
+            $modules[] = $config;
+        }
+
+        self::$_crontabModules = $modules;
+        return self::$_crontabModules;
+    }
+
+    /**
+     * 判断模块配置里是否声明了 crontab 注册。
+     *
+     * @param array $config
+     * @return bool
+     */
+    protected static function hasCrontabRegistrations(array $config): bool {
+        foreach (['crontabs', 'background_tasks', 'master_crontabs', 'slave_crontabs'] as $key) {
+            if (!empty($config[$key]) && is_array($config[$key])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

@@ -366,6 +366,12 @@ class AppInstanceManager {
         if ($host === '' || $port <= 0) {
             return;
         }
+        // live status 抓取失败时，调用方会传入空数组。
+        // 这里不能把“采样失败”写成一份全 0 快照，否则 gateway 后续回退缓存时，
+        // 会把“状态暂时不可达”误判成“inflight 已全部清零”。
+        if ($runtimeStatus === []) {
+            return;
+        }
         $this->instanceRuntimeState[$this->runtimeStateKey($host, $port)] = [
             'http_request_processing' => max(0, (int)($runtimeStatus['http_request_processing'] ?? 0)),
             'rpc_request_processing' => max(0, (int)($runtimeStatus['rpc_request_processing'] ?? 0)),
@@ -733,6 +739,18 @@ class AppInstanceManager {
             $connections = $this->generationConnectionCount($generation);
             $httpProcessing = $this->generationHttpProcessingCount($generation);
             $rpcProcessing = $this->generationRpcProcessingCount($generation);
+            $queueProcessing = $this->generationRedisQueueProcessingCount($generation);
+            $crontabBusy = $this->generationCrontabBusyCount($generation);
+            $mysqlInflight = $this->generationMysqlInflightCount($generation);
+            $redisInflight = $this->generationRedisInflightCount($generation);
+            $outboundHttpInflight = $this->generationOutboundHttpInflightCount($generation);
+            $fullyDrained = $httpProcessing === 0
+                && $rpcProcessing === 0
+                && $queueProcessing === 0
+                && $crontabBusy === 0
+                && $mysqlInflight === 0
+                && $redisInflight === 0
+                && $outboundHttpInflight === 0;
             if ($drainDeadlineAt > 0 && $now < $drainDeadlineAt) {
                 $this->clearDrainingHttpRpcStallState($version);
                 continue;
@@ -744,19 +762,15 @@ class AppInstanceManager {
                 $this->clearDrainingHttpRpcStallState($version);
             }
 
-            if ($connections === 0 && ($httpProcessing === 0 && $rpcProcessing === 0 || $stalledCounters)) {
-                if ($stalledCounters) {
-                    Console::warning(
-                        "【Gateway】旧业务实例HTTP/RPC计数长时间不变化且无连接，按兜底进入 recycle: "
-                        . "generation={$version}, http={$httpProcessing}, rpc={$rpcProcessing}, "
-                        . "stale_grace=" . $this->drainingHttpRpcStaleGraceSeconds() . "s, "
-                        . "drain_started_at=" . (int)($generation['drain_started_at'] ?? 0)
-                        . ", drain_deadline_at={$drainDeadlineAt}"
-                    );
-                }
+            // draining -> recycle 必须与 upstream shutdown 的排空口径一致。
+            // 这里只在完整 inflight/queue/crontab 全部归零后才允许进入 recycle，
+            // 避免旧代仍有在途任务时过早转入 pending recycle，并被后续强制回收窗口误杀。
+            if ($connections === 0 && $fullyDrained) {
                 Console::info(
                     "【Gateway】旧业务实例draining完成，准备进入 recycle: generation={$version}, "
                     . "ws={$connections}, http={$httpProcessing}, rpc={$rpcProcessing}, "
+                    . "queue={$queueProcessing}, crontab={$crontabBusy}, mysql={$mysqlInflight}, "
+                    . "redis={$redisInflight}, outbound_http={$outboundHttpInflight}, "
                     . "drain_started_at=" . (int)($generation['drain_started_at'] ?? 0)
                     . ", drain_deadline_at={$drainDeadlineAt}"
                 );

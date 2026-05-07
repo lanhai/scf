@@ -21,6 +21,7 @@ class StatisticsComponent extends Component {
     protected string $dbName;
     protected string $tableName;
     protected string $dateKey;
+    protected bool $dateKeyIsTimestamp = false;
     protected string $startMinute;
     protected string $endMinute;
     protected string $startHour;
@@ -47,6 +48,37 @@ class StatisticsComponent extends Component {
     ];
 
     /**
+     * 生成当前统计配置对应的缓存身份串。
+     *
+     * 设计意图：
+     * 1. 统计归档缓存不仅依赖 db/table/dateKey/where，还依赖“时间字段类型”；
+     * 2. 同一字段如果一会儿按日期字符串查、一会儿按 Unix 时间戳查，查询区间完全不同；
+     * 3. 因此必须把 timestamp 模式写入缓存身份，避免命中历史错误缓存。
+     *
+     * @return string
+     */
+    protected function buildArchiveIdentity(): string {
+        return implode('.', [
+            $this->dbName,
+            $this->tableName,
+            $this->dateKey,
+            $this->dateKeyIsTimestamp ? 'timestamp' : 'datetime',
+        ]);
+    }
+
+    /**
+     * 生成归档统计缓存键。
+     *
+     * @param string $scope 统计范围，例如 hour.count / day.sum。
+     * @param string|int $date 归档对应的日期桶。
+     * @param string $whereSql where 条件 SQL。
+     * @return string
+     */
+    protected function buildArchiveSearchKey(string $scope, string|int $date, string $whereSql): string {
+        return md5($scope . '.' . $this->buildArchiveIdentity() . '.' . $date . '.' . $whereSql);
+    }
+
+    /**
      * 统计数据总条数
      * @param string $primaryKey 数据表主键名
      * @return Result
@@ -63,7 +95,7 @@ class StatisticsComponent extends Component {
                 $dateNow = date('Y-m-d H:00:00');
                 foreach ($this->hours as $hour) {
                     $timelines[] = [
-                        'key' => md5('hour.count' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $hour['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('hour.count', $hour['date'], $where->getWhereSql()),
                         'start' => $hour['start'],
                         'end' => $hour['end'],
                         'date_type' => $this->dateTypes['hour'],
@@ -77,7 +109,7 @@ class StatisticsComponent extends Component {
                 $dateNow = Date::today('Y-m-d');
                 foreach ($this->days as $day) {
                     $timelines[] = [
-                        'key' => md5('day.count' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $day['day']['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('day.count', $day['day']['date'], $where->getWhereSql()),
                         'start' => $day['day']['start'],
                         'end' => $day['day']['end'],
                         'date_type' => $this->dateTypes['day'],
@@ -91,7 +123,7 @@ class StatisticsComponent extends Component {
                 $dateNow = Date::today('Y-m');
                 foreach ($this->months as $month) {
                     $timelines[] = [
-                        'key' => md5('month.count' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $month['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('month.count', $month['date'], $where->getWhereSql()),
                         'start' => $month['start'],
                         'end' => $month['end'],
                         'date_type' => $this->dateTypes['month'],
@@ -119,7 +151,7 @@ class StatisticsComponent extends Component {
                         $result['count'] = $cache->value;
                     } else {
                         try {
-                            $where->and([$this->dateKey . '[^]' => [$timeline['start'], $timeline['end']]]);
+                            $where->and([$this->dateKey . '[^]' => $this->buildDateRange($timeline['start'], $timeline['end'])]);
                             $build = $where->build();
                             $count = Pdo::slave($this->dbName)->getDatabase()->table($this->tableName)->select($primaryKey)->where($build['sql'], ...$build['match'])->count();
                             $result['count'] = $count;
@@ -129,7 +161,7 @@ class StatisticsComponent extends Component {
                                     'search_key' => $timeline['key'],
                                     'type' => 1,
                                     'date_type' => $timeline['date_type'],
-                                    'db' => $this->dbName . '.' . $this->tableName . '.' . $this->dateKey,
+                                    'db' => $this->buildArchiveIdentity(),
                                     'where' => $where->getWhereSql(),
                                     'date' => $timeline['date'],
                                     'day' => $timeline['day'],
@@ -160,13 +192,13 @@ class StatisticsComponent extends Component {
             return Result::success(Arr::sort($list, 'index', 'asc', true));
         }
         try {
-            $searchKey = md5('all.count' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $this->where()->getWhereSql());
+            $searchKey = $this->buildArchiveSearchKey('all.count', 'all', $this->where()->getWhereSql());
             $cache = StatisticsArchiveDAO::select()->where(['search_key' => $searchKey])->ar();
             if ($cache->notExist()) {
                 $cache = StatisticsArchiveDAO::factory();
                 $cache->search_key = $searchKey;
                 $cache->date_type = $this->dateTypes['all'];
-                $cache->db = $this->dbName . '.' . $this->tableName . '.' . $this->dateKey;
+                $cache->db = $this->buildArchiveIdentity();
                 $cache->type = 1;
                 $cache->where = $this->where()->getWhereSql();
                 $cache->date = 0;
@@ -205,7 +237,7 @@ class StatisticsComponent extends Component {
                 $thisTime = date('Y-m-d H:00:00');
                 foreach ($this->hours as $hour) {
                     $timelines[] = [
-                        'key' => md5('hour.sum' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $hour['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('hour.sum', $hour['date'], $where->getWhereSql()),
                         'start' => $hour['start'],
                         'end' => $hour['end'],
                         'date_type' => $this->dateTypes['hour'],
@@ -219,7 +251,7 @@ class StatisticsComponent extends Component {
                 $thisTime = Date::today('Y-m-d');
                 foreach ($this->days as $day) {
                     $timelines[] = [
-                        'key' => md5('day.sum' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $day['day']['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('day.sum', $day['day']['date'], $where->getWhereSql()),
                         'start' => $day['day']['start'],
                         'end' => $day['day']['end'],
                         'date_type' => $this->dateTypes['day'],
@@ -233,7 +265,7 @@ class StatisticsComponent extends Component {
                 $thisTime = Date::today('Y-m');
                 foreach ($this->months as $month) {
                     $timelines[] = [
-                        'key' => md5('month.sum' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $month['date'] . $where->getWhereSql()),
+                        'key' => $this->buildArchiveSearchKey('month.sum', $month['date'], $where->getWhereSql()),
                         'start' => $month['start'],
                         'end' => $month['end'],
                         'date_type' => $this->dateTypes['month'],
@@ -260,7 +292,7 @@ class StatisticsComponent extends Component {
                         $result['sum'] = $cache->value;
                     } else {
                         try {
-                            $where->and([$this->dateKey . '[^]' => [$timeline['start'], $timeline['end']]]);
+                            $where->and([$this->dateKey . '[^]' => $this->buildDateRange($timeline['start'], $timeline['end'])]);
                             $build = $where->build();
                             $sum = Pdo::slave($this->dbName)->getDatabase()->table($this->tableName)->select()->where($build['sql'], ...$build['match'])->sum($key);
                             $result['sum'] = $sum;
@@ -270,7 +302,7 @@ class StatisticsComponent extends Component {
                                     'search_key' => $timeline['key'],
                                     'type' => 2,
                                     'date_type' => $timeline['date_type'],
-                                    'db' => $this->dbName . '.' . $this->tableName . '.' . $this->dateKey,
+                                    'db' => $this->buildArchiveIdentity(),
                                     'where' => $where->getWhereSql(),
                                     'day' => $timeline['day'],
                                     'hour' => $timeline['hour'],
@@ -302,13 +334,13 @@ class StatisticsComponent extends Component {
             return Result::success(Arr::sort($list, 'index', 'asc', true));
         }
         try {
-            $searchKey = md5('all.sum' . $this->dbName . '.' . $this->tableName . '.' . $this->dateKey . $this->where()->getWhereSql());
+            $searchKey = $this->buildArchiveSearchKey('all.sum', 'all', $this->where()->getWhereSql());
             $cache = StatisticsArchiveDAO::select()->where(['search_key' => $searchKey])->ar();
             if ($cache->notExist()) {
                 $cache = StatisticsArchiveDAO::factory();
                 $cache->search_key = $searchKey;
                 $cache->date_type = $this->dateTypes['all'];
-                $cache->db = $this->dbName . '.' . $this->tableName . '.' . $this->dateKey;
+                $cache->db = $this->buildArchiveIdentity();
                 $cache->type = 2;
                 $cache->where = $this->where()->getWhereSql();
                 $cache->date = 0;
@@ -376,6 +408,21 @@ class StatisticsComponent extends Component {
      */
     public function key($key): StatisticsComponent {
         $this->dateKey = $key;
+        return $this;
+    }
+
+    /**
+     * 标记统计时间字段是否为 Unix 时间戳。
+     *
+     * 统计模块默认按 `Y-m-d H:i:s` 这类日期字符串去拼时间区间，
+     * 但业务表里很多审核/发布时间字段实际存的是 int 秒级时间戳。
+     * 开启后会在真正查询前把区间边界转成时间戳，保证实时表统计口径正确。
+     *
+     * @param bool $flag
+     * @return $this
+     */
+    public function timestamp(bool $flag = true): StatisticsComponent {
+        $this->dateKeyIsTimestamp = $flag;
         return $this;
     }
 
@@ -603,6 +650,26 @@ class StatisticsComponent extends Component {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 统一构造当前统计时间字段的查询区间。
+     *
+     * @param mixed $start
+     * @param mixed $end
+     * @return array
+     */
+    protected function buildDateRange(mixed $start, mixed $end): array {
+        if (!$this->dateKeyIsTimestamp) {
+            return [$start, $end];
+        }
+
+        $startTime = is_numeric($start) ? (int)$start : strtotime((string)$start);
+        $endTime = is_numeric($end) ? (int)$end : strtotime((string)$end);
+        return [
+            max(0, (int)$startTime),
+            max(0, (int)$endTime),
+        ];
     }
 
     protected function isTime($time): bool|int {

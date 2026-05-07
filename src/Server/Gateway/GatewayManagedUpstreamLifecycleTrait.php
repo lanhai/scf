@@ -1823,8 +1823,9 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 && $mysqlInflight === 0
                 && $redisInflight === 0
                 && $outboundHttpInflight === 0;
-            // 回收窗口命中时，只要“无连接 + 无 inflight”就可以强制收口，
-            // 即使端口仍在 LISTEN，也不再继续等待“自退出”。
+            // recycle 阶段允许“空载实例”走快速收口：
+            // 只有当 gateway 侧残留连接与 upstream server 连接都已经清空，且完整 inflight
+            // 已归零时，才允许在 5s/10s/... window 命中后提前 SIGKILL。
             $windowKillEligible = $noInflight
                 && $gatewayWs === 0
                 && $serverConnectionNum === 0;
@@ -1854,11 +1855,12 @@ trait GatewayManagedUpstreamLifecycleTrait {
                     );
                 } elseif ($windowDue) {
                     $this->logOldInstanceLifecycle(
-                        "【Gateway】回收窗口命中但仍有在途，继续等待: waiting={$elapsed}s, window={$currentWindowElapsed}s"
+                        "【Gateway】回收窗口命中但未到强制期限，继续等待: waiting={$elapsed}s, window={$currentWindowElapsed}s"
                         . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
                         . ", inflight=" . ($runtimeStatusAvailable ? (string)$inflightTotal : 'n/a')
                         . " (http={$httpProcessing}, rpc={$rpcProcessing}, mysql={$mysqlInflight}, redis={$redisInflight}, outbound_http={$outboundHttpInflight})"
-                        . ", queue={$queueProcessing}, crontab={$crontabBusy}",
+                        . ", queue={$queueProcessing}, crontab={$crontabBusy}"
+                        . ", no_inflight=" . ($noInflight ? 'yes' : 'no'),
                         $port
                     );
                 }

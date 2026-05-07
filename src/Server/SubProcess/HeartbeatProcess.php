@@ -292,7 +292,10 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
             case 'linux_crontab_sync':
                 $this->reportRemoteCommandFeedback($socket, $commandId, $command, 'running', "【" . SERVER_HOST . "】开始同步 Linux 排程");
                 try {
-                    $result = LinuxCrontabManager::applyReplicationPayload((array)($params['config'] ?? []));
+                    $result = LinuxCrontabManager::applyReplicationPayload(
+                        (array)($params['config'] ?? []),
+                        (array)($params['terminate'] ?? [])
+                    );
                     $sync = (array)($result['sync'] ?? []);
                     $itemCount = (int)($result['item_count'] ?? 0);
                     $managedLineCount = (int)($sync['managed_line_count'] ?? 0);

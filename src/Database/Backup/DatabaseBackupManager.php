@@ -358,6 +358,9 @@ class DatabaseBackupManager {
 
             $snapshots = [];
             foreach ($this->directoryChildren($dbDir) as $snapshotName) {
+                if (!$this->isFormalSnapshotName($snapshotName)) {
+                    continue;
+                }
                 $snapshotDir = $dbDir . '/' . $snapshotName;
                 if (!is_dir($snapshotDir)) {
                     continue;
@@ -414,7 +417,12 @@ class DatabaseBackupManager {
     protected function backupSingleDatabase(array $server, string $timestamp): array {
         $dbName = (string)$server['db_name'];
         $snapshotDir = $this->snapshotDirectory($dbName, $timestamp);
-        $this->ensureDirectory($snapshotDir);
+        $workingSnapshotDir = $this->workingSnapshotDirectory($dbName, $timestamp);
+
+        if (is_dir($workingSnapshotDir)) {
+            File::removeDirectory($workingSnapshotDir);
+        }
+        $this->ensureDirectory($workingSnapshotDir);
 
         try {
             $tables = $this->fetchDatabaseTables($server);
@@ -423,10 +431,19 @@ class DatabaseBackupManager {
             }
 
             $mysqldump = $this->commandResolver->mysqldumpOrNull();
-            $dumped = $this->dumpTables($mysqldump, $server, $tables, $snapshotDir);
-        } catch (Throwable $throwable) {
+            $dumped = $this->dumpTables($mysqldump, $server, $tables, $workingSnapshotDir);
+
+            // 只有全部表都导出完成后才把临时目录切换成正式快照目录，避免系统层 timeout
+            // 或外部杀进程时把半截目录误展示成一份可恢复的完整快照。
             if (is_dir($snapshotDir)) {
-                File::removeDirectory($snapshotDir);
+                throw new Exception('备份快照目录已存在: ' . $snapshotDir);
+            }
+            if (!@rename($workingSnapshotDir, $snapshotDir)) {
+                throw new Exception('创建正式备份快照失败: ' . $snapshotDir);
+            }
+        } catch (Throwable $throwable) {
+            if (is_dir($workingSnapshotDir)) {
+                File::removeDirectory($workingSnapshotDir);
             }
             throw $throwable;
         }
@@ -780,7 +797,19 @@ class DatabaseBackupManager {
 
         $snapshots = [];
         foreach ($this->directoryChildren($dbDir) as $item) {
-            if (is_dir($dbDir . '/' . $item)) {
+            $path = $dbDir . '/' . $item;
+            if (!is_dir($path)) {
+                continue;
+            }
+
+            // 上一次任务若被系统 timeout/SIGKILL 中断，临时目录无法进入 PHP catch 收口。
+            // 后续成功任务在清理阶段顺手回收这些残留，避免持续占用磁盘。
+            if ($this->isWorkingSnapshotName($item)) {
+                File::removeDirectory($path);
+                continue;
+            }
+
+            if ($this->isFormalSnapshotName($item)) {
                 $snapshots[] = $item;
             }
         }
@@ -1108,6 +1137,20 @@ class DatabaseBackupManager {
     }
 
     /**
+     * 返回临时快照目录。
+     *
+     * 导出期间先写入隐藏临时目录，只有全部成功后才 rename 成正式快照目录。
+     * 这样即使任务被系统 timeout 或人工 kill，也不会把半成品暴露给 dashboard。
+     *
+     * @param string $dbName 数据库名
+     * @param string $snapshot 快照目录名
+     * @return string
+     */
+    public function workingSnapshotDirectory(string $dbName, string $snapshot): string {
+        return $this->databaseBackupDirectory($dbName) . '/.' . $snapshot . '.tmp';
+    }
+
+    /**
      * 校验 db_name。
      *
      * @param string $dbName
@@ -1249,6 +1292,26 @@ class DatabaseBackupManager {
             return $time;
         }
         return (int)(@filemtime($snapshotDir) ?: 0);
+    }
+
+    /**
+     * 判断目录名是否是正式快照名。
+     *
+     * @param string $snapshot
+     * @return bool
+     */
+    protected function isFormalSnapshotName(string $snapshot): bool {
+        return preg_match('/^\d{14}$/', trim($snapshot)) === 1;
+    }
+
+    /**
+     * 判断目录名是否是导出中的临时快照名。
+     *
+     * @param string $snapshot
+     * @return bool
+     */
+    protected function isWorkingSnapshotName(string $snapshot): bool {
+        return preg_match('/^\.\d{14}\.tmp$/', trim($snapshot)) === 1;
     }
 
     /**

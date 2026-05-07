@@ -725,7 +725,7 @@ class Crontab implements CommandInterface {
             ]);
         }
 
-        foreach (App::getModules(MODE_CGI) as $module) {
+        foreach (App::getCrontabModules() as $module) {
             $commonTasks = $module['crontabs'] ?? $module['background_tasks'] ?? [];
             foreach ($commonTasks as $task) {
                 $tasks[] = $this->normalizeTask($task);
