@@ -320,23 +320,34 @@ trait QueryBuilder {
 
                 // in 处理
                 $bound = [];
+                $inPlaceholderReplacements = [];
+                $inPlaceholderIndex = 0;
                 foreach ($vals as $val) {
                     if (is_array($val)) {
+                        $marker = $this->makeInPlaceholderMarker($key, $inPlaceholderIndex++);
                         if (!$val) {
-                            $expr = preg_replace('/\(\?\)/', '(NULL)', $expr, 1);
+                            $expr = preg_replace('/\(\?\)/', '(' . $marker . ')', $expr, 1, $replaceCount);
+                            if ($replaceCount > 0) {
+                                $inPlaceholderReplacements[$marker] = 'NULL';
+                            }
                             continue;
                         }
                         $placeholders = [];
+                        $arrayBound = [];
                         foreach ($val as $inValue) {
                             if ($inValue instanceof Expr) {
                                 $placeholders[] = $inValue->getExpr();
-                                array_push($bound, ...$inValue->getValues());
+                                array_push($arrayBound, ...$inValue->getValues());
                             } else {
                                 $placeholders[] = '?';
-                                $bound[] = $inValue;
+                                $arrayBound[] = $inValue;
                             }
                         }
-                        $expr = preg_replace('/\(\?\)/', '(' . implode(',', $placeholders) . ')', $expr, 1);
+                        $expr = preg_replace('/\(\?\)/', '(' . $marker . ')', $expr, 1, $replaceCount);
+                        if ($replaceCount > 0) {
+                            $inPlaceholderReplacements[$marker] = implode(',', $placeholders);
+                            array_push($bound, ...$arrayBound);
+                        }
                     } elseif ($val instanceof Expr) {
                         $count = 0;
                         $expr = preg_replace('/\?/', $val->getExpr(), $expr, 1, $count);
@@ -346,6 +357,9 @@ trait QueryBuilder {
                     } else {
                         $bound[] = $val;
                     }
+                }
+                if ($inPlaceholderReplacements) {
+                    $expr = str_replace(array_keys($inPlaceholderReplacements), array_values($inPlaceholderReplacements), $expr);
                 }
 
                 if ($key == 0) {
@@ -413,4 +427,18 @@ trait QueryBuilder {
         return [implode(' ', $sqls), $values];
     }
 
+    /**
+     * 为 IN 条件生成本次构建过程内唯一的临时标记。
+     *
+     * QueryBuilder 会逐个展开同一条 where 表达式里的数组参数。当前一个 IN 只有单值时，
+     * 直接替换成 `(?)` 会让后续数组参数再次命中同一个占位符；临时标记用于先占位，
+     * 等所有数组参数都消费完各自的 IN 位置后再还原成真正的 SQL 占位符。
+     *
+     * @param int|string $whereKey 当前 where 条目的序号。
+     * @param int $index 当前 where 表达式内第几个数组参数。
+     * @return string
+     */
+    protected function makeInPlaceholderMarker(int|string $whereKey, int $index): string {
+        return '__SCF_QUERY_BUILDER_IN_PLACEHOLDER_' . spl_object_id($this) . '_' . $whereKey . '_' . $index . '__';
+    }
 }
