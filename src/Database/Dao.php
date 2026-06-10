@@ -753,7 +753,13 @@ class Dao extends Struct {
                             ->updates($changedDatas)
                             ->rowCount();
                         if ($row === 0) {
-                            $this->addError('save', "数据不存在或没有任何变化");
+                            // MySQL 将“命中但值未变化”和“未命中记录”都表现为 0 行更新，
+                            // 这里用同一连接复查主键，事务内删除也能被正确分类。
+                            $exists = $connection->table($this->_table)
+                                ->where("`{$primaryKey}` = ?", $this->$primaryKey)
+                                ->select($primaryKey)
+                                ->count() > 0;
+                            $this->addError('save', $exists ? "数据没有任何变化" : "数据不存在");
                             return false;
                         } else {
                             $this->deleteArCache($this->$primaryKey);

@@ -6,9 +6,9 @@ namespace Scf\Cloud\Ali\LLM\Parameters;
  * 文本生成可选参数结构。
  *
  * 该结构对应百炼 OpenAI-compatible Chat Completions 请求体中除
- * `model/messages` 之外、官方当前文档明确列出的同步文本生成参数。当前 Text
- * 能力封装为非流式结果解析，因此不在结构中暴露 `stream/stream_options`；
- * 需要 SSE 时应单独扩展流式能力，避免业务侧误传后无法解析响应。
+ * `model/messages` 之外、官方当前文档明确列出的文本生成参数。Text::getResult()
+ * 保持非流式结果解析；需要 SSE 时请使用 Text::stream() 或 LLM::chatStream()，
+ * 避免业务侧只传 `stream=true` 后仍按同步响应解析。
  */
 class TextOptions extends GenerationParameters {
 

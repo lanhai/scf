@@ -213,7 +213,7 @@ class DB {
      * @throws Throwable
      */
     protected function getTransaction(): ?Transaction {
-        $manager = NestTransactions::instance();
+        $manager = $this->resolveNestTransactionsManager();
         if (!$manager->isBegin() || $manager->isEnd()) {
             return null;
         }
@@ -412,7 +412,7 @@ class DB {
      * @throws Throwable
      */
     public function beginTransaction(): Transaction {
-        if (NestTransactions::instance()->isBegin()) {
+        if ($this->resolveNestTransactionsManager()->isBegin()) {
             throw new PDOException('开启事务失败:当前线程已开启事务嵌套');
         }
         return $this->borrow()->beginTransaction();
@@ -420,5 +420,21 @@ class DB {
 
     public function setConfig($config): void {
         $this->config = $config;
+    }
+
+    /**
+     * 优先使用当前协程显式开启的进程事务；若当前协程未开启，
+     * 再回退到既有的父协程事务继承逻辑。
+     */
+    protected function resolveNestTransactionsManager(): NestTransactions {
+        $cid = \Swoole\Coroutine::getCid();
+        if ($cid > 0) {
+            $currentManager = NestTransactions::instance($cid);
+            if ($currentManager->isBegin() && !$currentManager->isEnd()) {
+                return $currentManager;
+            }
+        }
+
+        return NestTransactions::instance();
     }
 }

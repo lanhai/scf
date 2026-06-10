@@ -9,6 +9,8 @@ use Scf\Helper\JsonHelper;
 use Swoole\Coroutine\Http\Client;
 
 class Http {
+    protected const STREAM_ERROR_BODY_LIMIT = 1048576;
+
     protected bool $ssl = false;
     protected string $protocol;
     protected string $host;
@@ -145,6 +147,55 @@ class Http {
             $this->client->set($this->options($timeout));
             $this->client->post($this->path, $body);
             return $this->getResult();
+        } catch (\Exception $exception) {
+            return Result::error($exception->getMessage());
+        } finally {
+            InflightCounter::endOutboundHttp();
+        }
+    }
+
+    /**
+     * 发送 JSON POST 请求并按响应 body chunk 回调。
+     *
+     * 该方法只作为流式调用的显式入口；普通 JPost 仍保持原有“读完整 body 后返回”
+     * 的语义，避免影响既有业务。
+     *
+     * @param mixed $body
+     * @param callable $onChunk function(string $chunk, Client $client): bool|void
+     * @param int $timeout
+     * @return Result
+     */
+    public function JPostStream(mixed $body, callable $onChunk, int $timeout = 30): Result {
+        InflightCounter::beginOutboundHttp();
+        $callbackException = null;
+        $aborted = false;
+        $bodyPreview = '';
+        try {
+            $body = $body ? JsonHelper::toJson($body) : "{}";
+            $this->headerInit();
+            $this->headers['Content-Type'] = 'application/json; charset=utf-8';
+            $this->headers['Content-Length'] = strlen($body);
+            $this->client->setHeaders($this->headers);
+            $options = $this->options($timeout);
+            $options['write_func'] = function (Client $client, string $chunk) use ($onChunk, &$callbackException, &$aborted, &$bodyPreview): int {
+                if (strlen($bodyPreview) < self::STREAM_ERROR_BODY_LIMIT) {
+                    $bodyPreview .= substr($chunk, 0, self::STREAM_ERROR_BODY_LIMIT - strlen($bodyPreview));
+                }
+                try {
+                    $result = $onChunk($chunk, $client);
+                    if ($result === false) {
+                        $aborted = true;
+                        return 0;
+                    }
+                } catch (\Throwable $throwable) {
+                    $callbackException = $throwable;
+                    return 0;
+                }
+                return strlen($chunk);
+            };
+            $this->client->set($options);
+            $this->client->post($this->path, $body);
+            return $this->getStreamResult($bodyPreview, $callbackException, $aborted);
         } catch (\Exception $exception) {
             return Result::error($exception->getMessage());
         } finally {
@@ -308,6 +359,37 @@ class Http {
         }
         $this->client->close();
         return Result::success(JsonHelper::is($body) ? JsonHelper::recover($body) : $body);
+    }
+
+    protected function getStreamResult(string $bodyPreview, ?\Throwable $callbackException = null, bool $aborted = false): Result {
+        if ($callbackException !== null) {
+            $this->client->close();
+            return Result::error($callbackException->getMessage(), 'STREAM_CALLBACK_ERROR');
+        }
+        if ($aborted) {
+            $this->client->close();
+            return Result::error('流式响应处理已中止', 'STREAM_ABORTED');
+        }
+        if ($this->client->errCode != 0) {
+            $this->client->close();
+            return Result::error('请求错误:' . $this->client->errMsg, 'REQUEST_FAIL', socket_strerror($this->client->errCode));
+        }
+        if ($this->client->statusCode != 200) {
+            $this->client->close();
+            return Result::error(
+                '请求失败:' . $this->client->statusCode,
+                $this->client->statusCode,
+                JsonHelper::is($bodyPreview) ? JsonHelper::recover($bodyPreview) : $bodyPreview
+            );
+        }
+
+        $headers = $this->client->headers;
+        $statusCode = $this->client->statusCode;
+        $this->client->close();
+        return Result::success([
+            'status_code' => $statusCode,
+            'headers' => is_array($headers) ? $headers : [],
+        ]);
     }
 
     /**

@@ -10,6 +10,7 @@ use Scf\Cloud\Ali\LLM\Text;
 use Scf\Cloud\Ali\LLM\Video;
 use Scf\Core\Result;
 use Scf\Core\Struct;
+use Scf\Helper\JsonHelper;
 use Scf\Mode\Web\Exception\AppError;
 
 /**
@@ -65,6 +66,110 @@ class LLM extends Aliyun {
             'model' => $model,
             'messages' => $messages,
         ]));
+    }
+
+    /**
+     * 通过 OpenAI-compatible Chat Completions 协议发起流式对话。
+     *
+     * 该方法是 chat() 的显式流式版本，不改变 chat()/chatText()/Text::getResult()
+     * 的同步响应语义。回调返回 false 时会中止本次流式读取。
+     *
+     * @param array<int,array<string,mixed>> $messages
+     * @param string $model
+     * @param array<string,mixed>|Struct $options
+     * @param callable|null $onEvent function(array $event): bool|void
+     * @return Result
+     */
+    public function chatStream(array $messages, string $model = 'qwen-plus', array|Struct $options = [], ?callable $onEvent = null): Result {
+        if ($onEvent === null) {
+            return Result::error('流式回调不能为空', 'STREAM_CALLBACK_REQUIRED');
+        }
+
+        $content = '';
+        $reasoningContent = '';
+        $finishReason = null;
+        $usage = null;
+        $responseModel = $model;
+
+        $result = $this->postCompatibleStream('/chat/completions', array_merge($this->normalizeParameterPayload($options), [
+            'stream' => true,
+            'model' => $model,
+            'messages' => $messages,
+        ]), function (array $event) use ($onEvent, &$content, &$reasoningContent, &$finishReason, &$usage, &$responseModel): bool {
+            if (($event['event'] ?? '') === 'done') {
+                return $onEvent([
+                    'type' => 'done',
+                    'delta' => '',
+                    'reasoning_delta' => '',
+                    'content' => $content,
+                    'reasoning_content' => $reasoningContent,
+                    'finish_reason' => $finishReason,
+                    'usage' => $usage,
+                    'model' => $responseModel,
+                    'raw' => null,
+                ]) !== false;
+            }
+
+            $data = $event['data'] ?? null;
+            if (!is_array($data)) {
+                return $onEvent([
+                    'type' => 'event',
+                    'delta' => '',
+                    'reasoning_delta' => '',
+                    'content' => $content,
+                    'reasoning_content' => $reasoningContent,
+                    'finish_reason' => $finishReason,
+                    'usage' => $usage,
+                    'model' => $responseModel,
+                    'raw' => $data,
+                ]) !== false;
+            }
+
+            $responseModel = (string)($data['model'] ?? $responseModel);
+            if (isset($data['usage'])) {
+                $usage = $data['usage'];
+            }
+
+            $choice = is_array($data['choices'][0] ?? null) ? $data['choices'][0] : [];
+            $delta = is_array($choice['delta'] ?? null) ? $choice['delta'] : [];
+            $textDelta = (string)($delta['content'] ?? '');
+            $reasoningDelta = (string)($delta['reasoning_content'] ?? '');
+            if ($textDelta !== '') {
+                $content .= $textDelta;
+            }
+            if ($reasoningDelta !== '') {
+                $reasoningContent .= $reasoningDelta;
+            }
+            if (array_key_exists('finish_reason', $choice) && $choice['finish_reason'] !== null) {
+                $finishReason = $choice['finish_reason'];
+            }
+
+            return $onEvent([
+                'type' => 'chunk',
+                'delta' => $textDelta,
+                'reasoning_delta' => $reasoningDelta,
+                'tool_calls_delta' => is_array($delta['tool_calls'] ?? null) ? $delta['tool_calls'] : [],
+                'content' => $content,
+                'reasoning_content' => $reasoningContent,
+                'finish_reason' => $finishReason,
+                'usage' => $usage,
+                'model' => $responseModel,
+                'raw' => $data,
+            ]) !== false;
+        });
+
+        if ($result->hasError()) {
+            return $result;
+        }
+
+        return Result::success([
+            'content' => $content,
+            'reasoning_content' => $reasoningContent,
+            'finish_reason' => $finishReason,
+            'usage' => $usage,
+            'model' => $responseModel,
+            'raw' => $result->getData(),
+        ]);
     }
 
     /**
@@ -390,6 +495,19 @@ class LLM extends Aliyun {
     }
 
     /**
+     * 公开调用 OpenAI-compatible 任意 endpoint，并按 SSE 事件流回调。
+     *
+     * @param string $path
+     * @param array<string,mixed> $body
+     * @param callable $onEvent function(array $event): bool|void
+     * @param array<string,string> $headers
+     * @return Result
+     */
+    public function requestCompatibleStream(string $path, array $body, callable $onEvent, array $headers = []): Result {
+        return $this->postCompatibleStream($path, $body, $onEvent, $headers);
+    }
+
+    /**
      * 公开调用 DashScope 原生任意 POST endpoint。
      *
      * 当官方新增音频、视频、图像或行业模型服务时，业务可先用此方法接入，
@@ -432,6 +550,19 @@ class LLM extends Aliyun {
     }
 
     /**
+     * 调用 OpenAI-compatible SSE API。
+     *
+     * @param string $path
+     * @param array<string,mixed> $body
+     * @param callable $onEvent
+     * @param array<string,string> $headers
+     * @return Result
+     */
+    protected function postCompatibleStream(string $path, array $body, callable $onEvent, array $headers = []): Result {
+        return $this->postSse($this->compatibleBaseUrl . $path, $body, $onEvent, $headers);
+    }
+
+    /**
      * 调用 DashScope 原生 POST API。
      *
      * @param string $path
@@ -468,6 +599,118 @@ class LLM extends Aliyun {
         $client = $this->http($url, $headers);
         $response = $client->JPost($body, $this->timeout);
         return $this->normalizeResponse($response);
+    }
+
+    /**
+     * 发送 JSON POST 并解析 text/event-stream 事件。
+     *
+     * @param string $url
+     * @param array<string,mixed> $body
+     * @param callable $onEvent
+     * @param array<string,string> $headers
+     * @return Result
+     */
+    protected function postSse(string $url, array $body, callable $onEvent, array $headers = []): Result {
+        $buffer = '';
+        $eventCount = 0;
+        $done = false;
+
+        $emit = function (string $block) use ($onEvent, &$eventCount, &$done): bool {
+            $event = $this->parseSseEventBlock($block);
+            if ($event === null) {
+                return true;
+            }
+
+            $eventCount++;
+            $dataText = (string)($event['data'] ?? '');
+            if (trim($dataText) === '[DONE]') {
+                $done = true;
+                return $onEvent(array_merge($event, [
+                    'event' => 'done',
+                    'data' => '[DONE]',
+                ])) !== false;
+            }
+
+            $event['data'] = JsonHelper::is($dataText) ? JsonHelper::recover($dataText) : $dataText;
+            $event['raw_data'] = $dataText;
+            return $onEvent($event) !== false;
+        };
+
+        $client = $this->http($url, array_merge(['Accept' => 'text/event-stream'], $headers));
+        $response = $client->JPostStream($body, function (string $chunk) use (&$buffer, $emit): bool {
+            $buffer .= str_replace(["\r\n", "\r"], "\n", $chunk);
+            while (($pos = strpos($buffer, "\n\n")) !== false) {
+                $block = substr($buffer, 0, $pos);
+                $buffer = substr($buffer, $pos + 2);
+                if (!$emit($block)) {
+                    return false;
+                }
+            }
+            return true;
+        }, $this->timeout);
+        if ($response->hasError()) {
+            return $this->normalizeResponse($response);
+        }
+
+        if (trim($buffer) !== '' && !$emit($buffer)) {
+            return Result::error('流式响应处理已中止', 'STREAM_ABORTED');
+        }
+
+        return Result::success(array_merge(
+            is_array($response->getData()) ? $response->getData() : [],
+            [
+                'events' => $eventCount,
+                'done' => $done,
+            ]
+        ));
+    }
+
+    /**
+     * @return array<string,mixed>|null
+     */
+    protected function parseSseEventBlock(string $block): ?array {
+        $block = trim($block);
+        if ($block === '') {
+            return null;
+        }
+
+        $event = 'message';
+        $id = null;
+        $retry = null;
+        $data = [];
+        foreach (explode("\n", $block) as $line) {
+            $line = rtrim($line, "\n");
+            if ($line === '' || str_starts_with($line, ':')) {
+                continue;
+            }
+
+            $parts = explode(':', $line, 2);
+            $field = trim((string)($parts[0] ?? ''));
+            $value = (string)($parts[1] ?? '');
+            if (str_starts_with($value, ' ')) {
+                $value = substr($value, 1);
+            }
+
+            match ($field) {
+                'event' => $event = $value,
+                'data' => $data[] = $value,
+                'id' => $id = $value,
+                'retry' => $retry = is_numeric($value) ? (int)$value : $value,
+                default => null,
+            };
+        }
+
+        if (!$data && $event === 'message') {
+            return null;
+        }
+
+        return [
+            'event' => $event,
+            'data' => implode("\n", $data),
+            'id' => $id,
+            'retry' => $retry,
+            'raw' => $block,
+        ];
     }
 
     /**

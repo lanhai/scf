@@ -588,8 +588,13 @@ class Manager extends Component {
     }
 
     /**
-     * 所有节点状态
-     * @return array
+     * 构建传统 dashboard 控制器使用的首页状态包。
+     *
+     * 该方法位于非 Gateway dashboard 链路中，负责把节点心跳表、应用安装信息、
+     * 当前运行环境和日志计数收敛成 `/server` 与 socket `server_status` 共用的
+     * 状态结构。
+     *
+     * @return array<string, mixed>
      */
     public function getStatus(): array {
         $servers = $this->getServers();
@@ -603,6 +608,10 @@ class Manager extends Component {
             }
         }
         $appInfo = App::info()->toArray();
+        // 顶部应用信息必须展示当前运行态，而不是安装文件中的静态默认值。
+        $appInfo['env'] = SERVER_RUN_ENV ?: 'production';
+        $appInfo['version'] = App::version() ?: ($appInfo['version'] ?? null);
+        $appInfo['public_version'] = App::publicVersion() ?: ($appInfo['public_version'] ?? '--');
         $logger = Log::instance();
         return [
             'event' => 'server_status',

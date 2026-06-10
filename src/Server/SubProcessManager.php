@@ -8,6 +8,7 @@ use Scf\Core\Env;
 use Scf\Core\Key;
 use Scf\Core\Table\Counter;
 use Scf\Core\Table\Runtime;
+use Scf\Database\Dao;
 use Scf\Helper\JsonHelper;
 use Scf\Helper\StringHelper;
 use Scf\Server\SubProcess\ConsolePushProcess;
@@ -120,9 +121,9 @@ class SubProcessManager {
             $this->processList['RedisQueue'] = $this->createRedisQueueProcess();
         }
         //文件变更监听
-        if ($this->processEnabled('FileWatch') && Env::isDev() && APP_SRC_TYPE == 'dir') {
-            $this->processList['FileWatch'] = $this->createFileWatchProcess();
-        }
+//        if ($this->processEnabled('FileWatch') && Env::isDev() && APP_SRC_TYPE == 'dir') {
+//            $this->processList['FileWatch'] = $this->createFileWatchProcess();
+//        }
     }
 
     /**

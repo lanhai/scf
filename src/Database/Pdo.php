@@ -158,20 +158,20 @@ class Pdo {
     /**
      * 开启嵌套事务,所有写入操作都将开启事务,谨慎使用
      */
-    public static function beginProcessLifeTransaction(): array {
-        return NestTransactions::instance()->begin();
+    public static function beginProcessLifeTransaction(?int $coroutineId = null): array {
+        return NestTransactions::begin($coroutineId);
     }
 
-    public static function cancelProcessLifeTransaction(): void {
-        NestTransactions::instance()->cancel();
+    public static function cancelProcessLifeTransaction(?int $coroutineId = null): void {
+        NestTransactions::cancel($coroutineId);
     }
 
-    public static function isBeginProcessLifeTransaction(): bool {
-        return NestTransactions::instance()->isBegin();
+    public static function isBeginProcessLifeTransaction(?int $coroutineId = null): bool {
+        return NestTransactions::instance($coroutineId)->isBegin();
     }
 
-    public static function finishProcessLifeTransaction(): NestTransactions {
-        return NestTransactions::instance()->finish();
+    public static function finishProcessLifeTransaction(?int $coroutineId = null): NestTransactions {
+        return NestTransactions::finish($coroutineId);
     }
 
     /**

@@ -459,6 +459,47 @@ class Text extends AbstractAbility {
     }
 
     /**
+     * 执行文本生成流式任务。
+     *
+     * 该方法是 getResult() 的显式流式版本；getResult()/result() 保持原有同步
+     * 完整响应行为。回调返回 false 时会中止本次流式读取。
+     *
+     * @param callable $onEvent function(array $event): bool|void
+     * @return Result
+     */
+    public function stream(callable $onEvent): Result {
+        $options = array_merge(['stream' => true], $this->options);
+        if ($this->jsonResult) {
+            $options['response_format'] = $options['response_format'] ?? ['type' => 'json_object'];
+        }
+
+        $result = DashScope::instance()->chatStream($this->buildMessages(), $this->model, $options, $onEvent);
+        if ($result->hasError()) {
+            return $result;
+        }
+
+        $content = (string)$result->getData('content');
+        return Result::success([
+            'content' => $content,
+            'parsed' => $this->jsonResult ? $this->parseJsonContent($content) : null,
+            'finish_reason' => $result->getData('finish_reason'),
+            'usage' => $result->getData('usage'),
+            'model' => $result->getData('model') ?? $this->model,
+            'raw' => $result->getData('raw'),
+        ]);
+    }
+
+    /**
+     * `stream()` 的语义化别名。
+     *
+     * @param callable $onEvent
+     * @return Result
+     */
+    public function streamResult(callable $onEvent): Result {
+        return $this->stream($onEvent);
+    }
+
+    /**
      * `getResult()` 的语义化别名。
      *
      * @return Result

@@ -99,6 +99,8 @@ trait GatewayTelemetryTrait {
         }
 
         $appInfo = App::info()?->toArray() ?: [];
+        // dashboard 顶部应用信息展示当前运行态，避免沿用安装配置里的默认环境。
+        $appInfo['env'] = SERVER_RUN_ENV ?: 'production';
         $appInfo['version'] = $this->resolveAppVersion($appInfo);
         $appInfo['public_version'] = $this->resolvePublicVersion($appInfo);
         $logger = Log::instance();

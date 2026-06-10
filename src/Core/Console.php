@@ -2,6 +2,7 @@
 
 namespace Scf\Core;
 
+use DOMDocument;
 use JetBrains\PhpStorm\NoReturn;
 use Scf\Command\Color;
 use Scf\Core\Table\Runtime;
@@ -20,6 +21,7 @@ class Console {
 
     protected static string $enablePushKey = 'CONSOLE_LOG_PUSH_ENABLE';
     protected static $pushHandler = null;
+    protected const STRUCTURED_FORMAT_MAX_BYTES = 1048576;
 
     protected static function currentTimestamp(): string {
         return date('m-d H:i:s') . "." . substr((string)Time::millisecond(), -3);
@@ -59,6 +61,261 @@ class Console {
 
     protected static function isGatewayMessage(string $str): bool {
         return str_starts_with(trim($str), '【Gateway】');
+    }
+
+    protected static function prettyStructuredMessage(string $str): string {
+        if ($str === '' || strlen($str) > self::STRUCTURED_FORMAT_MAX_BYTES) {
+            return $str;
+        }
+
+        $trimmed = trim($str);
+        if ($trimmed === '') {
+            return $str;
+        }
+
+        $formatted = self::formatStructuredPayload($trimmed);
+        if ($formatted !== null) {
+            return $formatted;
+        }
+
+        $lines = preg_split('/\r\n|\r|\n/', $str);
+        if (!is_array($lines) || count($lines) === 0) {
+            return $str;
+        }
+
+        $changed = false;
+        foreach ($lines as $index => $line) {
+            $formattedLine = self::prettyStructuredLine($line);
+            if ($formattedLine !== $line) {
+                $changed = true;
+                $lines[$index] = $formattedLine;
+            }
+        }
+
+        return $changed ? implode(PHP_EOL, $lines) : $str;
+    }
+
+    protected static function prettyStructuredLine(string $line): string {
+        $trimmed = trim($line);
+        if ($trimmed === '') {
+            return $line;
+        }
+
+        $formatted = self::formatStructuredPayload($trimmed);
+        if ($formatted !== null) {
+            return $formatted;
+        }
+
+        $length = strlen($line);
+        $positions = [];
+        foreach (['{', '[', '<'] as $needle) {
+            $offset = 0;
+            while (($position = strpos($line, $needle, $offset)) !== false) {
+                $positions[] = $position;
+                $offset = $position + 1;
+            }
+        }
+
+        $positions = array_values(array_unique($positions));
+        sort($positions);
+        foreach ($positions as $position) {
+            if ($position <= 0 || $position >= $length) {
+                continue;
+            }
+
+            $prefix = substr($line, 0, $position);
+            if (!preg_match('/(?:[:：=]|=>)\s*$/u', $prefix)) {
+                continue;
+            }
+
+            $payload = trim(substr($line, $position));
+            $formatted = self::formatStructuredPayload($payload);
+            if ($formatted !== null) {
+                return rtrim($prefix) . PHP_EOL . $formatted;
+            }
+        }
+
+        return $line;
+    }
+
+    protected static function formatStructuredPayload(string $payload): ?string {
+        if ($payload === '' || strlen($payload) > self::STRUCTURED_FORMAT_MAX_BYTES) {
+            return null;
+        }
+
+        $first = $payload[0] ?? '';
+        if ($first === '{' || $first === '[') {
+            return self::formatJsonPayload($payload);
+        }
+        if ($first === '<') {
+            return self::formatXmlPayload($payload);
+        }
+
+        return null;
+    }
+
+    protected static function formatJsonPayload(string $payload): ?string {
+        $decoded = json_decode($payload, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return null;
+        }
+
+        $decoded = self::normalizeStructuredValue($decoded);
+        return self::stringifyPrettyValue($decoded);
+    }
+
+    protected static function normalizeStructuredValue(mixed $value, int $depth = 0): mixed {
+        if ($depth >= 6) {
+            return $value;
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $key => $item) {
+                $value[$key] = self::normalizeStructuredValue($item, $depth + 1);
+            }
+            return $value;
+        }
+
+        if (!is_string($value)) {
+            return $value;
+        }
+
+        $trimmed = trim($value);
+        if ($trimmed === '' || strlen($trimmed) > self::STRUCTURED_FORMAT_MAX_BYTES) {
+            return $value;
+        }
+
+        $formatted = self::formatStructuredPayload($trimmed);
+        if ($formatted !== null) {
+            return $formatted;
+        }
+
+        $embedded = self::formatEmbeddedStructuredString($trimmed);
+        if ($embedded !== null) {
+            return $embedded;
+        }
+
+        $decoded = self::decodeBase64StructuredPayload($trimmed);
+        if ($decoded !== null) {
+            return $decoded;
+        }
+
+        return $value;
+    }
+
+    protected static function formatEmbeddedStructuredString(string $value): ?string {
+        if (!str_contains($value, '<') && !str_contains($value, '{') && !str_contains($value, '[')) {
+            return null;
+        }
+
+        $formatted = self::prettyStructuredMessage($value);
+        return $formatted !== $value ? $formatted : null;
+    }
+
+    protected static function stringifyPrettyValue(mixed $value, int $depth = 0): string {
+        $indent = str_repeat(' ', $depth * 4);
+        $childIndent = str_repeat(' ', ($depth + 1) * 4);
+
+        if (is_array($value)) {
+            if ($value === []) {
+                return '[]';
+            }
+
+            $isAssociative = ArrayHelper::isAssociative($value);
+            $lines = [$isAssociative ? '{' : '['];
+            $lastIndex = count($value) - 1;
+            $index = 0;
+            foreach ($value as $key => $item) {
+                $line = $childIndent;
+                if ($isAssociative) {
+                    $line .= self::jsonEncodeScalar((string)$key) . ': ';
+                }
+                $line .= self::stringifyPrettyValue($item, $depth + 1);
+                if ($index < $lastIndex) {
+                    $line .= ',';
+                }
+                $lines[] = $line;
+                $index++;
+            }
+            $lines[] = $indent . ($isAssociative ? '}' : ']');
+            return implode(PHP_EOL, $lines);
+        }
+
+        if (is_string($value) && self::isReadableBlockString($value)) {
+            return self::stringifyBlockString($value, $depth);
+        }
+
+        return self::jsonEncodeScalar($value);
+    }
+
+    protected static function jsonEncodeScalar(mixed $value): string {
+        $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return is_string($encoded) ? $encoded : 'null';
+    }
+
+    protected static function isReadableBlockString(string $value): bool {
+        return str_contains($value, PHP_EOL)
+            && (
+                preg_match('/(^|\n)\s*<[A-Za-z!?]/', $value) === 1
+                || preg_match('/(^|\n)\s*[\[{]/', $value) === 1
+            );
+    }
+
+    protected static function stringifyBlockString(string $value, int $depth): string {
+        $indent = str_repeat(' ', $depth * 4);
+        $childIndent = str_repeat(' ', ($depth + 1) * 4);
+        $lines = preg_split('/\r\n|\r|\n/', $value);
+        if (!is_array($lines)) {
+            $lines = [$value];
+        }
+
+        $output = ['"""'];
+        foreach ($lines as $line) {
+            $output[] = $childIndent . $line;
+        }
+        $output[] = $indent . '"""';
+        return implode(PHP_EOL, $output);
+    }
+
+    protected static function decodeBase64StructuredPayload(string $value): ?string {
+        if (strlen($value) < 16 || strlen($value) > self::STRUCTURED_FORMAT_MAX_BYTES) {
+            return null;
+        }
+        if (!preg_match('/^[A-Za-z0-9+\/]+={0,2}$/', $value) || strlen($value) % 4 !== 0) {
+            return null;
+        }
+
+        $decoded = base64_decode($value, true);
+        if (!is_string($decoded)) {
+            return null;
+        }
+
+        $decoded = trim($decoded);
+        if ($decoded === '' || !preg_match('//u', $decoded)) {
+            return null;
+        }
+
+        return self::formatStructuredPayload($decoded);
+    }
+
+    protected static function formatXmlPayload(string $payload): ?string {
+        $previous = libxml_use_internal_errors(true);
+        libxml_clear_errors();
+
+        $dom = new DOMDocument('1.0', 'UTF-8');
+        $dom->preserveWhiteSpace = false;
+        $dom->formatOutput = true;
+        $loaded = $dom->loadXML($payload, LIBXML_NONET);
+        $errors = libxml_get_errors();
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        if (!$loaded || $errors) {
+            return null;
+        }
+
+        $xml = $dom->saveXML($dom->documentElement);
+        return is_string($xml) ? trim($xml) : null;
     }
 
     /**
@@ -274,16 +531,17 @@ class Console {
             }
         }
         if (defined('ENV_MODE') && ENV_MODE == MODE_NATIVE) {
-            $body = self::isGatewayMessage($str) ? Color::gateway($str) : $str;
+            $body = self::prettyStructuredMessage($str);
+            $body = self::isGatewayMessage($body) ? Color::gateway($body) : $body;
             $str = $timestamp . Color::notice("【Server】") . $body . "\n";
         } else {
             if (self::shouldGrayOldInstanceOutput()) {
                 $prefix = '#' . self::oldProxyInstanceId() . ' ';
-                $body = self::applyTerminalGray($prefix . $str);
+                $body = self::applyTerminalGray($prefix . self::prettyStructuredMessage($str));
             } else {
-                $body = $str;
+                $body = self::prettyStructuredMessage($str);
             }
-            if (!self::shouldGrayOldInstanceOutput() && self::isGatewayMessage($str)) {
+            if (!self::shouldGrayOldInstanceOutput() && self::isGatewayMessage($body)) {
                 $body = Color::gateway($body);
             } elseif (!self::shouldGrayOldInstanceOutput() && $color) {
                 $body = Color::$color($body);

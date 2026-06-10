@@ -40,22 +40,22 @@ class NestTransactions {
         $this->isBegin() and !$this->isEnd() and $this->finish();
     }
 
-    public static function cancel(): void {
-        static::instance()->_cancel();
+    public static function cancel(?int $coroutineId = null): void {
+        static::instance($coroutineId)->_cancel();
     }
 
-    public static function begin(): array {
-        return static::instance()->_begin();
+    public static function begin(?int $coroutineId = null): array {
+        return static::instance($coroutineId)->_begin();
     }
 
-    public static function finish(): static {
-        $obj = static::instance();
+    public static function finish(?int $coroutineId = null): static {
+        $obj = static::instance($coroutineId);
         $obj->_finish();
         return $obj;
     }
 
-    public static function status(): array {
-        return static::instance()->_status();
+    public static function status(?int $coroutineId = null): array {
+        return static::instance($coroutineId)->_status();
     }
 
     public function hasError(): bool {
@@ -167,7 +167,10 @@ class NestTransactions {
     private function reset(): void {
         $this->end = true;
         $this->data['finished'] = Time::now();
+        $this->begin = false;
+        $this->data['savepoints'] = [];
         $this->data['connections'] = [];
+        $this->data['errors'] = [];
     }
 
     /**

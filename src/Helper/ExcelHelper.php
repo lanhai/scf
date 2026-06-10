@@ -5,6 +5,7 @@ namespace Scf\Helper;
 use Scf\Cloud\Ali\Oss;
 use Scf\Core\Result;
 use Vtiful\Kernel\Excel;
+use Vtiful\Kernel\Format;
 
 class ExcelHelper {
     private Excel $excel;
@@ -12,17 +13,52 @@ class ExcelHelper {
     private string $fileName;
     private array $header;
 
-    public function __construct(string $fileName, array $header, string $sheetName = 'Sheet1') {
+    public function __construct(string $fileName, array $header, string $sheetName = 'Sheet1', array $options = []) {
         $excel = new Excel([
             'path' => APP_PATH . '/tmp',
         ]);
         $this->fileName = $fileName;
         $this->header = $header;
-        $this->excel = $excel->fileName($fileName, $sheetName)->header(array_values($header));
+        $excel = $excel->fileName($fileName, $sheetName);
+
+        $headerFormat = null;
+        if (!empty($options['table_style'])) {
+            $defaultFormat = (new Format($excel->getHandle()))
+                ->font('宋体')
+                ->fontSize(10)
+                ->border(Format::BORDER_THIN)
+                ->align(Format::FORMAT_ALIGN_CENTER)
+                ->align(Format::FORMAT_ALIGN_VERTICAL_CENTER)
+                ->wrap()
+                ->toResource();
+            $headerFormat = (new Format($excel->getHandle()))
+                ->font('宋体')
+                ->fontSize(10)
+                ->bold()
+                ->border(Format::BORDER_THIN)
+                ->align(Format::FORMAT_ALIGN_CENTER)
+                ->align(Format::FORMAT_ALIGN_VERTICAL_CENTER)
+                ->wrap()
+                ->toResource();
+            $excel = $excel->defaultFormat($defaultFormat);
+        }
+
+        foreach (($options['column_widths'] ?? []) as $range => $width) {
+            $excel = $excel->setColumn((string)$range, (float)$width);
+        }
+        if (isset($options['header_height'])) {
+            $excel = $headerFormat
+                ? $excel->setRow('1:1', (float)$options['header_height'], $headerFormat)
+                : $excel->setRow('1:1', (float)$options['header_height']);
+        }
+
+        $this->excel = $headerFormat
+            ? $excel->header(array_values($header), $headerFormat)
+            : $excel->header(array_values($header));
     }
 
-    public static function create(string $fileName, array $header, string $sheetName = 'Sheet1'): static {
-        return new static($fileName, $header, $sheetName);
+    public static function create(string $fileName, array $header, string $sheetName = 'Sheet1', array $options = []): static {
+        return new static($fileName, $header, $sheetName, $options);
     }
 
     public function addRows($datas): void {
