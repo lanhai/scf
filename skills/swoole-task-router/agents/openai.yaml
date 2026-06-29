@@ -1,0 +1,7 @@
+interface:
+  display_name: "Swoole 任务路由器"
+  short_description: "先帮你把任务分到最合适的本地 skill。"
+  default_prompt: "使用 $swoole-task-router 先判断这次 Swoole 工作区任务最适合走哪个项目 skill。"
+
+policy:
+  allow_implicit_invocation: true

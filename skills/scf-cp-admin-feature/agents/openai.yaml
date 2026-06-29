@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF CP 后台功能"
+  short_description: "按目标 app 参数实现完整的 SCF CP/admin 后台功能链路。"
+  default_prompt: "使用 $scf-cp-admin-feature 按目标 SCF app 的后端、前端、路由菜单和权限节点规范实现这个 CP/admin 后台管理功能。"
+
+policy:
+  allow_implicit_invocation: true

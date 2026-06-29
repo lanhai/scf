@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF 发布流程"
+  short_description: "按项目既定命令链安全发布应用。"
+  default_prompt: "使用 $scf-release-publish 先判断这次发布该用哪种打包类型，再按项目规定的命令链执行。"
+
+policy:
+  allow_implicit_invocation: true

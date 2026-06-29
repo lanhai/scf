@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF 框架发布"
+  short_description: "按固定三步顺序发布框架。"
+  default_prompt: "使用 $scf-framework-publish 按固定顺序执行 framework build、framework push 和 build_main.sh。"
+
+policy:
+  allow_implicit_invocation: true

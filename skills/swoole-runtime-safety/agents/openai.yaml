@@ -1,0 +1,7 @@
+interface:
+  display_name: "Swoole 运行时安全"
+  short_description: "改生命周期前先验证运行时语义。"
+  default_prompt: "使用 $swoole-runtime-safety 先验证当前 Swoole 运行时是否真的支持这次生命周期或协程控制改动。"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF 页面可见权限"
+  short_description: "为任意 SCF app 的 CP/admin 前端元素维护 view_permissions。"
+  default_prompt: "使用 $scf-page-visibility-permission 为目标 SCF app 的 CP/admin 页面按钮、列、筛选项或其他前端元素添加页面可见权限。"
+
+policy:
+  allow_implicit_invocation: true

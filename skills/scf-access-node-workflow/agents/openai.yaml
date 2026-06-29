@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF 权限节点流程"
+  short_description: "按安全流程维护任意 SCF app 的 CP/admin 权限节点和角色授权。"
+  default_prompt: "使用 $scf-access-node-workflow 按目标 app 参数安全地新增或调整这次 CP/admin 权限节点和角色授权。"
+
+policy:
+  allow_implicit_invocation: true

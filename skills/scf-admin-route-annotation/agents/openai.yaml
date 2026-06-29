@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF 后台注解路由"
+  short_description: "让任意 SCF app 的后台路由和控制器方法写在一起。"
+  default_prompt: "使用 $scf-admin-route-annotation 为这个 SCF app 后台接口补充或修正注解路由，并按目标 app 调整路径。"
+
+policy:
+  allow_implicit_invocation: true

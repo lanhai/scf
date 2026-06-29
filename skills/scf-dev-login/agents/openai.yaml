@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF Dev Login"
+  short_description: "Log in to an SCF app dev CP/admin backend and keep token plus cookie jar."
+  default_prompt: "Use $scf-dev-login to log in to the target SCF app dev backend and obtain a working session before protected admin API calls."
+
+policy:
+  allow_implicit_invocation: true

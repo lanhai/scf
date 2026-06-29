@@ -1,0 +1,7 @@
+interface:
+  display_name: "SCF Dao ArCreator"
+  short_description: "按 SCF 真实表结构刷新 Dao 和数据库映射。"
+  default_prompt: "使用 $scf-dao-arcreator 按 dev 真实表结构和 SCF ArCreator/ArCreater 流程处理这次 Dao 或 schema 变更。"
+
+policy:
+  allow_implicit_invocation: true

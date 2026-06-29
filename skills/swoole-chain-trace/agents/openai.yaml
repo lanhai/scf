@@ -1,0 +1,7 @@
+interface:
+  display_name: "Swoole 链路追踪"
+  short_description: "修改前先追完整条 Swoole 业务链路。"
+  default_prompt: "使用 $swoole-chain-trace 先把这次改动涉及的完整上下游链路梳理清楚，再决定是否改代码。"
+
+policy:
+  allow_implicit_invocation: true

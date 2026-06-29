@@ -46,6 +46,7 @@ class App {
      * @var array<int,array>
      */
     protected static array $_crontabModules = [];
+    protected static string $_crontabModulesSource = '';
     protected static ?string $appid = null;
     protected static string $path;
     protected static bool $_ready = false;
@@ -333,6 +334,57 @@ class App {
     }
 
     /**
+     * 当前应用代码库路径。
+     *
+     * 不能直接复用 APP_LIB_PATH：生产 phar 模式下应用升级/业务实例 reload 后，
+     * gateway worker 进程不会重启，APP_LIB_PATH 仍会指向启动时的旧版本包。
+     */
+    public static function libPath(): string {
+        $src = self::src();
+        if (!file_exists($src)) {
+            self::refreshProfileFromDisk();
+            $src = self::src();
+        }
+        return rtrim($src, '/') . '/lib';
+    }
+
+    /**
+     * 从 apps.json 刷新当前应用 profile。
+     *
+     * 生产 phar 包更新后旧版本可能被清理，但 gateway worker 仍持有 Runtime
+     * 表里的旧 profile。这里只在当前源路径不可用时刷新，避免普通请求反复读盘。
+     */
+    protected static function refreshProfileFromDisk(): void {
+        $jsonFile = SCF_APPS_ROOT . '/apps.json';
+        if (!file_exists($jsonFile)) {
+            return;
+        }
+
+        clearstatcache();
+        $apps = File::readJson($jsonFile);
+        if (!is_array($apps)) {
+            return;
+        }
+
+        foreach ($apps as $profile) {
+            if (!is_array($profile) || (string)($profile['app_path'] ?? '') !== APP_DIR_NAME) {
+                continue;
+            }
+            $version = (string)($profile['version'] ?? '');
+            if (APP_SRC_TYPE === 'phar' && $version === '') {
+                return;
+            }
+            $src = APP_SRC_TYPE === 'phar' ? 'phar://' . APP_BIN_DIR . '/v-' . $version . '.app' : APP_PATH . '/src';
+            if (!file_exists($src)) {
+                return;
+            }
+            \Scf\Core\Table\Runtime::instance()->set('_APP_PROFILE_', $profile);
+            self::$_ready = true;
+            return;
+        }
+    }
+
+    /**
      * @return Installer|null
      */
     public static function info(): ?Installer {
@@ -590,11 +642,12 @@ class App {
      * @return array<int,array>
      */
     public static function getCrontabModules(): array {
-        if (self::$_crontabModules) {
+        $libPath = self::libPath();
+        if (self::$_crontabModules && self::$_crontabModulesSource === $libPath) {
             return self::$_crontabModules;
         }
 
-        return self::loadCrontabModules();
+        return self::loadCrontabModules($libPath);
     }
 
     /**
@@ -648,15 +701,16 @@ class App {
      *
      * @return array<int,array>
      */
-    public static function loadCrontabModules(): array {
-        if (self::$_crontabModules) {
+    public static function loadCrontabModules(?string $libPath = null): array {
+        $libPath = rtrim($libPath ?: self::libPath(), '/');
+        if (self::$_crontabModules && self::$_crontabModulesSource === $libPath) {
             return self::$_crontabModules;
         }
 
         spl_autoload_register([__CLASS__, 'autoload']);
         $entryScripts = array_unique(Dir::scan(
-            APP_LIB_PATH,
-            (is_dir(APP_LIB_PATH . '/Controller') || is_dir(APP_LIB_PATH . '/Cli') || is_dir(APP_LIB_PATH . '/Crontab') || is_dir(APP_LIB_PATH . '/Rpc')) ? 3 : 2
+            $libPath,
+            (is_dir($libPath . '/Controller') || is_dir($libPath . '/Cli') || is_dir($libPath . '/Crontab') || is_dir($libPath . '/Rpc')) ? 3 : 2
         ));
 
         $modules = [];
@@ -680,6 +734,7 @@ class App {
         }
 
         self::$_crontabModules = $modules;
+        self::$_crontabModulesSource = $libPath;
         return self::$_crontabModules;
     }
 
