@@ -217,7 +217,12 @@ class WhereBuilder {
                 $andOrFormat['value'] = $andOrFormat['value'] == '' ? null : $andOrFormat['value'];
                 //if (!empty($andOrFormat['value'])) {
                 if (is_array($andOrFormat['value'])) {
-                    if (!in_array($andOrFormat['operator'], ["IN", "NOT IN"])) {
+                    if (in_array($andOrFormat['operator'], ["BETWEEN", "NOT BETWEEN"], true)) {
+                        // 分组条件必须和顶层条件使用相同的 BETWEEN 占位符契约；
+                        // 两个边界值会在下方展开到 match，因此 SQL 必须同步补齐两个占位符。
+                        $condition .= " ? AND ?";
+                        $orArr['match'] = [...$orArr['match'], ...$andOrFormat['value']];
+                    } elseif (!in_array($andOrFormat['operator'], ["IN", "NOT IN"])) {
                         $orArr['match'] = [...$orArr['match'], ...$andOrFormat['value']];// Arr::merge($orArr['match'], $andOrFormat['value']);
                     } else {
                         $orArr['match'][] = $andOrFormat['value'];
