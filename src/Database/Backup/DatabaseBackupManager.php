@@ -10,7 +10,6 @@ use mysqli;
 use mysqli_result;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Channel;
-use Swoole\Coroutine\System;
 use Throwable;
 
 /**
@@ -30,15 +29,20 @@ class DatabaseBackupManager {
      */
     public const RETENTION_LIMIT = 3;
 
-    /**
-     * 备份互斥锁文件名。
-     */
-    protected const BACKUP_LOCK_FILE_NAME = '.backup.lock';
+    /** 数据库备份、恢复与删除共享同一把维护锁，禁止高 IO/破坏性任务互相重叠。 */
+    protected const MAINTENANCE_LOCK_FILE_NAME = '.maintenance.lock';
 
-    /**
-     * 恢复互斥锁文件名。
-     */
-    protected const RESTORE_LOCK_FILE_NAME = '.restore.lock';
+    /** 读取表清单属于轻量查询，但也必须有确定的网络/进程上限。 */
+    protected const TABLE_DISCOVERY_TIMEOUT_SECONDS = 120.0;
+
+    /** 单张大表允许导出两小时，避免把长任务错误套用短探针的 30 秒上限。 */
+    protected const TABLE_DUMP_TIMEOUT_SECONDS = 7_200.0;
+
+    /** mysqli 连接阶段最多等待 15 秒，避免不可达地址永久挂住任务入口。 */
+    protected const MYSQL_CONNECT_TIMEOUT_SECONDS = 15;
+
+    /** 大表流式读取允许长时间运行，但最终仍有 socket 读超时边界。 */
+    protected const MYSQL_READ_TIMEOUT_SECONDS = 7_200;
 
     /**
      * 单库表导出的最大协程并发数。
@@ -63,8 +67,19 @@ class DatabaseBackupManager {
      */
     protected DatabaseBackupCommandResolver $commandResolver;
 
-    public function __construct(?DatabaseBackupCommandResolver $commandResolver = null) {
+    /**
+     * 数据库长任务外部进程执行器。
+     *
+     * @var DatabaseBackupProcessRunner
+     */
+    protected DatabaseBackupProcessRunner $processRunner;
+
+    public function __construct(
+        ?DatabaseBackupCommandResolver $commandResolver = null,
+        ?DatabaseBackupProcessRunner $processRunner = null
+    ) {
         $this->commandResolver = $commandResolver ?: new DatabaseBackupCommandResolver();
+        $this->processRunner = $processRunner ?: new DatabaseBackupProcessRunner();
     }
 
     /**
@@ -203,45 +218,49 @@ class DatabaseBackupManager {
     public function deleteBackup(string $dbName, string $snapshot, ?string $table = null): array {
         $dbName = $this->resolveConfiguredDatabaseName($dbName);
         $snapshot = $this->assertSnapshot($snapshot);
+        $table = is_null($table) || trim($table) === '' ? null : $this->assertTableFile($table);
 
-        $snapshotDir = $this->snapshotDirectory($dbName, $snapshot);
-        if (!is_dir($snapshotDir)) {
-            throw new Exception('备份快照不存在: ' . $dbName . '/' . $snapshot);
-        }
-
-        if (is_null($table) || trim($table) === '') {
-            File::removeDirectory($snapshotDir);
-            $dbDir = $this->databaseBackupDirectory($dbName);
-            if (is_dir($dbDir) && $this->directoryChildren($dbDir) === []) {
-                @rmdir($dbDir);
+        // 删除会改变恢复输入，必须和备份/恢复共用维护锁，避免恢复到一半时文件
+        // 被 dashboard 删除，或清理逻辑和正在落盘的快照互相踩踏。
+        return $this->withMaintenanceLock(function () use ($dbName, $snapshot, $table): array {
+            $snapshotDir = $this->snapshotDirectory($dbName, $snapshot);
+            if (!is_dir($snapshotDir)) {
+                throw new Exception('备份快照不存在: ' . $dbName . '/' . $snapshot);
             }
+
+            if ($table === null) {
+                File::removeDirectory($snapshotDir);
+                $dbDir = $this->databaseBackupDirectory($dbName);
+                if (is_dir($dbDir) && $this->directoryChildren($dbDir) === []) {
+                    @rmdir($dbDir);
+                }
+                return [
+                    'deleted' => 'snapshot',
+                    'db_name' => $dbName,
+                    'snapshot' => $snapshot,
+                ];
+            }
+
+            $targetFile = $snapshotDir . '/' . $table;
+            if (!is_file($targetFile)) {
+                throw new Exception('表备份文件不存在: ' . $dbName . '/' . $snapshot . '/' . $table);
+            }
+            if (!@unlink($targetFile)) {
+                throw new Exception('删除表备份文件失败: ' . $dbName . '/' . $snapshot . '/' . $table);
+            }
+
+            // 删除最后一个表文件后，自动回收空快照目录，保持目录结构整洁。
+            if ($this->directoryChildren($snapshotDir) === []) {
+                @rmdir($snapshotDir);
+            }
+
             return [
-                'deleted' => 'snapshot',
+                'deleted' => 'table',
                 'db_name' => $dbName,
                 'snapshot' => $snapshot,
+                'table' => $table,
             ];
-        }
-
-        $tableFile = $this->assertTableFile($table);
-        $targetFile = $snapshotDir . '/' . $tableFile;
-        if (!is_file($targetFile)) {
-            throw new Exception('表备份文件不存在: ' . $dbName . '/' . $snapshot . '/' . $tableFile);
-        }
-        if (!@unlink($targetFile)) {
-            throw new Exception('删除表备份文件失败: ' . $dbName . '/' . $snapshot . '/' . $tableFile);
-        }
-
-        // 删除最后一个表文件后，自动回收空快照目录，保持目录结构整洁。
-        if ($this->directoryChildren($snapshotDir) === []) {
-            @rmdir($snapshotDir);
-        }
-
-        return [
-            'deleted' => 'table',
-            'db_name' => $dbName,
-            'snapshot' => $snapshot,
-            'table' => $tableFile,
-        ];
+        }, '数据库备份、恢复或删除任务正在执行，请稍后再试', 'delete');
     }
 
     /**
@@ -259,7 +278,14 @@ class DatabaseBackupManager {
      * @return string
      */
     public function restoreLockFile(): string {
-        return $this->backupRoot() . '/' . self::RESTORE_LOCK_FILE_NAME;
+        return $this->maintenanceLockFile();
+    }
+
+    /**
+     * 返回数据库维护任务共享锁路径。
+     */
+    public function maintenanceLockFile(): string {
+        return $this->backupRoot() . '/' . self::MAINTENANCE_LOCK_FILE_NAME;
     }
 
     /**
@@ -270,7 +296,11 @@ class DatabaseBackupManager {
      * @throws Exception
      */
     public function withRestoreLock(callable $callback): mixed {
-        return $this->withFileLock($this->restoreLockFile(), $callback, '数据库恢复任务正在执行，请稍后再试');
+        return $this->withMaintenanceLock(
+            $callback,
+            '数据库备份、恢复或删除任务正在执行，请稍后再试',
+            'restore'
+        );
     }
 
     /**
@@ -579,18 +609,35 @@ class DatabaseBackupManager {
             return $this->fetchDatabaseTablesViaMysqli($server);
         }
 
-        $command = implode(' ', [
-            escapeshellarg($mysql),
+        $command = [
+            $mysql,
             '--skip-column-names',
             '--batch',
-            '--host=' . escapeshellarg((string)$server['host']),
-            '--port=' . (int)$server['port'],
-            '--user=' . escapeshellarg((string)$server['username']),
-            '--database=' . escapeshellarg((string)$server['db_name']),
+            '--host=' . (string)$server['host'],
+            '--port=' . (string)(int)$server['port'],
+            '--user=' . (string)$server['username'],
+            '--database=' . (string)$server['db_name'],
             '-e',
-            escapeshellarg('SHOW TABLES'),
-        ]);
-        $result = $this->runCommand($command, $this->mysqlEnv((string)$server['password']));
+            'SHOW TABLES',
+        ];
+        $result = $this->processRunner->run(
+            $command,
+            self::TABLE_DISCOVERY_TIMEOUT_SECONDS,
+            $this->mysqlEnv((string)$server['password'])
+        );
+        if ($result['timed_out']) {
+            throw new Exception('读取表清单超时(' . $server['db_name'] . '): 已等待 '
+                . (int)self::TABLE_DISCOVERY_TIMEOUT_SECONDS . ' 秒');
+        }
+        if ($result['cancelled']) {
+            throw new Exception('读取表清单已取消(' . $server['db_name'] . ')');
+        }
+        if (!$result['started']) {
+            throw new Exception('读取表清单失败(' . $server['db_name'] . '): ' . trim($result['stderr']));
+        }
+        if ($result['truncated']) {
+            throw new Exception('读取表清单输出超过安全上限(' . $server['db_name'] . ')');
+        }
         if ($result['exit_code'] !== 0) {
             throw new Exception('读取表清单失败(' . $server['db_name'] . '): ' . trim($result['stderr'] ?: $result['stdout']));
         }
@@ -641,7 +688,7 @@ class DatabaseBackupManager {
      * @param string $tableName 表名
      * @param string $targetFile 导出目标文件
      * @param bool $includeSetGtidPurged 是否带上 GTID 参数
-     * @return array{exit_code:int,stdout:string,stderr:string}
+     * @return array{exit_code:int,stdout:string,stderr:string,timed_out:bool,cancelled:bool,started:bool,truncated:bool}
      * @throws Exception
      */
     protected function executeMysqldumpToFile(
@@ -652,46 +699,27 @@ class DatabaseBackupManager {
         bool $includeSetGtidPurged
     ): array {
         $command = $this->buildMysqldumpCommand($mysqldumpPath, $server, $tableName, $includeSetGtidPurged);
-        if ($this->canUseSwooleCoroutine()) {
-            $stderrFile = tempnam(sys_get_temp_dir(), 'scf_db_dump_err_');
-            if ($stderrFile === false) {
-                throw new Exception('创建 mysqldump 错误输出文件失败');
-            }
-            try {
-                $shellResult = $this->runShellCommand(
-                    'MYSQL_PWD=' . escapeshellarg((string)$server['password'])
-                    . ' ' . $command
-                    . ' > ' . escapeshellarg($targetFile)
-                    . ' 2> ' . escapeshellarg($stderrFile)
-                );
-                return [
-                    'exit_code' => (int)$shellResult['exit_code'],
-                    'stdout' => (string)$shellResult['stdout'],
-                    'stderr' => (string)(@file_get_contents($stderrFile) ?: ''),
-                ];
-            } finally {
-                @unlink($stderrFile);
-            }
+        $result = $this->processRunner->run(
+            $command,
+            self::TABLE_DUMP_TIMEOUT_SECONDS,
+            $this->mysqlEnv((string)$server['password']),
+            [],
+            $targetFile
+        );
+        if ($result['timed_out']) {
+            throw new Exception('导出表超时(' . $tableName . '): 已等待 '
+                . (int)self::TABLE_DUMP_TIMEOUT_SECONDS . ' 秒');
         }
-
-        $descriptor = [
-            1 => ['file', $targetFile, 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $process = @proc_open($command, $descriptor, $pipes, null, $this->mysqlEnv((string)$server['password']));
-        if (!is_resource($process)) {
-            throw new Exception('启动 mysqldump 失败: ' . $tableName);
+        if ($result['cancelled']) {
+            throw new Exception('导出表已取消: ' . $tableName);
         }
-
-        $stderr = (string)stream_get_contents($pipes[2]);
-        fclose($pipes[2]);
-        $exitCode = (int)proc_close($process);
-
-        return [
-            'exit_code' => $exitCode,
-            'stdout' => '',
-            'stderr' => $stderr,
-        ];
+        if (!$result['started']) {
+            throw new Exception('启动 mysqldump 失败(' . $tableName . '): ' . trim($result['stderr']));
+        }
+        if ($result['truncated']) {
+            throw new Exception('mysqldump 错误输出超过安全上限: ' . $tableName);
+        }
+        return $result;
     }
 
     /**
@@ -701,16 +729,16 @@ class DatabaseBackupManager {
      * @param array<string, mixed> $server 数据库连接配置
      * @param string $tableName 表名
      * @param bool $includeSetGtidPurged 是否带上 GTID 参数
-     * @return string
+     * @return array<int, string>
      */
     protected function buildMysqldumpCommand(
         string $mysqldumpPath,
         array $server,
         string $tableName,
         bool $includeSetGtidPurged
-    ): string {
+    ): array {
         $parts = [
-            escapeshellarg($mysqldumpPath),
+            $mysqldumpPath,
             '--single-transaction',
             '--quick',
             '--skip-lock-tables',
@@ -718,14 +746,14 @@ class DatabaseBackupManager {
         if ($includeSetGtidPurged) {
             $parts[] = '--set-gtid-purged=OFF';
         }
-        $parts[] = '--default-character-set=' . escapeshellarg((string)$server['charset']);
-        $parts[] = '--host=' . escapeshellarg((string)$server['host']);
-        $parts[] = '--port=' . (int)$server['port'];
-        $parts[] = '--user=' . escapeshellarg((string)$server['username']);
-        $parts[] = escapeshellarg((string)$server['db_name']);
-        $parts[] = escapeshellarg($tableName);
+        $parts[] = '--default-character-set=' . (string)$server['charset'];
+        $parts[] = '--host=' . (string)$server['host'];
+        $parts[] = '--port=' . (string)(int)$server['port'];
+        $parts[] = '--user=' . (string)$server['username'];
+        $parts[] = (string)$server['db_name'];
+        $parts[] = $tableName;
 
-        return implode(' ', $parts);
+        return $parts;
     }
 
     /**
@@ -749,8 +777,28 @@ class DatabaseBackupManager {
      * @throws Exception
      */
     protected function withBackupLock(callable $callback): mixed {
-        $lockFile = $this->backupRoot() . '/' . self::BACKUP_LOCK_FILE_NAME;
-        return $this->withFileLock($lockFile, $callback, '数据库备份任务正在执行，请稍后再试');
+        return $this->withMaintenanceLock(
+            $callback,
+            '数据库备份、恢复或删除任务正在执行，请稍后再试',
+            'backup'
+        );
+    }
+
+    /**
+     * 在数据库维护共享锁内执行任务。
+     *
+     * @param callable $callback
+     * @param string $busyMessage
+     * @param string $operation
+     * @return mixed
+     * @throws Exception
+     */
+    protected function withMaintenanceLock(
+        callable $callback,
+        string $busyMessage,
+        string $operation
+    ): mixed {
+        return $this->withFileLock($this->maintenanceLockFile(), $callback, $busyMessage, $operation);
     }
 
     /**
@@ -759,10 +807,16 @@ class DatabaseBackupManager {
      * @param string $lockFile 锁文件路径
      * @param callable $callback 受保护的业务逻辑
      * @param string $busyMessage 锁冲突提示
+     * @param string $operation 当前操作标识
      * @return mixed
      * @throws Exception
      */
-    protected function withFileLock(string $lockFile, callable $callback, string $busyMessage): mixed {
+    protected function withFileLock(
+        string $lockFile,
+        callable $callback,
+        string $busyMessage,
+        string $operation = 'maintenance'
+    ): mixed {
         $this->ensureDirectory(dirname($lockFile));
         $fp = @fopen($lockFile, 'c+');
         if (!$fp) {
@@ -773,7 +827,13 @@ class DatabaseBackupManager {
             if (!flock($fp, LOCK_EX | LOCK_NB)) {
                 throw new Exception($busyMessage);
             }
-            fwrite($fp, (string)time());
+            @ftruncate($fp, 0);
+            @rewind($fp);
+            fwrite($fp, json_encode([
+                'operation' => $operation,
+                'pid' => getmypid(),
+                'started_at' => time(),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: (string)time());
             fflush($fp);
             return $callback();
         } finally {
@@ -832,79 +892,16 @@ class DatabaseBackupManager {
     }
 
     /**
-     * 执行外部命令。
-     *
-     * @param string $command 命令串
-     * @param array<string, string> $env 额外环境变量
-     * @return array{exit_code:int,stdout:string,stderr:string}
-     * @throws Exception
-     */
-    protected function runCommand(string $command, array $env = []): array {
-        if ($this->canUseSwooleCoroutine()) {
-            $prefix = '';
-            if (isset($env['MYSQL_PWD'])) {
-                $prefix = 'MYSQL_PWD=' . escapeshellarg((string)$env['MYSQL_PWD']) . ' ';
-            }
-            return $this->runShellCommand($prefix . $command . ' 2>&1');
-        }
-
-        $descriptor = [
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $process = @proc_open($command, $descriptor, $pipes, null, $env);
-        if (!is_resource($process)) {
-            throw new Exception('启动系统命令失败: ' . $command);
-        }
-
-        $stdout = (string)stream_get_contents($pipes[1]);
-        $stderr = (string)stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($process);
-
-        return [
-            'exit_code' => (int)$exitCode,
-            'stdout' => $stdout,
-            'stderr' => $stderr,
-        ];
-    }
-
-    /**
-     * 在协程环境中执行 shell 命令。
-     *
-     * `System::exec()` 会把子进程等待让出给协程调度器，适合当前这种 mysqldump/mysql
-     * 外部命令密集的场景。这里统一返回与 proc_open 相近的结构，便于上层复用。
-     *
-     * @param string $shellCommand shell 命令
-     * @return array{exit_code:int,stdout:string,stderr:string}
-     * @throws Exception
-     */
-    protected function runShellCommand(string $shellCommand): array {
-        $result = System::exec('/bin/sh -lc ' . escapeshellarg($shellCommand));
-        if ($result === false) {
-            throw new Exception('执行系统命令失败: ' . $shellCommand);
-        }
-
-        return [
-            'exit_code' => (int)($result['code'] ?? 1),
-            'stdout' => (string)($result['output'] ?? ''),
-            'stderr' => '',
-        ];
-    }
-
-    /**
      * 当前是否处于可安全使用 Swoole 协程系统调用的上下文。
      *
      * 备份能力既可能跑在 Swoole worker/task worker 内，也可能由 Linux crontab
-     * 直接触发普通 CLI。只有已经进入协程上下文时，才能启用 `System::exec()` 与
-     * Channel 并发调度；否则必须退回同步实现保持兼容。
+     * 直接触发普通 CLI。只有已经进入协程上下文时才启用 Channel 并发调度；
+     * 外部命令本身始终交给同一个有界 runner，避免两条运行路径出现安全差异。
      *
      * @return bool
      */
     protected function canUseSwooleCoroutine(): bool {
         return class_exists(Coroutine::class)
-            && class_exists(System::class)
             && class_exists(Channel::class)
             && Coroutine::getCid() > 0;
     }
@@ -1042,6 +1039,13 @@ class DatabaseBackupManager {
         $mysqli = mysqli_init();
         if (!$mysqli instanceof mysqli) {
             throw new Exception('初始化 mysqli 失败');
+        }
+
+        // CLI 缺失时会走 mysqli 兜底。连接目标不可达不能无限阻塞；大表读取则
+        // 保留与 mysqldump 同等级的长窗口，兼顾故障收口和大库可用性。
+        @$mysqli->options(MYSQLI_OPT_CONNECT_TIMEOUT, self::MYSQL_CONNECT_TIMEOUT_SECONDS);
+        if (defined('MYSQLI_OPT_READ_TIMEOUT')) {
+            @$mysqli->options(MYSQLI_OPT_READ_TIMEOUT, self::MYSQL_READ_TIMEOUT_SECONDS);
         }
 
         if (!@$mysqli->real_connect(

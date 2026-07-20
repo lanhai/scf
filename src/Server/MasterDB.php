@@ -8,6 +8,7 @@ use Scf\Core\Console;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Util\File;
+use Scf\Util\ReverseFileReader;
 use Swoole\Coroutine\System;
 use Swoole\Event;
 use Swoole\Process;
@@ -339,18 +340,7 @@ class MasterDB {
                 }
                 clearstatcache();
                 $logs = [];
-                // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
-                $command = sprintf(
-                    'tac %s | sed -n %d,%dp',
-                    escapeshellarg($fileName),
-                    $start + 1,
-                    $start + $size
-                );
-                $result = System::exec($command);
-                if ($result === false) {
-                    return $server->send($fd, Server::format(Server::NIL));
-                }
-                $lines = explode("\n", $result['output']);
+                $lines = ReverseFileReader::page($fileName, (int)$start, (int)$size);
                 foreach ($lines as $line) {
                     if (trim($line) && ($log = JsonHelper::recover($line))) {
                         $logs[] = $log;
@@ -425,7 +415,7 @@ class MasterDB {
                         //Console::log('【MasterDB】主进程已结束,关闭服务器,ManagerPID:' . $managerPid);
                         //$server->shutdown();
                         //$server->stop();
-                        exec("kill -9 " . $server->master_pid);
+                        @Process::kill((int)$server->master_pid, SIGKILL);
                     }
                 });
                 Timer::tick(1000 * 30, function () use ($server) {
@@ -452,12 +442,27 @@ class MasterDB {
      * @return int
      */
     protected function countFileLines($file): int {
-        $line = 0; //初始化行数
-        if (file_exists($file)) {
-            $output = trim(System::exec("wc -l " . escapeshellarg($file))['output']);
-            $arr = explode(' ', $output);
-            $line = (int)$arr[0];
+        if (!is_file($file)) {
+            return 0;
         }
-        return $line;
+        $handler = @fopen($file, 'rb');
+        if (!is_resource($handler)) {
+            return 0;
+        }
+        $lines = 0;
+        $lastByte = '';
+        while (!feof($handler)) {
+            $chunk = fread($handler, 1024 * 1024);
+            if (!is_string($chunk) || $chunk === '') {
+                break;
+            }
+            $lines += substr_count($chunk, "\n");
+            $lastByte = substr($chunk, -1);
+        }
+        fclose($handler);
+        if ($lastByte !== '' && $lastByte !== "\n") {
+            $lines++;
+        }
+        return $lines;
     }
 }

@@ -6,7 +6,9 @@ use Exception;
 use Scf\Client\Http;
 use Scf\Command\Color;
 use Scf\Core\Console;
+use Scf\Core\Key;
 use Scf\Core\Table\MemoryMonitorTable;
+use Scf\Core\Table\Runtime;
 use Scf\Core\Table\SocketConnectionTable;
 use Scf\Helper\ArrayHelper;
 use Scf\Server\Dashboard;
@@ -16,8 +18,16 @@ use Swoole\Event;
 use Swoole\Timer;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Output\ConsoleOutput;
+use Throwable;
 
 class MemoryMonitor {
+    private const PROCESS_MEMORY_SNAPSHOT_TTL_SECONDS = 5;
+    private const SYSTEM_MEMORY_SNAPSHOT_TTL_SECONDS = 5;
+
+    private static bool $processMemoryRefreshInFlight = false;
+    private static bool $systemMemoryRefreshInFlight = false;
+    /** @var array<string, array<string, mixed>> */
+    private static array $localSnapshots = [];
     /**
      * 协程友好的文件读取：在协程中用 System::readFile，其他环境回退到 file_get_contents
      * @return string|false
@@ -88,75 +98,265 @@ class MemoryMonitor {
     }
 
     /**
-     * 获取进程内存占用（PSS/RSS）
-     * 返回单位：KB；若不可得则为 null
+     * 批量获取进程内存占用。Darwin/其他 Unix 每个采样周期最多启动一次 ps，
+     * Linux 继续直接读取 /proc，不产生外部进程。
+     *
+     * @param array<int, int> $pids
+     * @param bool $forceRefresh 是否忽略 5 秒共享快照
+     * @return array<int, array{pss_kb:int|null,rss_kb:int|null}>
+     */
+    public static function getPssRssByPids(array $pids, bool $forceRefresh = false): array {
+        $pids = array_values(array_unique(array_filter(
+            array_map('intval', $pids),
+            static fn(int $pid): bool => $pid > 0
+        )));
+        if (!$pids) {
+            return [];
+        }
+
+        $snapshot = self::readRuntimeSnapshot(Key::RUNTIME_PROCESS_MEMORY_SNAPSHOT);
+        $values = is_array($snapshot['values'] ?? null) ? $snapshot['values'] : [];
+        $updatedAt = (int)($snapshot['updated_at'] ?? 0);
+        $fresh = $updatedAt > 0 && (time() - $updatedAt) < self::PROCESS_MEMORY_SNAPSHOT_TTL_SECONDS;
+        if (!$forceRefresh && $fresh) {
+            return self::selectPidMemoryValues($pids, $values);
+        }
+
+        // Gateway 有专职 MemoryUsageCount 采样器；其它进程只消费 last-good，
+        // 避免多个控制面进程在同一时刻各自启动 ps。
+        $monitorPid = (int)(self::readRuntimeValue(Key::RUNTIME_MEMORY_MONITOR_PID) ?? 0);
+        if (!$forceRefresh && $monitorPid > 0) {
+            return self::selectPidMemoryValues($pids, $values);
+        }
+        if (self::$processMemoryRefreshInFlight) {
+            return self::selectPidMemoryValues($pids, $values);
+        }
+
+        self::$processMemoryRefreshInFlight = true;
+        try {
+            $sampledValues = self::collectPssRssByPids($pids);
+            // 单次 ps 超时只代表本轮采样失败。保留 last-good，避免系统短暂拥堵
+            // 时把 Dashboard 指标整体抹成 null；下一轮成功后会自然覆盖。
+            foreach ($pids as $pid) {
+                $previous = self::selectPidMemoryValues([$pid], $values)[$pid];
+                $sampled = $sampledValues[$pid] ?? ['pss_kb' => null, 'rss_kb' => null];
+                $values[$pid] = [
+                    'pss_kb' => isset($sampled['pss_kb']) && is_numeric($sampled['pss_kb'])
+                        ? (int)$sampled['pss_kb']
+                        : $previous['pss_kb'],
+                    'rss_kb' => isset($sampled['rss_kb']) && is_numeric($sampled['rss_kb'])
+                        ? (int)$sampled['rss_kb']
+                        : $previous['rss_kb'],
+                ];
+            }
+            self::writeRuntimeSnapshot(Key::RUNTIME_PROCESS_MEMORY_SNAPSHOT, [
+                'updated_at' => time(),
+                'values' => $values,
+            ]);
+            return self::selectPidMemoryValues($pids, $values);
+        } finally {
+            self::$processMemoryRefreshInFlight = false;
+        }
+    }
+
+    /**
+     * 兼容旧调用点的单 PID 包装。
+     *
+     * @return array{pss_kb:int|null,rss_kb:int|null}
      */
     public static function getPssRssByPid(int $pid): array {
-        // 默认返回
-        $rssKb = null;
-        $pssKb = null;
+        return self::getPssRssByPids([$pid])[$pid] ?? ['pss_kb' => null, 'rss_kb' => null];
+    }
 
-        // ===== Linux：优先使用 /proc（高精度、低开销）=====
+    /**
+     * @param array<int, int> $pids
+     * @return array<int, array{pss_kb:int|null,rss_kb:int|null}>
+     */
+    private static function collectPssRssByPids(array $pids): array {
+        $values = [];
+        foreach ($pids as $pid) {
+            $values[$pid] = ['pss_kb' => null, 'rss_kb' => null];
+        }
+
         if (PHP_OS_FAMILY === 'Linux') {
-            $smapsRollup = "/proc/{$pid}/smaps_rollup";
-            $smaps = "/proc/{$pid}/smaps";
-            $status = "/proc/{$pid}/status";
-
-            // 优先 smaps_rollup（O(1)）
-            if (is_readable($smapsRollup)) {
-                [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
-                return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
-            }
-
-            // 次选 smaps（可能较慢，但仍可靠）
-            if (is_readable($smaps)) {
-                [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
-                return ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
-            }
-
-            // 兜底：status 里的 VmRSS
-            if (is_readable($status)) {
-                $lines = @file($status);
-                if (is_array($lines)) {
-                    foreach ($lines as $line) {
-                        if (str_starts_with($line, 'VmRSS:') && preg_match('/(\d+)/', $line, $m)) {
-                            $rssKb = (int)$m[1];
+            foreach ($pids as $pid) {
+                $smapsRollup = "/proc/{$pid}/smaps_rollup";
+                $smaps = "/proc/{$pid}/smaps";
+                $status = "/proc/{$pid}/status";
+                if (is_readable($smapsRollup)) {
+                    [$pssKb, $rssKb] = self::parseSmapsLike($smapsRollup);
+                    $values[$pid] = ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+                    continue;
+                }
+                if (is_readable($smaps)) {
+                    [$pssKb, $rssKb] = self::parseSmapsLike($smaps);
+                    $values[$pid] = ['pss_kb' => $pssKb, 'rss_kb' => $rssKb];
+                    continue;
+                }
+                if (is_readable($status)) {
+                    foreach ((array)@file($status) as $line) {
+                        if (str_starts_with($line, 'VmRSS:') && preg_match('/(\d+)/', $line, $matches)) {
+                            $values[$pid]['rss_kb'] = (int)$matches[1];
                             break;
                         }
                     }
                 }
             }
-
-            return ['pss_kb' => null, 'rss_kb' => $rssKb];
+            return $values;
         }
 
-        // ===== macOS（Darwin）：轻量 & 稳定优先 =====
-        if (PHP_OS_FAMILY === 'Darwin') {
-            // 1) RSS：使用 ps（最快、最稳定）
-            $psOut = @shell_exec("ps -o rss= -p " . (int)$pid . " 2>/dev/null");
-            if (is_string($psOut)) {
-                $val = (int)trim($psOut);
-                if ($val > 0) {
-                    $rssKb = $val;
+        $psBinary = is_executable('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+        $output = self::runExternalCommand([
+            $psBinary,
+            '-o',
+            'pid=,rss=',
+            '-p',
+            implode(',', $pids),
+        ]);
+        foreach (preg_split('/\r?\n/', trim($output)) as $line) {
+            if (!preg_match('/^\s*(\d+)\s+(\d+)\s*$/', $line, $matches)) {
+                continue;
+            }
+            $pid = (int)$matches[1];
+            if (isset($values[$pid])) {
+                $values[$pid]['rss_kb'] = (int)$matches[2];
+            }
+        }
+        return $values;
+    }
+
+    /**
+     * 刷新系统内存 last-good。Gateway 的 MemoryUsageCount 会 force 每 5 秒采样；
+     * upstream master 没有专职采样器时，由 status 首次/过期请求单飞刷新。
+     *
+     * @return array{updated_at?:int,total_mem_mb?:float|null,free_mem_mb?:float|null,page_size?:int}
+     */
+    public static function refreshSystemMemorySnapshot(bool $forceRefresh = false): array {
+        $snapshot = self::readRuntimeSnapshot(Key::RUNTIME_SYSTEM_MEMORY_SNAPSHOT);
+        $updatedAt = (int)($snapshot['updated_at'] ?? 0);
+        $fresh = $updatedAt > 0 && (time() - $updatedAt) < self::SYSTEM_MEMORY_SNAPSHOT_TTL_SECONDS;
+        if (!$forceRefresh && $fresh) {
+            return $snapshot;
+        }
+
+        $monitorPid = (int)(self::readRuntimeValue(Key::RUNTIME_MEMORY_MONITOR_PID) ?? 0);
+        if (!$forceRefresh && $monitorPid > 0) {
+            return $snapshot;
+        }
+        if (self::$systemMemoryRefreshInFlight) {
+            return $snapshot;
+        }
+
+        self::$systemMemoryRefreshInFlight = true;
+        try {
+            $sample = self::collectSystemMemorySnapshot($snapshot);
+            $sample['updated_at'] = time();
+            self::writeRuntimeSnapshot(Key::RUNTIME_SYSTEM_MEMORY_SNAPSHOT, $sample);
+            return $sample;
+        } finally {
+            self::$systemMemoryRefreshInFlight = false;
+        }
+    }
+
+    private static function collectSystemMemorySnapshot(array $previous): array {
+        $totalMemMb = isset($previous['total_mem_mb']) && is_numeric($previous['total_mem_mb'])
+            ? (float)$previous['total_mem_mb']
+            : null;
+        $freeMemMb = isset($previous['free_mem_mb']) && is_numeric($previous['free_mem_mb'])
+            ? (float)$previous['free_mem_mb']
+            : null;
+        $pageSize = (int)($previous['page_size'] ?? 4096);
+
+        if (PHP_OS_FAMILY === 'Linux') {
+            $meminfo = self::readFileCo();
+            if (is_string($meminfo) && $meminfo !== '') {
+                if (preg_match('/^MemTotal:\s+(\d+)\s+kB/im', $meminfo, $match)) {
+                    $totalMemMb = round(((int)$match[1]) / 1024, 2);
+                }
+                if (preg_match('/^MemAvailable:\s+(\d+)\s+kB/im', $meminfo, $match)) {
+                    $freeMemMb = round(((int)$match[1]) / 1024, 2);
+                } else {
+                    $freeKb = 0;
+                    foreach (['MemFree', 'Buffers', 'Cached'] as $field) {
+                        if (preg_match('/^' . $field . ':\s+(\d+)\s+kB/im', $meminfo, $match)) {
+                            $freeKb += (int)$match[1];
+                        }
+                    }
+                    $freeMemMb = $freeKb > 0 ? round($freeKb / 1024, 2) : null;
                 }
             }
-
-            // 2) PSS：macOS 无原生 PSS，默认不计算（避免 vmmap 阻塞/权限问题）
-            // 如确实需要，可在生产 Linux 环境使用 PSS，macOS 仅显示 RSS
-
-            return ['pss_kb' => null, 'rss_kb' => $rssKb];
-        }
-
-        // ===== 其他系统：尽力而为 =====
-        $psOut = @shell_exec("ps -o rss= -p " . (int)$pid . " 2>/dev/null");
-        if (is_string($psOut)) {
-            $val = (int)trim($psOut);
-            if ($val > 0) {
-                $rssKb = $val;
+        } elseif (PHP_OS_FAMILY === 'Darwin') {
+            if ($totalMemMb === null) {
+                $memSize = trim(self::runExternalCommand(['/usr/sbin/sysctl', '-n', 'hw.memsize']));
+                if (is_numeric($memSize)) {
+                    $totalMemMb = round(((int)$memSize) / 1048576, 2);
+                }
+            }
+            $vmStat = self::runExternalCommand(['/usr/bin/vm_stat']);
+            if (preg_match('/page size of\s+(\d+)\s+bytes/i', $vmStat, $match)) {
+                $pageSize = (int)$match[1];
+            }
+            if ($vmStat !== '') {
+                $readPages = static function (string $key) use ($vmStat): int {
+                    return preg_match('/^' . preg_quote($key, '/') . ':\s+(\d+)/m', $vmStat, $match)
+                        ? (int)$match[1]
+                        : 0;
+                };
+                $freePages = $readPages('Pages free')
+                    + $readPages('Pages inactive')
+                    + $readPages('Pages speculative');
+                $freeMemMb = $freePages > 0 ? round(($freePages * $pageSize) / 1048576, 2) : null;
             }
         }
 
-        return ['pss_kb' => null, 'rss_kb' => $rssKb];
+        return [
+            'total_mem_mb' => $totalMemMb,
+            'free_mem_mb' => $freeMemMb,
+            'page_size' => $pageSize,
+        ];
+    }
+
+    private static function runExternalCommand(array $command): string {
+        return BoundedProcessRunner::output($command, 1.0);
+    }
+
+    private static function readRuntimeSnapshot(string $key): array {
+        $value = self::readRuntimeValue($key);
+        $runtimeSnapshot = is_array($value) ? $value : [];
+        $localSnapshot = self::$localSnapshots[$key] ?? [];
+        return (int)($localSnapshot['updated_at'] ?? 0) > (int)($runtimeSnapshot['updated_at'] ?? 0)
+            ? $localSnapshot
+            : $runtimeSnapshot;
+    }
+
+    private static function readRuntimeValue(string $key): mixed {
+        try {
+            return Runtime::instance()->get($key);
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private static function writeRuntimeSnapshot(string $key, array $value): void {
+        self::$localSnapshots[$key] = $value;
+        try {
+            Runtime::instance()->set($key, $value);
+        } catch (Throwable) {
+        }
+    }
+
+    private static function selectPidMemoryValues(array $pids, array $values): array {
+        $selected = [];
+        foreach ($pids as $pid) {
+            $value = $values[$pid] ?? $values[(string)$pid] ?? null;
+            $selected[$pid] = is_array($value)
+                ? [
+                    'pss_kb' => isset($value['pss_kb']) && is_numeric($value['pss_kb']) ? (int)$value['pss_kb'] : null,
+                    'rss_kb' => isset($value['rss_kb']) && is_numeric($value['rss_kb']) ? (int)$value['rss_kb'] : null,
+                ]
+                : ['pss_kb' => null, 'rss_kb' => null];
+        }
+        return $selected;
     }
 
     /**
@@ -208,6 +408,10 @@ class MemoryMonitor {
             $pssTotal = 0.0; // 累计PSS（MB'])
             $osActualTotal = 0.0; // 累计 OS 视角实际占用（优先PSS, 其次RSS）
             $processList = MemoryMonitorTable::instance()->rows();
+            $memoryByPid = self::getPssRssByPids(array_map(
+                static fn(array $row): int => (int)($row['pid'] ?? 0),
+                array_values(array_filter($processList, 'is_array'))
+            ));
             if ($processList) {
                 $workerConnectionStats = SocketConnectionTable::instance()->workerConnectionStats();
                 foreach ($processList as $data) {
@@ -226,10 +430,15 @@ class MemoryMonitor {
 
                     $rssMb = null;
                     $pssMb = null;
-                    if (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
+                    $pidMemory = $memoryByPid[(int)$pid] ?? [];
+                    if (isset($pidMemory['rss_kb']) && is_numeric($pidMemory['rss_kb'])) {
+                        $rssMb = round(((float)$pidMemory['rss_kb']) / 1024, 1);
+                    } elseif (!empty($data['rss_mb']) && is_numeric($data['rss_mb'])) {
                         $rssMb = (float)$data['rss_mb'];
                     }
-                    if (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
+                    if (isset($pidMemory['pss_kb']) && is_numeric($pidMemory['pss_kb'])) {
+                        $pssMb = round(((float)$pidMemory['pss_kb']) / 1024, 1);
+                    } elseif (!empty($data['pss_mb']) && is_numeric($data['pss_mb'])) {
                         $pssMb = (float)$data['pss_mb'];
                     }
                     // OS 实际占用：优先使用 PSS，否则退化为 RSS
@@ -285,62 +494,13 @@ class MemoryMonitor {
                 }
                 unset($__row);
             }
-            // 获取服务器总物理内存 (MB)
-            $totalMemMb = null;
-            if (PHP_OS_FAMILY === 'Linux') {
-                $meminfo = @self::readFileCo();
-                if ($meminfo && preg_match('/^MemTotal:\s+(\d+)\s+kB/im', $meminfo, $m)) {
-                    $totalMemMb = round(((int)$m[1]) / 1024, 2);
-                }
-            } else {
-                // macOS / others
-                $out = @shell_exec('sysctl -n hw.memsize 2>/dev/null');
-                if ($out && is_numeric(trim($out))) {
-                    $totalMemMb = round(((int)trim($out)) / 1048576, 2);
-                }
-            }
-            // 获取服务器剩余可用内存 (MB)
-            $freeMemMb = null;
-            if (PHP_OS_FAMILY === 'Linux') {
-                if (!isset($meminfo)) {
-                    $meminfo = @self::readFileCo();
-                }
-                if ($meminfo) {
-                    if (preg_match('/^MemAvailable:\s+(\d+)\s+kB/im', $meminfo, $mA)) {
-                        $freeMemMb = round(((int)$mA[1]) / 1024, 2);
-                    } else {
-                        // 退化方案：MemFree + Buffers + Cached（近似）
-                        $mf = $bu = $ca = 0;
-                        if (preg_match('/^MemFree:\s+(\d+)\s+kB/im', $meminfo, $mF)) {
-                            $mf = (int)$mF[1];
-                        }
-                        if (preg_match('/^Buffers:\s+(\d+)\s+kB/im', $meminfo, $mB)) {
-                            $bu = (int)$mB[1];
-                        }
-                        if (preg_match('/^Cached:\s+(\d+)\s+kB/im', $meminfo, $mC)) {
-                            $ca = (int)$mC[1];
-                        }
-                        $freeKb = $mf + $bu + $ca;
-                        if ($freeKb > 0) {
-                            $freeMemMb = round($freeKb / 1024, 2);
-                        }
-                    }
-                }
-            } else {
-                // macOS: 通过 vm_stat 估算可用内存（free + inactive + speculative）
-                $vm = @shell_exec('vm_stat 2>/dev/null');
-                $pgSizeOut = @shell_exec('sysctl -n hw.pagesize 2>/dev/null');
-                $pageSize = is_numeric(trim($pgSizeOut)) ? (int)trim($pgSizeOut) : 4096;
-                if (is_string($vm) && $vm !== '') {
-                    $get = function ($key) use ($vm) {
-                        return preg_match('/^' . preg_quote($key, '/') . ':\s+(\d+)/m', $vm, $m) ? (int)$m[1] : 0;
-                    };
-                    $freePages = $get('Pages free') + $get('Pages inactive') + $get('Pages speculative');
-                    if ($freePages > 0) {
-                        $freeMemMb = round(($freePages * $pageSize) / 1048576, 2);
-                    }
-                }
-            }
+            $systemMemory = self::refreshSystemMemorySnapshot();
+            $totalMemMb = isset($systemMemory['total_mem_mb']) && is_numeric($systemMemory['total_mem_mb'])
+                ? (float)$systemMemory['total_mem_mb']
+                : null;
+            $freeMemMb = isset($systemMemory['free_mem_mb']) && is_numeric($systemMemory['free_mem_mb'])
+                ? (float)$systemMemory['free_mem_mb']
+                : null;
             return [
                 'rows' => $rows,
                 'online' => $online,

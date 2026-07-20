@@ -57,23 +57,37 @@ function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, 
     $startedAt = microtime(true);
     $deadline = $startedAt + $timeoutSeconds;
     $nextProgressLogAt = $startedAt;
+    // PID ownership 只在进入等待和已知 PID 消失时刷新；200ms 热循环仅做原生 TCP 探测。
+    $conflictingPids = scf_conflicting_listener_pids($argv, $ports);
+    if (!$conflictingPids) {
+        return;
+    }
     scf_stdout('【Boot】等待旧监听端口释放后再重拉: ports=' . implode(', ', $ports) . ", timeout={$timeoutSeconds}s");
 
     while (microtime(true) < $deadline) {
-        $occupied = scf_collect_occupied_listening_ports($ports);
+        $occupied = scf_collect_occupied_listening_ports($ports, false);
         if (!$occupied) {
             $elapsed = max(0, (int)round(microtime(true) - $startedAt));
             scf_stdout("【Boot】旧监听端口已释放，准备重拉: elapsed={$elapsed}s");
             return;
         }
-        $conflictingPids = scf_conflicting_listener_pids($argv, $ports);
-        if (!$conflictingPids) {
-            $elapsed = max(0, (int)round(microtime(true) - $startedAt));
-            scf_stdout(
-                "【Boot】旧命令监听已释放，端口占用来自外部服务，跳过等待: elapsed={$elapsed}s, occupied="
-                . scf_format_occupied_listening_ports($occupied)
-            );
-            return;
+        $knownOwnerAlive = false;
+        foreach ($conflictingPids as $pid) {
+            if ($pid > 0 && function_exists('posix_kill') && @posix_kill($pid, 0)) {
+                $knownOwnerAlive = true;
+                break;
+            }
+        }
+        if (!$knownOwnerAlive) {
+            $conflictingPids = scf_conflicting_listener_pids($argv, $ports);
+            if (!$conflictingPids) {
+                $elapsed = max(0, (int)round(microtime(true) - $startedAt));
+                scf_stdout(
+                    "【Boot】旧命令监听已释放，端口占用来自外部服务，跳过等待: elapsed={$elapsed}s, occupied="
+                    . scf_format_occupied_listening_ports($occupied)
+                );
+                return;
+            }
         }
 
         $now = microtime(true);
@@ -111,7 +125,7 @@ function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, 
  * @param array<int, int> $ports 需要探测的端口列表
  * @return array<int, array<int, int>> [port => [pid...]]
  */
-function scf_collect_occupied_listening_ports(array $ports): array {
+function scf_collect_occupied_listening_ports(array $ports, bool $includePids = true): array {
     $occupied = [];
     foreach ($ports as $port) {
         $port = (int)$port;
@@ -121,7 +135,7 @@ function scf_collect_occupied_listening_ports(array $ports): array {
         if (!scf_is_port_listening('127.0.0.1', $port)) {
             continue;
         }
-        $occupied[$port] = scf_listening_pids_by_port($port);
+        $occupied[$port] = $includePids ? scf_listening_pids_by_port($port) : [];
     }
 
     ksort($occupied);
@@ -260,7 +274,17 @@ function scf_listening_pids_by_port(int $port): array {
         return [];
     }
 
-    $output = @shell_exec('lsof -nP -t -iTCP:' . $port . ' -sTCP:LISTEN 2>/dev/null');
+    $lsof = '';
+    foreach (['/usr/sbin/lsof', '/usr/bin/lsof', '/opt/homebrew/sbin/lsof'] as $candidate) {
+        if (is_executable($candidate)) {
+            $lsof = $candidate;
+            break;
+        }
+    }
+    if ($lsof === '') {
+        return [];
+    }
+    $output = scf_process_output([$lsof, '-nP', '-t', '-iTCP:' . $port, '-sTCP:LISTEN']);
     if (!is_string($output) || trim($output) === '') {
         return [];
     }
@@ -287,8 +311,133 @@ function scf_read_process_command(int $pid): string {
         return '';
     }
 
-    $output = @shell_exec('ps -p ' . $pid . ' -o command= 2>/dev/null');
+    $ps = is_executable('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+    $output = scf_process_output([$ps, '-p', (string)$pid, '-o', 'command=']);
     return trim((string)$output);
+}
+
+/**
+ * 不经过 /bin/sh 执行一个低频状态转换命令。
+ *
+ * @param array<int, string> $command
+ */
+function scf_process_output(array $command, float $timeoutSeconds = 2.0): string {
+    $deferred = $GLOBALS['__SCF_BOOTSTRAP_DEFERRED_PROCESSES'] ?? [];
+    if (!is_array($deferred)) {
+        $deferred = [];
+    }
+    $liveDeferred = [];
+    foreach ($deferred as $process) {
+        if (!is_resource($process)) {
+            continue;
+        }
+        $status = @proc_get_status($process);
+        if (is_array($status) && ($status['running'] ?? false)) {
+            $liveDeferred[] = $process;
+            continue;
+        }
+        @proc_close($process);
+    }
+    $GLOBALS['__SCF_BOOTSTRAP_DEFERRED_PROCESSES'] = $liveDeferred;
+
+    // 启动链中只要已有一个无法回收的系统探针，就打开熔断，避免每次
+    // restart/reload 再派生一个新的 _dyld_start 僵持进程。
+    if (
+        $liveDeferred
+        || (bool)($GLOBALS['__SCF_BOOTSTRAP_PROCESS_OUTPUT_IN_FLIGHT'] ?? false)
+    ) {
+        return '';
+    }
+
+    $GLOBALS['__SCF_BOOTSTRAP_PROCESS_OUTPUT_IN_FLIGHT'] = true;
+    try {
+    $process = @proc_open($command, [
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ], $pipes, null, null, ['bypass_shell' => true]);
+    if (!is_resource($process)) {
+        return '';
+    }
+    foreach ([1, 2] as $index) {
+        if (is_resource($pipes[$index] ?? null)) {
+            @stream_set_blocking($pipes[$index], false);
+        }
+    }
+
+    $output = '';
+    $deadline = microtime(true) + max(0.05, min(10.0, $timeoutSeconds));
+    $timedOut = false;
+    $truncated = false;
+    while (true) {
+        foreach ([1, 2] as $index) {
+            if (!is_resource($pipes[$index] ?? null)) {
+                continue;
+            }
+            while (true) {
+                $chunk = @fread($pipes[$index], 65_536);
+                if (!is_string($chunk) || $chunk === '') {
+                    break;
+                }
+                if ($index === 1 && strlen($output) < 4_194_304) {
+                    $remaining = 4_194_304 - strlen($output);
+                    $output .= substr($chunk, 0, $remaining);
+                    if (strlen($chunk) > $remaining) {
+                        $truncated = true;
+                    }
+                } elseif ($index === 1) {
+                    $truncated = true;
+                }
+            }
+        }
+
+        $status = @proc_get_status($process);
+        if (!is_array($status) || !($status['running'] ?? false)) {
+            break;
+        }
+        if (microtime(true) >= $deadline) {
+            $timedOut = true;
+            @proc_terminate($process, 15);
+            $graceDeadline = microtime(true) + 0.10;
+            do {
+                usleep(10_000);
+                $status = @proc_get_status($process);
+            } while (
+                is_array($status)
+                && ($status['running'] ?? false)
+                && microtime(true) < $graceDeadline
+            );
+            if (is_array($status) && ($status['running'] ?? false)) {
+                @proc_terminate($process, 9);
+                $graceDeadline = microtime(true) + 0.25;
+                do {
+                    usleep(10_000);
+                    $status = @proc_get_status($process);
+                } while (
+                    is_array($status)
+                    && ($status['running'] ?? false)
+                    && microtime(true) < $graceDeadline
+                );
+            }
+            break;
+        }
+        usleep(10_000);
+    }
+
+    foreach ($pipes as $pipe) {
+        if (is_resource($pipe)) {
+            @fclose($pipe);
+        }
+    }
+    $status = @proc_get_status($process);
+    if (is_array($status) && ($status['running'] ?? false)) {
+        $GLOBALS['__SCF_BOOTSTRAP_DEFERRED_PROCESSES'][] = $process;
+    } else {
+        @proc_close($process);
+    }
+    return ($timedOut || $truncated) ? '' : $output;
+    } finally {
+        $GLOBALS['__SCF_BOOTSTRAP_PROCESS_OUTPUT_IN_FLIGHT'] = false;
+    }
 }
 
 /**
@@ -305,7 +454,8 @@ function scf_signal_processes(array $pids, int $signal): void {
             continue;
         }
         if (!function_exists('posix_kill')) {
-            @exec('kill -' . $signal . ' ' . $pid . ' >/dev/null 2>&1');
+            $kill = is_executable('/bin/kill') ? '/bin/kill' : '/usr/bin/kill';
+            scf_process_output([$kill, '-' . $signal, (string)$pid], 1.0);
             continue;
         }
         @posix_kill($pid, $signal);

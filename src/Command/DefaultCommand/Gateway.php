@@ -8,8 +8,11 @@ use Scf\Command\Manager;
 use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\Env;
+use Scf\Core\Server as CoreServer;
 use Scf\Server\Gateway\LocalIpc;
 use Scf\Server\Gateway\CliBootstrap;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use Swoole\Process;
 
 /**
@@ -571,10 +574,10 @@ class Gateway implements CommandInterface {
                 if (!str_contains($command, 'boot gateway start')) {
                     continue;
                 }
-                if (!str_contains($command, '-app=' . $app)) {
+                if (!ProcessCommandLine::hasOptionValue($command, 'app', $app)) {
                     continue;
                 }
-                if (!str_contains($command, '-role=' . $role)) {
+                if (!ProcessCommandLine::hasOptionValue($command, 'role', $role)) {
                     continue;
                 }
                 $pids[$pid] = $pid;
@@ -602,7 +605,6 @@ class Gateway implements CommandInterface {
             return [];
         }
         $selfPid = getmypid() ?: 0;
-        $portFlag = $gatewayPort > 0 ? ('-port=' . $gatewayPort) : '';
         $matched = [];
         foreach ($snapshot as $pid => $meta) {
             $pid = (int)$pid;
@@ -613,10 +615,13 @@ class Gateway implements CommandInterface {
             if (!str_contains($command, 'boot gateway start')) {
                 continue;
             }
-            if (!str_contains($command, '-app=' . $app) || !str_contains($command, '-role=' . $role)) {
+            if (
+                !ProcessCommandLine::hasOptionValue($command, 'app', $app)
+                || !ProcessCommandLine::hasOptionValue($command, 'role', $role)
+            ) {
                 continue;
             }
-            if ($portFlag !== '' && !str_contains($command, $portFlag)) {
+            if ($gatewayPort > 0 && !ProcessCommandLine::hasOptionValue($command, 'port', $gatewayPort)) {
                 continue;
             }
             $matched[$pid] = (int)($meta['ppid'] ?? 0);
@@ -643,7 +648,6 @@ class Gateway implements CommandInterface {
             return [];
         }
         $selfPid = getmypid() ?: 0;
-        $gatewayPortFlag = '-gateway_port=' . $gatewayPort;
         $matched = [];
         foreach ($snapshot as $pid => $meta) {
             $pid = (int)$pid;
@@ -654,7 +658,10 @@ class Gateway implements CommandInterface {
             if (!str_contains($command, 'boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, '-app=' . $app) || !str_contains($command, $gatewayPortFlag)) {
+            if (
+                !ProcessCommandLine::hasOptionValue($command, 'app', $app)
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $gatewayPort)
+            ) {
                 continue;
             }
             $matched[$pid] = (int)($meta['ppid'] ?? 0);
@@ -671,28 +678,9 @@ class Gateway implements CommandInterface {
      * @return array<int, array{ppid:int,command:string}>
      */
     protected function readProcessSnapshot(): array {
-        $output = @shell_exec('ps -axo pid=,ppid=,command=');
-        if (!is_string($output) || trim($output) === '') {
-            return [];
-        }
-        $snapshot = [];
-        foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)\s+(.+)$/', $line, $matches)) {
-                continue;
-            }
-            $pid = (int)($matches[1] ?? 0);
-            $ppid = (int)($matches[2] ?? 0);
-            $command = trim((string)($matches[3] ?? ''));
-            if ($pid <= 0 || $command === '') {
-                continue;
-            }
-            $snapshot[$pid] = [
-                'ppid' => $ppid,
-                'command' => $command,
-            ];
-        }
-        return $snapshot;
+        // stop/restart 后续会直接向这些 PID 发信号；必须使用本轮新鲜快照，
+        // 不能复用状态展示链的 last-good，避免 PID 重用时误伤无关进程。
+        return ProcessInspector::snapshot(true);
     }
 
     /**
@@ -777,20 +765,7 @@ class Gateway implements CommandInterface {
      * @return array<int, int>
      */
     protected function discoverListeningPidsByPort(int $port): array {
-        $output = @shell_exec('lsof -nP -t -iTCP:' . (int)$port . ' -sTCP:LISTEN 2>/dev/null');
-        if (!is_string($output) || trim($output) === '') {
-            return [];
-        }
-
-        $pids = [];
-        foreach (preg_split('/\r?\n/', trim($output)) as $line) {
-            $pid = (int)trim((string)$line);
-            if ($pid > 0) {
-                $pids[$pid] = $pid;
-            }
-        }
-
-        return array_values($pids);
+        return CoreServer::findPidsByPort($port, true);
     }
 
     /**
@@ -804,8 +779,7 @@ class Gateway implements CommandInterface {
             return '';
         }
 
-        $output = @shell_exec('ps -p ' . $pid . ' -o command= 2>/dev/null');
-        return trim((string)$output);
+        return trim(ProcessInspector::command($pid));
     }
 
     /**

@@ -35,6 +35,9 @@ use Throwable;
 class RQueue {
     use Singleton;
 
+    protected const WORKER_HEARTBEAT_INTERVAL_MS = 1000;
+    protected const WORKER_START_PENDING_SECONDS = 5;
+
     /**
      * 手动重投时扫描历史队列的分片大小。
      */
@@ -46,6 +49,7 @@ class RQueue {
     protected const FIND_SCAN_COROUTINE_LIMIT = 4;
 
     protected int $managerId = 0;
+    protected string $managerGeneration = '';
     protected bool $shouldExit = false;
     protected ?Channel $exitChannel = null;
 
@@ -100,45 +104,391 @@ class RQueue {
      *
      * @return Process|null 成功时返回已启动的队列子进程，应用未就绪或启动失败时返回 null
      */
-    public static function startProcess(): ?Process {
+    public static function startProcess(string $workerToken = '', string $managerGeneration = ''): ?Process {
         $managerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+        $managerPid = (int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0);
+        $managerGeneration = trim($managerGeneration);
         if (!App::isReady()) {
             sleep(1);
             return null;
         }
-        $process = new Process(function () use ($managerId) {
-            App::mount();
-            $pool = Redis::pool();
-            if ($pool instanceof NullPool) {
-                Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
-            } else {
-                $config = Config::server();
-                $memoryLimit = (int)($config['redis_queue_memory_limit'] ?? max((int)($config['worker_memory_limit'] ?? 256), 1024));
-                @ini_set('memory_limit', $memoryLimit . 'M');
-                MemoryMonitor::start('redis:queue');
-                // Swoole 5.1+ 不再推荐依赖“创建协程后由 rshutdown 隐式 Event::wait() 收尾”。
-                // RedisQueue 执行子进程在这里显式开启一次 coroutine runtime，让 Timer、Channel
-                // 与队列消费协程都在同一个可控生命周期里结束，避免进程退出时刷 deprecated warning。
-                Coroutine\run(function () use ($config): void {
-                    self::instance()->prepareExitChannel();
-                    self::instance()->watch($config['redis_queue_mc'] ?? 32);
-                    self::instance()->waitForExitSignal();
-                });
-                MemoryMonitor::stop();
-                return;
-            }
-        }, false, 0, false);
-        $pid = $process->start();
-        if ($pid <= 0) {
-            Console::error("【RedisQueue】#{$managerId} 队列管理进程启动失败");
+        if (
+            $managerPid <= 0
+            || $managerGeneration === ''
+            || !hash_equals(
+                (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''),
+                $managerGeneration
+            )
+        ) {
             return null;
         }
-        Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_WORKER_PID, (int)$pid);
-        if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
-            Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
+        $workerToken = $workerToken !== '' ? $workerToken : self::newWorkerToken();
+        $lifecycleGuard = self::tryAcquireWorkerLifecycleGuard();
+        if (!is_resource($lifecycleGuard)) {
+            return null;
         }
-        File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
-        return $process;
+        try {
+            $workerLease = self::tryAcquireWorkerLeaseForStart($managerPid);
+            if (!is_resource($workerLease)) {
+                Console::warning("【RedisQueue】检测到现有消费进程仍持有租约，跳过重复拉起");
+                return null;
+            }
+            // 先写入 starting 占位。另一个 manager 在 fork 与 PID 回填之间只能
+            // 观察到 pending owner，不能创建第二个消费者。
+            self::writeWorkerLockOwner($workerLease, 0, $workerToken, $managerPid);
+
+            $process = new Process(function () use (
+                $managerId,
+                $managerGeneration,
+                $workerToken,
+                $workerLease
+            ) {
+                try {
+                    if (!hash_equals(
+                        (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''),
+                        $managerGeneration
+                    )) {
+                        return;
+                    }
+                    App::mount();
+                    $pool = Redis::pool();
+                    if ($pool instanceof NullPool) {
+                        Console::warning("【RedisQueue】#{$managerId}Redis服务不可用(" . $pool->getError() . "),队列服务未启动");
+                    } else {
+                        $config = Config::server();
+                        $memoryLimit = (int)($config['redis_queue_memory_limit'] ?? max((int)($config['worker_memory_limit'] ?? 256), 1024));
+                        @ini_set('memory_limit', $memoryLimit . 'M');
+                        MemoryMonitor::start('redis:queue');
+                        // 心跳由独立 Timer 驱动，不再借用内存采样时间判断 worker 身份。
+                        // 正常的长队列任务即使尚未返回，也不会被 manager 误判为失效并重复拉起。
+                        self::publishWorkerHeartbeat($workerToken, $managerGeneration);
+                        Timer::tick(self::WORKER_HEARTBEAT_INTERVAL_MS, static function () use ($workerToken, $managerGeneration): void {
+                            self::publishWorkerHeartbeat($workerToken, $managerGeneration);
+                        });
+                        Coroutine\run(function () use ($config, $managerGeneration): void {
+                            self::instance()->prepareExitChannel();
+                            self::instance()->watch(
+                                (int)($config['redis_queue_mc'] ?? 32),
+                                $managerGeneration
+                            );
+                            self::instance()->waitForExitSignal();
+                        });
+                        self::markWorkerHeartbeatStopped($workerToken, $managerGeneration);
+                        MemoryMonitor::stop();
+                    }
+                } finally {
+                    if (is_resource($workerLease)) {
+                        // 只关闭当前进程的 lease fd。业务 handler 派生进程可能继续
+                        // 继承旧 inode；manager 会在 owner PID 死亡后轮换固定路径，
+                        // 不再被这个继承 fd 永久锁死。
+                        @fclose($workerLease);
+                    }
+                }
+            }, false, 0, false);
+            $pid = (int)($process->start() ?: 0);
+            if ($pid <= 0) {
+                @flock($workerLease, LOCK_UN);
+                @fclose($workerLease);
+                Console::error("【RedisQueue】#{$managerId} 队列管理进程启动失败");
+                return null;
+            }
+            self::writeWorkerLockOwner($workerLease, $pid, $workerToken, $managerPid);
+            // fork 后父进程关闭自己的 fd；lease 由 worker（及可能的后代）持有。
+            @fclose($workerLease);
+            if (
+                (int)(Runtime::instance()->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0) !== $managerPid
+                || !hash_equals(
+                    (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''),
+                    $managerGeneration
+                )
+            ) {
+                @Process::kill($pid, SIGTERM);
+                Console::warning("【RedisQueue】manager 已换代，终止旧 manager 刚创建的消费进程:{$pid}");
+                return null;
+            }
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_WORKER_STATE, [
+                'pid' => $pid,
+                'token' => $workerToken,
+                'legacy' => false,
+                'manager_pid' => $managerPid,
+                'manager_id' => (int)$managerId,
+                'manager_generation' => $managerGeneration,
+                'started_at' => time(),
+                'heartbeat_at' => time(),
+            ]);
+            Runtime::instance()->set(Key::RUNTIME_REDIS_QUEUE_WORKER_PID, $pid);
+            if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
+                Console::info("【RedisQueue】#{$managerId} 队列管理进程已创建,PID:{$pid}");
+            }
+            File::write(SERVER_QUEUE_MANAGER_PID_FILE, $pid);
+            return $process;
+        } finally {
+            self::releaseWorkerLifecycleGuard($lifecycleGuard);
+        }
+    }
+
+    /**
+     * 在生命周期互斥锁内取得 worker lease。
+     *
+     * worker 与其 fork 后代可能共享同一个 open-file-description。若权威 owner
+     * PID 已死亡但后代仍持锁，固定路径会被原子轮换到旧 inode；新 worker 在
+     * 新 inode 上取得 lease，旧后代不再能永久阻塞恢复。
+     *
+     * 调用方必须已经持有 tryAcquireWorkerLifecycleGuard() 返回的互斥锁。
+     *
+     * @return resource|false
+     */
+    public static function tryAcquireWorkerLeaseForStart(int $managerPid) {
+        $path = self::workerLockFile();
+        $handle = @fopen($path, 'c+');
+        if (!is_resource($handle)) {
+            return false;
+        }
+        if (@flock($handle, LOCK_EX | LOCK_NB)) {
+            @rewind($handle);
+            @ftruncate($handle, 0);
+            @fflush($handle);
+            return $handle;
+        }
+
+        $owner = self::readWorkerLockOwnerFromHandle($handle);
+        $ownerPid = max(0, (int)($owner['pid'] ?? 0));
+        $ownerManagerPid = max(0, (int)($owner['manager_pid'] ?? 0));
+        $startedAt = max(0, (int)($owner['started_at'] ?? 0));
+        $ownerAlive = $ownerPid > 0 && @Process::kill($ownerPid, 0);
+        $pending = $ownerPid <= 0
+            && $startedAt > 0
+            && (time() - $startedAt) <= self::WORKER_START_PENDING_SECONDS
+            && (
+                $ownerManagerPid <= 0
+                || $ownerManagerPid === $managerPid
+                || @Process::kill($ownerManagerPid, 0)
+            );
+        @fclose($handle);
+        if ($ownerAlive || $pending) {
+            return false;
+        }
+
+        $suffix = getmypid() . '.' . str_replace('.', '', uniqid('', true));
+        $stalePath = $path . '.stale.' . $suffix;
+        if (!@rename($path, $stalePath)) {
+            return false;
+        }
+        // unlink 只移除旧 inode 的目录项；继承 fd 仍可自然关闭，但不再占用固定路径。
+        @unlink($stalePath);
+        $handle = @fopen($path, 'c+');
+        if (!is_resource($handle)) {
+            return false;
+        }
+        if (!@flock($handle, LOCK_EX | LOCK_NB)) {
+            @fclose($handle);
+            return false;
+        }
+        @rewind($handle);
+        @ftruncate($handle, 0);
+        @fflush($handle);
+        return $handle;
+    }
+
+    protected static function readWorkerLockOwnerFromHandle($handle): array {
+        if (!is_resource($handle)) {
+            return [];
+        }
+        @rewind($handle);
+        $payload = @fread($handle, 4096);
+        $owner = is_string($payload) && $payload !== '' ? json_decode($payload, true) : null;
+        return is_array($owner) ? $owner : [];
+    }
+
+    /**
+     * 返回当前真正持有 worker 文件锁的身份。
+     *
+     * held=true 但 pid/token 为空表示锁正处在 fork/回填的极短窗口，或锁文件
+     * 暂时不可读。调用方必须把它当作“已有 worker/正在启动”，禁止再次拉起。
+     *
+     * @return array{held?:bool,pid?:int,token?:string,manager_pid?:int,started_at?:int}
+     */
+    public static function workerLockOwner(): array {
+        $handle = @fopen(self::workerLockFile(), 'c+');
+        if (!is_resource($handle)) {
+            // 无法验证时按“已有 worker”处理，安全地阻止重复消费者。
+            return ['held' => true, 'pid' => 0, 'token' => ''];
+        }
+        $acquired = @flock($handle, LOCK_EX | LOCK_NB);
+        if ($acquired) {
+            @flock($handle, LOCK_UN);
+            @fclose($handle);
+            return [];
+        }
+        $owner = self::readWorkerLockOwnerFromHandle($handle);
+        @fclose($handle);
+        if (!$owner) {
+            return ['held' => true, 'pid' => 0, 'token' => ''];
+        }
+        return [
+            'held' => true,
+            'pid' => max(0, (int)($owner['pid'] ?? 0)),
+            'token' => (string)($owner['token'] ?? ''),
+            'manager_pid' => max(0, (int)($owner['manager_pid'] ?? 0)),
+            'started_at' => max(0, (int)($owner['started_at'] ?? 0)),
+        ];
+    }
+
+    /**
+     * 跨 manager 代际判断真实 worker 是否持有锁。
+     *
+     * 传入 pid/token 时必须与锁文件 owner 精确一致，不能再用“任意锁被占用”
+     * 证明某个 Runtime PID 的身份，避免 PID 复用或旧状态误接管。
+     */
+    public static function workerLockIsHeld(int $expectedPid = 0, string $expectedToken = ''): bool {
+        $owner = self::workerLockOwner();
+        if (!(bool)($owner['held'] ?? false)) {
+            return false;
+        }
+        if ($expectedPid > 0 && (int)($owner['pid'] ?? 0) !== $expectedPid) {
+            return false;
+        }
+        if (
+            $expectedToken !== ''
+            && !hash_equals((string)($owner['token'] ?? ''), $expectedToken)
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 尝试取得 worker 生命周期互斥锁。
+     *
+     * 启动与 Runtime 清理都必须在同一把锁下完成，避免“刚确认无锁，另一个
+     * manager 就启动 worker，而旧 manager 随后把新状态清掉”的 TOCTOU 竞态。
+     *
+     * @return resource|false
+     */
+    public static function tryAcquireWorkerLifecycleGuard() {
+        $handle = @fopen(self::workerLifecycleLockFile(), 'c+');
+        if (!is_resource($handle)) {
+            return false;
+        }
+        if (!@flock($handle, LOCK_EX | LOCK_NB)) {
+            @fclose($handle);
+            return false;
+        }
+        return $handle;
+    }
+
+    /**
+     * @param resource|false $handle
+     */
+    public static function releaseWorkerLifecycleGuard($handle): void {
+        if (!is_resource($handle)) {
+            return;
+        }
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
+    }
+
+    protected static function workerLockFile(): string {
+        return SERVER_QUEUE_MANAGER_PID_FILE . '.worker.lock';
+    }
+
+    protected static function workerLifecycleLockFile(): string {
+        return SERVER_QUEUE_MANAGER_PID_FILE . '.worker.lifecycle.lock';
+    }
+
+    protected static function newWorkerToken(): string {
+        try {
+            return bin2hex(random_bytes(16));
+        } catch (Throwable) {
+            return str_replace('.', '', uniqid('rq', true));
+        }
+    }
+
+    /**
+     * 将锁的持有者身份写入已经持锁的 fd。
+     *
+     * 元数据与锁使用同一个 fd 生命周期：worker 退出释放锁后，文件里即使还留有
+     * 旧 JSON 也不会被采用，因为 workerLockOwner() 会先验证锁仍被真实持有。
+     *
+     * @param resource $handle
+     */
+    protected static function writeWorkerLockOwner(
+        $handle,
+        int $pid,
+        string $workerToken,
+        int $managerPid
+    ): void {
+        if (!is_resource($handle)) {
+            return;
+        }
+        $payload = json_encode([
+            'pid' => max(0, $pid),
+            'token' => $workerToken,
+            'manager_pid' => max(0, $managerPid),
+            'started_at' => time(),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($payload)) {
+            return;
+        }
+        @rewind($handle);
+        @ftruncate($handle, 0);
+        @fwrite($handle, $payload);
+        @fflush($handle);
+    }
+
+    protected static function publishWorkerHeartbeat(
+        string $workerToken,
+        string $managerGeneration
+    ): void {
+        $pid = getmypid() ?: 0;
+        $runtime = Runtime::instance();
+        $managerPid = (int)($runtime->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0);
+        $state = (array)($runtime->get(Key::RUNTIME_REDIS_QUEUE_WORKER_STATE) ?? []);
+        if (
+            $pid <= 0
+            || $managerPid <= 0
+            || $managerGeneration === ''
+            || !hash_equals(
+                (string)($runtime->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''),
+                $managerGeneration
+            )
+            || (int)($state['pid'] ?? 0) !== $pid
+            || !hash_equals((string)($state['token'] ?? ''), $workerToken)
+            || !hash_equals((string)($state['manager_generation'] ?? ''), $managerGeneration)
+        ) {
+            return;
+        }
+        $state['heartbeat_at'] = time();
+        $state['manager_pid'] = $managerPid;
+        $state['manager_id'] = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS) ?: 0);
+        if ((int)($runtime->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0) === $managerPid) {
+            $runtime->set(Key::RUNTIME_REDIS_QUEUE_WORKER_STATE, $state);
+        }
+    }
+
+    protected static function markWorkerHeartbeatStopped(
+        string $workerToken,
+        string $managerGeneration
+    ): void {
+        $pid = getmypid() ?: 0;
+        $runtime = Runtime::instance();
+        $managerPid = (int)($runtime->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0);
+        $state = (array)($runtime->get(Key::RUNTIME_REDIS_QUEUE_WORKER_STATE) ?? []);
+        if (
+            $managerPid <= 0
+            || $managerGeneration === ''
+            || (int)($state['pid'] ?? 0) !== $pid
+            || !hash_equals((string)($state['token'] ?? ''), $workerToken)
+            || !hash_equals((string)($state['manager_generation'] ?? ''), $managerGeneration)
+        ) {
+            return;
+        }
+        $state['heartbeat_at'] = 0;
+        $state['manager_pid'] = $managerPid;
+        $state['manager_id'] = (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS) ?: 0);
+        if ((int)($runtime->get(Key::RUNTIME_REDIS_QUEUE_MANAGER_PID) ?? 0) === $managerPid) {
+            $runtime->set(Key::RUNTIME_REDIS_QUEUE_WORKER_STATE, $state);
+        }
     }
 
     public static function startByWorker(): void {
@@ -158,9 +508,10 @@ class RQueue {
      * @param int $mc
      * @return int
      */
-    public function watch(int $mc = 32): int {
+    public function watch(int $mc = 32, string $managerGeneration = ''): int {
         $this->shouldExit = false;
         $mc = min($mc, 32);
+        $this->managerGeneration = $managerGeneration;
         //将待重试加入队列
         if ($retryCount = $this->count(2)) {
             for ($i = 0; $i < $retryCount; $i++) {
@@ -181,7 +532,15 @@ class RQueue {
         //每一秒读取一次队列列表
         Timer::after(1000, function () use ($mc) {
             $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-            if ($this->managerId != $latestManagerId) {
+            $latestManagerGeneration = (string)(
+                Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''
+            );
+            $managerGenerationChanged = $this->managerGeneration !== ''
+                && (
+                    $latestManagerGeneration === ''
+                    || !hash_equals($latestManagerGeneration, $this->managerGeneration)
+                );
+            if ($this->managerId != $latestManagerId || $managerGenerationChanged) {
                 if ((int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0) > 0) {
                     Timer::after(200, function () use ($mc) {
                         $this->loop($mc);

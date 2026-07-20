@@ -191,31 +191,50 @@ function scf_run_server_process_loop(array $argv): void {
     if ($stopFlag !== '' && file_exists($stopFlag)) {
         @unlink($stopFlag);
     }
+    $abnormalExitAttempts = 0;
     while (true) {
         if (scf_bool_constant('IS_SERVER_PROCESS_START')) {
             // 新实例拉起前先由 bootstrap 层处理旧监听者，避免把端口冲突处理责任
             // 留给可能仍是旧版本的 pack 运行时逻辑。
             scf_prepare_command_ports_for_start($argv);
         }
-        $managerProcess = new \Swoole\Process(static function () use ($argv): void {
-            $serverBuildVersion = scf_runtime_build_version();
-            define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
-            define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
-            scf_run($argv);
-        });
-        $managerProcess->start();
-
-        $ret = \Swoole\Process::wait();
+        $runStartedAt = microtime(true);
+        $managerPid = 0;
+        $ret = false;
+        try {
+            $managerProcess = new \Swoole\Process(static function () use ($argv): void {
+                $serverBuildVersion = scf_runtime_build_version();
+                define('FRAMEWORK_BUILD_TIME', $serverBuildVersion['build']);
+                define('FRAMEWORK_BUILD_VERSION', $serverBuildVersion['version']);
+                scf_run($argv);
+            });
+            $managerPid = (int)($managerProcess->start() ?: 0);
+            if ($managerPid > 0) {
+                do {
+                    $ret = \Swoole\Process::wait();
+                    if ($ret !== false || !@\Swoole\Process::kill($managerPid, 0)) {
+                        break;
+                    }
+                    // wait 被信号打断但 child 仍存活时继续等待，禁止重复拉起 server。
+                    usleep(100000);
+                } while (true);
+            }
+        } catch (\Throwable $throwable) {
+            scf_stderr('【Boot】创建/启动 server 子进程异常: ' . $throwable->getMessage());
+        }
         if ($ret) {
             scf_stdout("【Boot】子进程退出: pid={$ret['pid']}, code={$ret['code']}, signal={$ret['signal']}");
+        } else {
+            scf_stderr('【Boot】子进程启动/回收失败，进入受限重试');
         }
+        $runtimeSeconds = max(0.0, microtime(true) - $runStartedAt);
         if (scf_should_stop_server_process_loop($argv)) {
             break;
         }
         if (!scf_bool_constant('IS_SERVER_PROCESS_START')) {
             break;
         }
-        $nextPack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : scf_try_upgrade($argv);
+        $nextPack = defined('FRAMEWORK_ACTIVE_PACK') ? FRAMEWORK_ACTIVE_PACK : '';
         try {
             $nextPack = scf_try_upgrade($argv);
         } catch (\Throwable $e) {
@@ -226,8 +245,43 @@ function scf_run_server_process_loop(array $argv): void {
             scf_reexec_current_boot($argv);
             return;
         }
-        sleep(2);
+        $restartDelay = scf_server_process_restart_delay_seconds(
+            $runtimeSeconds,
+            (int)($ret['code'] ?? 1),
+            (int)($ret['signal'] ?? 0),
+            $abnormalExitAttempts
+        );
+        if ($restartDelay > 2) {
+            scf_stderr(
+                "【Boot】检测到短命退出，{$restartDelay}s 后重拉"
+                . ", attempts={$abnormalExitAttempts}, runtime=" . round($runtimeSeconds, 2) . 's'
+            );
+        }
+        sleep($restartDelay);
     }
+}
+
+/**
+ * 计算最外层 server loop 的重拉间隔。
+ *
+ * 运行达到稳定窗口后恢复原有 2 秒重拉；所有短命退出（包括 exit(0)）都按
+ * 2, 4, 8, 16, 32, 60 秒退避，避免“干净退出”被误当成明确 reload 信号，
+ * 从而反复执行整个 bootstrap 链。
+ */
+function scf_server_process_restart_delay_seconds(
+    float $runtimeSeconds,
+    int $exitCode,
+    int $signal,
+    int &$abnormalExitAttempts
+): int {
+    $stable = $runtimeSeconds >= 30.0;
+    if ($stable) {
+        $abnormalExitAttempts = 0;
+        return 2;
+    }
+    $abnormalExitAttempts++;
+    $exponent = min(5, max(0, $abnormalExitAttempts - 1));
+    return min(60, 2 * (2 ** $exponent));
 }
 
 /**

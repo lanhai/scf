@@ -10,6 +10,7 @@ use Scf\Core\Key;
 use Scf\Core\Log;
 use Scf\Core\Struct;
 use Scf\Core\Table\Counter;
+use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
 use Scf\Util\Date;
 use Scf\Util\File;
@@ -57,6 +58,15 @@ class Crontab extends Struct {
      * @default int:-1
      */
     public ?int $manager_id;
+    /**
+     * SubProcessManager 本次 callback 的唯一代际令牌。
+     *
+     * Swoole 自动重建 addProcess callback 时，Counter 可能仍沿用旧值；
+     * 因此 task 不能只依赖 manager_id 判孤儿。
+     *
+     * @default string:''
+     */
+    public ?string $manager_generation;
     /**
      * @default int:1
      */
@@ -152,6 +162,10 @@ class Crontab extends Struct {
      * @return void
      */
     public function start(): void {
+        if ($this->isOrphan()) {
+            $this->shutdownRuntime();
+            return;
+        }
         //内存占用统计
         MemoryMonitor::start('crontab:' . $this->name);
         //迭代检查计时器
@@ -159,7 +173,7 @@ class Crontab extends Struct {
         // 才巡检一次孤儿状态，任务子进程会在短窗口里带着事件循环进入 shutdown，
         // 从而触发 Swoole 在 rshutdown 中兜底 Event::wait() 的 deprecated warning。
         Timer::tick(1000, function () {
-            if ($this->manager_id !== Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS)) {
+            if ($this->isOrphan()) {
                 // manager 已经切代时，任务子进程必须自己结束事件循环，
                 // 不能只留给 Swoole 在 shutdown hook 里兜底 wait。
                 $this->shutdownRuntime();
@@ -219,13 +233,13 @@ class Crontab extends Struct {
                         //单次执行的任务如果是无限循环任务需要在循环逻辑里判断当前任务是否处于激活状态,且在结束循环时清理相关计时器
                         $this->execute();
                         Timer::after(1000 * 2, function () {
-                            CrontabManager::updateTaskTable($this->id, ['status' => 2]);
+                            $this->update(['status' => 2]);
                         });
                     } catch (Throwable $throwable) {
                         Log::instance()->error("【{$this->name}|{$this->namespace}】任务执行失败:" . $throwable->getMessage());
                         $this->log("任务执行失败:" . $throwable->getMessage());
                         Timer::after(1000 * 2, function () use ($throwable) {
-                            CrontabManager::updateTaskTable($this->id, ['status' => 0, 'remark' => "任务执行失败", 'error_count' => 1]);
+                            $this->update(['status' => 0, 'remark' => "任务执行失败", 'error_count' => 1]);
                         });
                     }
                     break;
@@ -262,8 +276,13 @@ class Crontab extends Struct {
      * @return bool
      */
     public function isOrphan(): bool {
-        $latestManagerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
-        return $this->manager_id !== $latestManagerId;
+        $latestManagerId = (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0);
+        $latestGeneration = (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? '');
+        $managerGeneration = (string)($this->manager_generation ?? '');
+        return (int)($this->manager_id ?? 0) !== $latestManagerId
+            || $managerGeneration === ''
+            || $latestGeneration === ''
+            || !hash_equals($latestGeneration, $managerGeneration);
     }
 
     /**
@@ -576,7 +595,13 @@ class Crontab extends Struct {
         if ($this->isOrphan()) {
             return false;
         }
-        return CrontabManager::updateTaskTable($this->id, $datas);
+        return CrontabManager::updateTaskTableIfOwned(
+            $this->id,
+            (int)($this->manager_id ?? 0),
+            (string)($this->manager_generation ?? ''),
+            $datas,
+            (int)($this->pid ?? 0) > 0 ? (int)$this->pid : null
+        );
     }
 
     /**
@@ -623,7 +648,15 @@ class Crontab extends Struct {
      */
     protected function sync(): array {
         $attributes = CrontabManager::getTaskTableById($this->id);
-        if ($attributes) {
+        if (
+            $attributes
+            && CrontabManager::taskMatchesOwner(
+                $attributes,
+                (int)($this->manager_id ?? 0),
+                (string)($this->manager_generation ?? ''),
+                (int)($this->pid ?? 0) > 0 ? (int)$this->pid : null
+            )
+        ) {
             $this->mode = $attributes['mode'] ?? $this->mode;
             $this->interval = $attributes['interval'] ?? $this->interval;
             $this->status = $attributes['status'] ?? $this->status;

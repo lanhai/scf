@@ -27,8 +27,16 @@ class LogBackupProcess extends AbstractRuntimeProcess {
     public function create(): Process {
         return new Process(function (Process $process) {
             $this->call('mark_gateway_sub_process_context');
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
+            $managerGeneration = $this->captureManagerGeneration();
+            $processPid = getmypid() ?: 0;
+            if (!$this->claimRuntimeOwnership(
+                $managerGeneration,
+                Key::RUNTIME_LOG_BACKUP_PID,
+                Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT,
+                $processPid
+            )) {
+                return;
+            }
             if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                 Console::info("【LogBackup】日志备份PID:" . $process->pid, false);
             }
@@ -47,7 +55,22 @@ class LogBackupProcess extends AbstractRuntimeProcess {
             }
 
             while (true) {
-                Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, time());
+                if ($this->managedRuntimeShouldStop(
+                    $managerGeneration,
+                    Key::RUNTIME_LOG_BACKUP_PID,
+                    $processPid,
+                    $commandPipe,
+                    true
+                )) {
+                    MemoryMonitor::stop();
+                    break;
+                }
+                $this->touchRuntimeOwnershipIfCurrent(
+                    $managerGeneration,
+                    Key::RUNTIME_LOG_BACKUP_PID,
+                    Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT,
+                    $processPid
+                );
                 $cmd = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
                 if ($cmd === false) {
                     $cmd = '';
@@ -74,8 +97,12 @@ class LogBackupProcess extends AbstractRuntimeProcess {
                 }
                 usleep(200000);
             }
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_LOG_BACKUP_PID, 0);
+            $this->clearRuntimeOwnershipIfCurrent(
+                $managerGeneration,
+                Key::RUNTIME_LOG_BACKUP_PID,
+                Key::RUNTIME_LOG_BACKUP_HEARTBEAT_AT,
+                $processPid
+            );
             is_resource($commandPipe) and fclose($commandPipe);
         }, false, SOCK_DGRAM);
     }

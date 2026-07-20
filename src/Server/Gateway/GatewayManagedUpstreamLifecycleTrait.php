@@ -6,6 +6,8 @@ use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Server as CoreServer;
 use Scf\Core\Table\Runtime;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use Swoole\Process;
 use Swoole\Timer;
 use Throwable;
@@ -200,21 +202,19 @@ trait GatewayManagedUpstreamLifecycleTrait {
             return false;
         }
 
-        $appFlag = '-app=' . APP_DIR_NAME;
-        $gatewayPortFlag = '-gateway_port=' . $expectedGatewayPort;
         foreach ($pids as $pid) {
             $command = $this->readManagedBootstrapProcessCommand((int)$pid);
             if ($command === '' || !str_contains($command, 'boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, $appFlag) || !str_contains($command, $gatewayPortFlag)) {
+            if (
+                !ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $expectedGatewayPort)
+            ) {
                 continue;
             }
-            if (preg_match('/(?:^|\\s)-gateway_epoch=(\\d+)(?:\\s|$)/', $command, $matches)) {
-                $epoch = (int)($matches[1] ?? 0);
-                if ($epoch > 0 && $epoch === $expectedEpoch) {
-                    return true;
-                }
+            if (ProcessCommandLine::hasOptionValue($command, 'gateway_epoch', $expectedEpoch)) {
+                return true;
             }
         }
 
@@ -231,8 +231,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
         if ($pid <= 0 || !@Process::kill($pid, 0)) {
             return '';
         }
-        $command = @shell_exec('ps -o command= -p ' . $pid . ' 2>/dev/null');
-        return is_string($command) ? trim($command) : '';
+        return trim(ProcessInspector::command($pid));
     }
 
     /**
@@ -1603,14 +1602,9 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $rpcPort = (int)($plan['rpc_port'] ?? (($plan['metadata']['rpc_port'] ?? 0)));
         $pid = (int)($plan['metadata']['pid'] ?? 0);
 
-        $httpListening = $port > 0 && (
-            $this->launcher->isListening($host, $port, 0.2)
-            || $this->launcher->isListening('0.0.0.0', $port, 0.2)
-        );
-        $rpcListening = $rpcPort > 0 && (
-            $this->launcher->isListening($host, $rpcPort, 0.2)
-            || $this->launcher->isListening('0.0.0.0', $rpcPort, 0.2)
-        );
+        // normalizeProbeHost 已把 0.0.0.0/localhost 统一为 loopback，同端口只探测一次。
+        $httpListening = $port > 0 && $this->launcher->isListening($host, $port, 0.2);
+        $rpcListening = $rpcPort > 0 && $this->launcher->isListening($host, $rpcPort, 0.2);
         // 回收链必须按“真实存活”判定，僵尸进程不应继续占用 pending/quarantine 状态。
         $pidAlive = $pid > 0 && $this->launcher->isProcessAlive($pid);
 
@@ -1839,8 +1833,12 @@ trait GatewayManagedUpstreamLifecycleTrait {
                 $now = time();
                 $nextWindowElapsed = $this->managedRecycleNextForceWindowSeconds($currentWindowElapsed, $forceAfter);
                 $item['next_force_elapsed'] = $nextWindowElapsed;
-                if ($shouldForceKill) {
-                    $attempts = (int)($item['force_attempts'] ?? 0) + 1;
+                $completedAttempts = (int)($item['force_attempts'] ?? 0);
+                $lastForceAt = (int)($item['last_force_at'] ?? 0);
+                $forceRetryInterval = $this->managedRecycleForceRetryIntervalSeconds($completedAttempts);
+                $forceRetryDue = $lastForceAt <= 0 || ($now - $lastForceAt) >= $forceRetryInterval;
+                if ($shouldForceKill && $forceRetryDue) {
+                    $attempts = $completedAttempts + 1;
                     $hard = true;
                     $this->launcher->forceStopManagedInstance($plan, $hard);
                     $item['force_attempts'] = $attempts;
@@ -1853,7 +1851,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
                         . ", window={$currentWindowElapsed}s",
                         $port
                     );
-                } elseif ($windowDue) {
+                } elseif (!$shouldForceKill && $windowDue) {
                     $this->logOldInstanceLifecycle(
                         "【Gateway】回收窗口命中但未到强制期限，继续等待: waiting={$elapsed}s, window={$currentWindowElapsed}s"
                         . ", runtime={$runtimeSource}, ws={$gatewayWs}, conn={$serverConnectionNum}"
@@ -2166,6 +2164,19 @@ trait GatewayManagedUpstreamLifecycleTrait {
         }
         $next = max($currentWindow + 1, $currentWindow * 2);
         return min($deadline, $next);
+    }
+
+    /**
+     * pending 已执行过强制动作后，限制后续重试频率。
+     *
+     * @param int $completedAttempts 已完成的强制动作次数
+     */
+    protected function managedRecycleForceRetryIntervalSeconds(int $completedAttempts): int {
+        if ($completedAttempts <= 0) {
+            return 0;
+        }
+        $exponent = min(4, max(0, $completedAttempts - 1));
+        return min(60, 5 * (2 ** $exponent));
     }
 
     /**

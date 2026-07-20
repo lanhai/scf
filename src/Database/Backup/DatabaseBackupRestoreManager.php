@@ -4,8 +4,6 @@ namespace Scf\Database\Backup;
 
 use Scf\Core\Exception;
 use mysqli;
-use Swoole\Coroutine;
-use Swoole\Coroutine\System;
 use Throwable;
 
 /**
@@ -15,6 +13,15 @@ use Throwable;
  * 支持整库快照恢复与单表恢复两种场景，并与备份流程共享互斥锁语义。
  */
 class DatabaseBackupRestoreManager {
+    /** 大库恢复允许持续两小时，超过后仍必须 TERM/KILL 收口。 */
+    protected const RESTORE_TIMEOUT_SECONDS = 7_200.0;
+
+    /** mysqli 客户端兜底连接上限。 */
+    protected const MYSQL_CONNECT_TIMEOUT_SECONDS = 15;
+
+    /** mysqli 流式恢复读取上限。 */
+    protected const MYSQL_READ_TIMEOUT_SECONDS = 7_200;
+
     /**
      * 备份管理器。
      *
@@ -29,12 +36,33 @@ class DatabaseBackupRestoreManager {
      */
     protected DatabaseBackupCommandResolver $commandResolver;
 
+    /**
+     * 数据库长任务外部进程执行器。
+     *
+     * @var DatabaseBackupProcessRunner
+     */
+    protected DatabaseBackupProcessRunner $processRunner;
+
     public function __construct(
         ?DatabaseBackupManager $backupManager = null,
-        ?DatabaseBackupCommandResolver $commandResolver = null
+        ?DatabaseBackupCommandResolver $commandResolver = null,
+        ?DatabaseBackupProcessRunner $processRunner = null
     ) {
-        $this->backupManager = $backupManager ?: new DatabaseBackupManager($commandResolver);
         $this->commandResolver = $commandResolver ?: new DatabaseBackupCommandResolver();
+        $this->processRunner = $processRunner ?: new DatabaseBackupProcessRunner();
+        $this->backupManager = $backupManager ?: new DatabaseBackupManager(
+            $this->commandResolver,
+            $this->processRunner
+        );
+    }
+
+    /**
+     * 请求取消当前恢复进程。
+     *
+     * 保留为控制面可直接复用的能力；runner 会先 TERM，宽限后再 KILL。
+     */
+    public function requestCancel(): void {
+        $this->processRunner->requestCancel();
     }
 
     /**
@@ -118,65 +146,65 @@ class DatabaseBackupRestoreManager {
             return;
         }
 
-        $command = implode(' ', [
-            escapeshellarg($mysql),
-            '--host=' . escapeshellarg((string)$server['host']),
-            '--port=' . (int)$server['port'],
-            '--user=' . escapeshellarg((string)$server['username']),
-            '--database=' . escapeshellarg((string)$server['db_name']),
-            '--default-character-set=' . escapeshellarg((string)$server['charset']),
-        ]);
+        $this->restoreSqlFilesWithClient($mysql, $server, [$sqlFile]);
+    }
 
-        if ($this->canUseSwooleCoroutine()) {
-            $stderrFile = tempnam(sys_get_temp_dir(), 'scf_db_restore_err_');
-            if ($stderrFile === false) {
-                throw new Exception('创建 mysql 恢复错误输出文件失败');
-            }
-            try {
-                $result = System::exec('/bin/sh -lc ' . escapeshellarg(
-                    'MYSQL_PWD=' . escapeshellarg((string)$server['password'])
-                    . ' ' . $command
-                    . ' < ' . escapeshellarg($sqlFile)
-                    . ' > /dev/null'
-                    . ' 2> ' . escapeshellarg($stderrFile)
-                ));
-                if ($result === false) {
-                    throw new Exception('执行 mysql 恢复命令失败');
-                }
-                $stderr = (string)(@file_get_contents($stderrFile) ?: '');
-                if ((int)($result['code'] ?? 1) !== 0) {
-                    throw new Exception('恢复失败: ' . trim($stderr ?: (string)($result['output'] ?? '')));
-                }
-                return;
-            } finally {
-                @unlink($stderrFile);
-            }
-        }
-
-        $descriptor = [
-            0 => ['file', $sqlFile, 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
+    /**
+     * 使用 mysql 客户端流式导入一组 SQL 文件。
+     *
+     * @param string $mysql mysql/mariadb 绝对路径
+     * @param array<string, mixed> $server 数据库连接配置
+     * @param array<int, string> $sqlFiles SQL 文件列表
+     * @param bool $wrapForeignKeyChecks 是否在同一会话外层包裹外键检查开关
+     * @return void
+     * @throws Exception
+     */
+    protected function restoreSqlFilesWithClient(
+        string $mysql,
+        array $server,
+        array $sqlFiles,
+        bool $wrapForeignKeyChecks = false
+    ): void {
+        $command = [
+            $mysql,
+            '--host=' . (string)$server['host'],
+            '--port=' . (string)(int)$server['port'],
+            '--user=' . (string)$server['username'],
+            '--database=' . (string)$server['db_name'],
+            '--default-character-set=' . (string)$server['charset'],
         ];
-        $process = @proc_open($command, $descriptor, $pipes, null, $this->mysqlEnv((string)$server['password']));
-        if (!is_resource($process)) {
-            throw new Exception('启动 mysql 失败，无法恢复: ' . basename($sqlFile));
+        $result = $this->processRunner->run(
+            $command,
+            self::RESTORE_TIMEOUT_SECONDS,
+            $this->mysqlEnv((string)$server['password']),
+            $sqlFiles,
+            null,
+            $wrapForeignKeyChecks ? "SET FOREIGN_KEY_CHECKS=0;\n" : '',
+            $wrapForeignKeyChecks ? "SET FOREIGN_KEY_CHECKS=1;\n" : ''
+        );
+
+        if ($result['timed_out']) {
+            throw new Exception('恢复超时: 已等待 ' . (int)self::RESTORE_TIMEOUT_SECONDS . ' 秒');
         }
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($process);
-        if ($exitCode !== 0) {
-            throw new Exception('恢复失败: ' . trim((string)($stderr ?: $stdout)));
+        if ($result['cancelled']) {
+            throw new Exception('恢复任务已取消');
+        }
+        if (!$result['started']) {
+            throw new Exception('启动 mysql 失败，无法恢复: ' . trim($result['stderr']));
+        }
+        if ($result['truncated']) {
+            throw new Exception('mysql 恢复输出超过安全上限，任务已终止');
+        }
+        if ($result['exit_code'] !== 0) {
+            throw new Exception('恢复失败: ' . trim((string)($result['stderr'] ?: $result['stdout'])));
         }
     }
 
     /**
      * 执行整快照恢复。
      *
-     * 为了避免外键依赖导致中间阶段失败，这里把快照内所有 SQL 拼接到一个临时脚本，
-     * 在同一 mysql 会话中关闭/恢复外键检查后统一导入。
+     * 为了避免外键依赖导致中间阶段失败，全部文件在同一会话中流式导入，并在
+     * 会话外层关闭/恢复外键检查。不会再复制一份与快照同体积的临时 SQL。
      *
      * @param array<string, mixed> $server 数据库连接配置
      * @param array<int, string> $sqlFiles 快照内 SQL 文件路径
@@ -184,34 +212,13 @@ class DatabaseBackupRestoreManager {
      * @throws Exception
      */
     protected function restoreFullSnapshot(array $server, array $sqlFiles): void {
-        $tempSql = tempnam(sys_get_temp_dir(), 'scf_db_restore_');
-        if ($tempSql === false) {
-            throw new Exception('创建临时恢复脚本失败');
+        $mysql = $this->commandResolver->mysqlOrNull();
+        if ($mysql !== '') {
+            $this->restoreSqlFilesWithClient($mysql, $server, $sqlFiles, true);
+            return;
         }
 
-        try {
-            $fp = fopen($tempSql, 'wb');
-            if (!$fp) {
-                throw new Exception('写入临时恢复脚本失败');
-            }
-            fwrite($fp, "SET FOREIGN_KEY_CHECKS=0;\n");
-            foreach ($sqlFiles as $file) {
-                $in = fopen($file, 'rb');
-                if (!$in) {
-                    fclose($fp);
-                    throw new Exception('读取备份文件失败: ' . $file);
-                }
-                stream_copy_to_stream($in, $fp);
-                fwrite($fp, "\n");
-                fclose($in);
-            }
-            fwrite($fp, "SET FOREIGN_KEY_CHECKS=1;\n");
-            fclose($fp);
-
-            $this->restoreFromSqlFile($server, $tempSql);
-        } finally {
-            @unlink($tempSql);
-        }
+        $this->restoreSqlFilesViaMysqli($server, $sqlFiles);
     }
 
     /**
@@ -261,6 +268,36 @@ class DatabaseBackupRestoreManager {
                 }
             }
         } finally {
+            $mysqli->close();
+        }
+    }
+
+    /**
+     * 使用同一 mysqli 会话流式恢复整份快照。
+     *
+     * @param array<string, mixed> $server 数据库连接配置
+     * @param array<int, string> $sqlFiles SQL 文件列表
+     * @return void
+     * @throws Exception
+     */
+    protected function restoreSqlFilesViaMysqli(array $server, array $sqlFiles): void {
+        $mysqli = $this->openMysqliConnection($server);
+
+        try {
+            if (!@$mysqli->query('SET FOREIGN_KEY_CHECKS=0')) {
+                throw new Exception('关闭外键检查失败: ' . $mysqli->error);
+            }
+            foreach ($sqlFiles as $sqlFile) {
+                foreach ($this->readSqlStatements($sqlFile) as $statement) {
+                    if (!@$mysqli->query($statement)) {
+                        throw new Exception('恢复失败(' . basename($sqlFile) . '): ' . $mysqli->error);
+                    }
+                }
+            }
+        } finally {
+            // 恢复失败时也尽力还原当前连接状态；关闭连接后服务端会销毁该 session，
+            // 因此这里失败不会污染连接池里的其他连接。
+            @$mysqli->query('SET FOREIGN_KEY_CHECKS=1');
             $mysqli->close();
         }
     }
@@ -378,6 +415,11 @@ class DatabaseBackupRestoreManager {
             throw new Exception('初始化 mysqli 失败');
         }
 
+        @$mysqli->options(MYSQLI_OPT_CONNECT_TIMEOUT, self::MYSQL_CONNECT_TIMEOUT_SECONDS);
+        if (defined('MYSQLI_OPT_READ_TIMEOUT')) {
+            @$mysqli->options(MYSQLI_OPT_READ_TIMEOUT, self::MYSQL_READ_TIMEOUT_SECONDS);
+        }
+
         if (!@$mysqli->real_connect(
             (string)$server['host'],
             (string)$server['username'],
@@ -409,17 +451,4 @@ class DatabaseBackupRestoreManager {
         return $env;
     }
 
-    /**
-     * 当前是否处于可安全使用 Swoole 协程系统调用的上下文。
-     *
-     * 恢复既可能由 dashboard 在 worker 协程中触发，也可能由一次性脚本调用。
-     * 只有已进入协程环境时，才启用 `System::exec()` 避免阻塞当前 worker。
-     *
-     * @return bool
-     */
-    protected function canUseSwooleCoroutine(): bool {
-        return class_exists(Coroutine::class)
-            && class_exists(System::class)
-            && Coroutine::getCid() > 0;
-    }
 }

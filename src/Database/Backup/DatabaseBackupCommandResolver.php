@@ -132,22 +132,30 @@ class DatabaseBackupCommandResolver {
      * @return string
      */
     protected function resolveCommand(string $binaryName): string {
-        $resolved = trim((string)@shell_exec('command -v ' . escapeshellarg($binaryName) . ' 2>/dev/null'));
-        if ($resolved !== '' && is_executable($resolved)) {
-            return $resolved;
+        // PATH 本质上只是目录清单，直接在 PHP 内扫描即可。这里不能再通过
+        // shell 内建命令派生额外进程：该探测位于 dashboard 概览和任务启动链，
+        // 系统进程验证阻塞时会把一次页面请求放大成额外的 shell/工具进程。
+        $candidates = [];
+        $path = (string)getenv('PATH');
+        foreach (explode(PATH_SEPARATOR, $path) as $directory) {
+            $directory = rtrim(trim($directory), DIRECTORY_SEPARATOR);
+            if ($directory !== '' && is_dir($directory)) {
+                $candidates[] = $directory . DIRECTORY_SEPARATOR . $binaryName;
+            }
         }
-
-        $candidates = [
+        $candidates = array_merge($candidates, [
             '/usr/local/bin/' . $binaryName,
             '/usr/bin/' . $binaryName,
             '/bin/' . $binaryName,
             '/usr/sbin/' . $binaryName,
             '/opt/homebrew/bin/' . $binaryName,
-        ];
+            '/opt/local/bin/' . $binaryName,
+        ]);
 
-        foreach ($candidates as $candidate) {
-            if (is_executable($candidate)) {
-                return $candidate;
+        foreach (array_unique($candidates) as $candidate) {
+            if (is_file($candidate) && is_executable($candidate)) {
+                $resolved = realpath($candidate);
+                return is_string($resolved) ? $resolved : $candidate;
             }
         }
 

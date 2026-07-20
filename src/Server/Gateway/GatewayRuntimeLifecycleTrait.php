@@ -11,6 +11,8 @@ use Scf\Core\Table\ATable;
 use Scf\Core\Table\Runtime;
 use Scf\Root;
 use Scf\Server\SubProcessManager;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use RuntimeException;
 use Swoole\Coroutine;
 use Swoole\Exception as SwooleException;
@@ -273,34 +275,30 @@ trait GatewayRuntimeLifecycleTrait {
         if ($this->port <= 0 || $this->gatewayLeaseEpoch <= 0) {
             return [];
         }
-        $output = @shell_exec('ps -axo pid=,command=');
-        if (!is_string($output) || trim($output) === '') {
+        // 本快照会直接用于发送 TERM/KILL；采样失败时宁可跳过本轮，
+        // 也不能复用可能发生 PID 重用的 last-good 快照。
+        $snapshot = ProcessInspector::snapshot(true);
+        if (!$snapshot) {
             return [];
         }
 
-        $appFlag = '-app=' . APP_DIR_NAME;
-        $gatewayPortFlag = '-gateway_port=' . $this->port;
         $stale = [];
-        foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(.+)$/', $line, $matches)) {
-                continue;
-            }
-            $pid = (int)$matches[1];
-            $command = (string)$matches[2];
+        foreach ($snapshot as $pid => $processInfo) {
+            $pid = (int)$pid;
+            $command = (string)($processInfo['command'] ?? '');
             if ($pid <= 0 || $pid === getmypid()) {
                 continue;
             }
             if (!str_contains($command, 'boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, $appFlag) || !str_contains($command, $gatewayPortFlag)) {
+            if (
+                !ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $this->port)
+            ) {
                 continue;
             }
-            $epoch = 0;
-            if (preg_match('/(?:^|\s)-gateway_epoch=(\d+)(?:\s|$)/', $command, $epochMatch)) {
-                $epoch = (int)($epochMatch[1] ?? 0);
-            }
+            $epoch = ProcessCommandLine::intOption($command, 'gateway_epoch');
             if ($epoch <= 0 || $epoch !== $this->gatewayLeaseEpoch) {
                 $stale[] = [
                     'pid' => $pid,

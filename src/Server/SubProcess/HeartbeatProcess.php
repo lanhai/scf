@@ -53,11 +53,20 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
             run(function () use ($process, $masterPid, $managerPid) {
                 $this->call('mark_gateway_sub_process_context');
                 App::mount();
-                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
+                $managerGeneration = $this->captureManagerGeneration();
+                $processPid = getmypid() ?: 0;
+                if (!$this->claimRuntimeOwnership(
+                    $managerGeneration,
+                    Key::RUNTIME_HEARTBEAT_PID,
+                    Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+                    $processPid
+                )) {
+                    return;
+                }
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【Heatbeat】心跳进程PID:" . $process->pid, false);
                 }
+                try {
                 MemoryMonitor::start('Heatbeat');
                 $node = Node::factory();
                 $node->appid = APP_ID;
@@ -78,15 +87,43 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                 $node->scf_version = SCF_COMPOSER_VERSION;
                 $node->server_run_mode = APP_SRC_TYPE;
                 $nodeHost = APP_NODE_ID;
+                $processSocket = $process->exportSocket();
                 while (true) {
-                    Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
+                    if ($this->managedRuntimeShouldStop(
+                        $managerGeneration,
+                        Key::RUNTIME_HEARTBEAT_PID,
+                        $processPid
+                    )) {
+                        MemoryMonitor::stop();
+                        $this->call('exit_coroutine_runtime');
+                        return;
+                    }
+                    $this->touchRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_HEARTBEAT_PID,
+                        Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+                        $processPid
+                    );
                     $socket = Manager::instance()->getMasterSocketConnection();
                     $socket->push(JsonHelper::toJson(['event' => 'slave_node_report', 'data' => [
                         'host' => $nodeHost,
                         'ip' => SERVER_HOST,
                         'role' => SERVER_ROLE
                     ]]));
-                    $pingTimerId = Timer::tick(1000 * 5, function () use ($socket, &$node, $nodeHost) {
+                    $pingTimerId = Timer::tick(1000 * 5, function () use (
+                        $socket,
+                        &$node,
+                        $nodeHost,
+                        $managerGeneration,
+                        $processPid
+                    ) {
+                        if (!$this->ownsRuntimeProcess(
+                            $managerGeneration,
+                            Key::RUNTIME_HEARTBEAT_PID,
+                            $processPid
+                        )) {
+                            return;
+                        }
                         if ((bool)$this->call('should_skip_heartbeat_status_build')) {
                             MemoryMonitor::updateUsage('Heatbeat');
                             return;
@@ -104,16 +141,32 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                         MemoryMonitor::updateUsage('Heatbeat');
                     });
                     while (true) {
-                        Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, time());
-                        $processSocket = $process->exportSocket();
+                        if ($this->managedRuntimeShouldStop(
+                            $managerGeneration,
+                            Key::RUNTIME_HEARTBEAT_PID,
+                            $processPid
+                        )) {
+                            Timer::clear($pingTimerId);
+                            try {
+                                $socket->close();
+                            } catch (Throwable) {
+                            }
+                            MemoryMonitor::stop();
+                            $this->call('exit_coroutine_runtime');
+                            return;
+                        }
+                        $this->touchRuntimeOwnershipIfCurrent(
+                            $managerGeneration,
+                            Key::RUNTIME_HEARTBEAT_PID,
+                            Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+                            $processPid
+                        );
                         $cmd = $processSocket->recv(timeout: 0.1);
                         if ($cmd == 'shutdown') {
                             Timer::clear($pingTimerId);
                             Console::warning('【Heatbeat】服务器已关闭,终止心跳', false);
                             $socket->close();
                             MemoryMonitor::stop();
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_HEARTBEAT_PID, 0);
                             $this->call('exit_coroutine_runtime');
                             return;
                         }
@@ -159,6 +212,14 @@ class HeartbeatProcess extends AbstractRuntimeProcess {
                             }
                         }
                     }
+                }
+                } finally {
+                    $this->clearRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_HEARTBEAT_PID,
+                        Key::RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT,
+                        $processPid
+                    );
                 }
             });
         }, false, SOCK_DGRAM);

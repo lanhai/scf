@@ -7,6 +7,8 @@ use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Table\Runtime;
+use Scf\Util\BoundedProcessRunner;
+use Scf\Util\ProcessInspector;
 
 /**
  * Gateway 的 nginx 配置生成与同步器。
@@ -15,10 +17,15 @@ use Scf\Core\Table\Runtime;
  * 配置，并在需要时执行 test / reload / start。
  */
 class GatewayNginxProxyHandler {
+    private const NGINX_PROBE_TIMEOUT_SECONDS = 5.0;
+    private const NGINX_CONTROL_TIMEOUT_SECONDS = 10.0;
+    private const NGINX_MAX_OUTPUT_BYTES = 16_777_216;
 
     protected ?array $nginxRuntimeMeta = null;
     protected ?string $lastObservedRuntimeMetaSignature = null;
     protected bool $runtimeMetaLoadedFromCache = false;
+    /** @var array<string, string> */
+    protected static array $executablePathCache = [];
 
     /**
      * 绑定 gateway 与实例管理器，负责把当前运行态同步成 nginx 配置。
@@ -216,18 +223,18 @@ class GatewayNginxProxyHandler {
      */
     protected function validateManagedFilesLoaded(array $paths): void {
         $bin = $this->nginxBin();
-        $command = escapeshellarg($bin) . ' -T';
+        $command = [$bin, '-T'];
         $confPath = (string)($this->nginxRuntimeMeta()['conf_path'] ?? '');
         if ($confPath !== '') {
-            $command .= ' -c ' . escapeshellarg($confPath);
+            $command[] = '-c';
+            $command[] = $confPath;
         }
-        $command .= ' 2>&1';
-        exec($command, $output, $code);
-        if ($code !== 0) {
-            throw new RuntimeException("nginx 生效配置导出失败:\n" . implode("\n", $output));
+        $result = $this->runNginxProcess($command, self::NGINX_CONTROL_TIMEOUT_SECONDS);
+        if (!$this->nginxProcessSucceeded($result)) {
+            throw $this->nginxProcessFailure('nginx 生效配置导出失败', $result);
         }
 
-        $effectiveConfig = implode("\n", $output);
+        $effectiveConfig = $this->nginxProcessOutput($result);
         $missing = [];
         foreach (array_filter(array_unique($paths)) as $path) {
             $normalizedPath = str_replace('\\', '/', (string)$path);
@@ -1047,15 +1054,15 @@ class GatewayNginxProxyHandler {
      */
     protected function testNginxConfig(): void {
         $bin = $this->nginxBin();
-        $command = escapeshellarg($bin) . ' -t';
+        $command = [$bin, '-t'];
         $confPath = (string)($this->nginxRuntimeMeta()['conf_path'] ?? '');
         if ($confPath !== '') {
-            $command .= ' -c ' . escapeshellarg($confPath);
+            $command[] = '-c';
+            $command[] = $confPath;
         }
-        $command .= ' 2>&1';
-        exec($command, $output, $code);
-        if ($code !== 0) {
-            throw new RuntimeException("nginx 配置检测失败:\n" . implode("\n", $output));
+        $result = $this->runNginxProcess($command, self::NGINX_PROBE_TIMEOUT_SECONDS);
+        if (!$this->nginxProcessSucceeded($result)) {
+            throw $this->nginxProcessFailure('nginx 配置检测失败', $result);
         }
     }
 
@@ -1067,15 +1074,15 @@ class GatewayNginxProxyHandler {
      */
     protected function reloadNginx(): void {
         $bin = $this->nginxBin();
-        $command = escapeshellarg($bin) . ' -s reload';
+        $command = [$bin, '-s', 'reload'];
         $confPath = (string)($this->nginxRuntimeMeta()['conf_path'] ?? '');
         if ($confPath !== '') {
-            $command .= ' -c ' . escapeshellarg($confPath);
+            $command[] = '-c';
+            $command[] = $confPath;
         }
-        $command .= ' 2>&1';
-        exec($command, $output, $code);
-        if ($code !== 0) {
-            throw new RuntimeException("nginx 重载失败:\n" . implode("\n", $output));
+        $result = $this->runNginxProcess($command, self::NGINX_CONTROL_TIMEOUT_SECONDS);
+        if (!$this->nginxProcessSucceeded($result)) {
+            throw $this->nginxProcessFailure('nginx 重载失败', $result);
         }
     }
 
@@ -1087,15 +1094,15 @@ class GatewayNginxProxyHandler {
      */
     protected function startNginx(): void {
         $bin = $this->nginxBin();
-        $command = escapeshellarg($bin);
+        $command = [$bin];
         $confPath = (string)($this->nginxRuntimeMeta()['conf_path'] ?? '');
         if ($confPath !== '') {
-            $command .= ' -c ' . escapeshellarg($confPath);
+            $command[] = '-c';
+            $command[] = $confPath;
         }
-        $command .= ' 2>&1';
-        exec($command, $output, $code);
-        if ($code !== 0) {
-            throw new RuntimeException("nginx 启动失败:\n" . implode("\n", $output));
+        $result = $this->runNginxProcess($command, self::NGINX_CONTROL_TIMEOUT_SECONDS);
+        if (!$this->nginxProcessSucceeded($result)) {
+            throw $this->nginxProcessFailure('nginx 启动失败', $result);
         }
     }
 
@@ -1216,10 +1223,20 @@ class GatewayNginxProxyHandler {
             'conf_dir' => '',
         ];
 
-        $command = escapeshellarg($bin) . ' -V 2>&1';
-        exec($command, $output, $code);
-        if ($code === 0 || $output) {
-            $versionInfo = implode("\n", $output);
+        $versionResult = $this->runNginxProcess(
+            [$bin, '-V'],
+            self::NGINX_PROBE_TIMEOUT_SECONDS
+        );
+        $versionInfo = $this->nginxProcessOutput($versionResult);
+        if (
+            !$versionResult['started']
+            || $versionResult['timed_out']
+            || $versionResult['truncated']
+            || ($versionResult['exit_code'] !== 0 && trim($versionInfo) === '')
+        ) {
+            throw $this->nginxProcessFailure('nginx 版本信息探测失败', $versionResult);
+        }
+        if ($versionResult['exit_code'] === 0 || $versionInfo !== '') {
             if ($meta['conf_path'] === '') {
                 $meta['conf_path'] = $this->extractNginxBuildArg($versionInfo, 'conf-path');
             }
@@ -1357,17 +1374,19 @@ class GatewayNginxProxyHandler {
      * @return string 可执行文件路径或回退命令名。
      */
     protected function detectNginxBinary(): string {
-        $candidates = [];
-        $fromPath = trim((string)shell_exec('command -v nginx 2>/dev/null'));
-        if ($fromPath !== '') {
-            $candidates[] = $fromPath;
-        }
-        $candidates = array_merge($candidates, [
+        $fromPath = $this->resolveExecutableFromPath('nginx');
+        $candidates = [
+            $fromPath,
             '/usr/sbin/nginx',
             '/usr/local/sbin/nginx',
+            '/usr/local/bin/nginx',
+            '/usr/local/nginx/sbin/nginx',
             '/usr/local/openresty/nginx/sbin/nginx',
+            '/opt/local/sbin/nginx',
+            '/opt/homebrew/bin/nginx',
             '/opt/homebrew/opt/nginx/bin/nginx',
-        ]);
+            '/www/server/nginx/sbin/nginx',
+        ];
         foreach (array_unique($candidates) as $candidate) {
             if ($candidate !== '' && is_file($candidate) && is_executable($candidate)) {
                 return $candidate;
@@ -1387,24 +1406,14 @@ class GatewayNginxProxyHandler {
      * @return array{bin:string, conf_path:string} 运行中 nginx 的关键元数据。
      */
     protected function detectRunningNginxMeta(): array {
-        $commands = [
-            'ps -eo command= 2>/dev/null',
-            'ps ax -o command= 2>/dev/null',
-        ];
-        foreach ($commands as $command) {
-            $output = shell_exec($command);
-            if (!is_string($output) || trim($output) === '') {
+        foreach (ProcessInspector::snapshot() as $process) {
+            $line = trim((string)($process['command'] ?? ''));
+            if ($line === '' || !str_contains($line, 'nginx: master process')) {
                 continue;
             }
-            foreach (preg_split('/\r?\n/', trim($output)) as $line) {
-                $line = trim((string)$line);
-                if ($line === '' || !str_contains($line, 'nginx: master process')) {
-                    continue;
-                }
-                $meta = $this->parseRunningNginxMasterCommand($line);
-                if ($meta['bin'] !== '' || $meta['conf_path'] !== '') {
-                    return $meta;
-                }
+            $meta = $this->parseRunningNginxMasterCommand($line);
+            if ($meta['bin'] !== '' || $meta['conf_path'] !== '') {
+                return $meta;
             }
         }
         return ['bin' => '', 'conf_path' => ''];
@@ -1428,7 +1437,7 @@ class GatewayNginxProxyHandler {
         $parts = preg_split('/\s+/', $commandLine) ?: [];
         $bin = trim((string)($parts[0] ?? ''));
         if ($bin !== '' && !str_starts_with($bin, '/')) {
-            $resolved = trim((string)shell_exec('command -v ' . escapeshellarg($bin) . ' 2>/dev/null'));
+            $resolved = $this->resolveExecutableFromPath($bin);
             if ($resolved !== '') {
                 $bin = $resolved;
             }
@@ -1443,6 +1452,95 @@ class GatewayNginxProxyHandler {
             'bin' => $bin,
             'conf_path' => $confPath,
         ];
+    }
+
+    /**
+     * 直接从 PATH 目录扫描可执行文件，不派生 shell；结果按当前 PATH 缓存。
+     */
+    protected function resolveExecutableFromPath(string $binary): string {
+        $binary = trim($binary);
+        if ($binary === '') {
+            return '';
+        }
+        if (str_contains($binary, '/')) {
+            if (!is_file($binary) || !is_executable($binary)) {
+                return '';
+            }
+            return (string)(realpath($binary) ?: $binary);
+        }
+
+        $path = trim((string)getenv('PATH'));
+        $cacheKey = $binary . "\0" . $path;
+        if (array_key_exists($cacheKey, self::$executablePathCache)) {
+            return self::$executablePathCache[$cacheKey];
+        }
+
+        foreach (array_filter(explode(PATH_SEPARATOR, $path), 'strlen') as $directory) {
+            $candidate = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $binary;
+            if (is_file($candidate) && is_executable($candidate)) {
+                return self::$executablePathCache[$cacheKey] = (string)(realpath($candidate) ?: $candidate);
+            }
+        }
+        return self::$executablePathCache[$cacheKey] = '';
+    }
+
+    /**
+     * 不经过 shell 执行 nginx，并限制总运行时间与输出大小。
+     *
+     * @param array<int, string> $command
+     * @return array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool}
+     */
+    protected function runNginxProcess(array $command, float $timeoutSeconds): array {
+        return BoundedProcessRunner::run(
+            $command,
+            $timeoutSeconds,
+            self::NGINX_MAX_OUTPUT_BYTES
+        );
+    }
+
+    /**
+     * @param array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool} $result
+     */
+    protected function nginxProcessSucceeded(array $result): bool {
+        return $result['started']
+            && !$result['timed_out']
+            && !$result['truncated']
+            && $result['exit_code'] === 0;
+    }
+
+    /**
+     * 合并 nginx 分别写入 stdout/stderr 的内容，保留原有合并输出语义。
+     *
+     * @param array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool} $result
+     */
+    protected function nginxProcessOutput(array $result): string {
+        $chunks = [];
+        foreach ([$result['output'], $result['error']] as $content) {
+            $content = rtrim((string)$content, "\r\n");
+            if ($content !== '') {
+                $chunks[] = $content;
+            }
+        }
+        return implode("\n", $chunks);
+    }
+
+    /**
+     * 构造包含硬超时、退出码和两路输出的诊断异常。
+     *
+     * @param array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool} $result
+     */
+    protected function nginxProcessFailure(string $message, array $result): RuntimeException {
+        $stdout = trim((string)$result['output']);
+        $stderr = trim((string)$result['error']);
+        return new RuntimeException(
+            $message
+            . "\ntimed_out=" . ($result['timed_out'] ? 'true' : 'false')
+            . ', truncated=' . ($result['truncated'] ? 'true' : 'false')
+            . ', started=' . ($result['started'] ? 'true' : 'false')
+            . ', exit_code=' . (int)$result['exit_code']
+            . "\nstderr:\n" . ($stderr !== '' ? $stderr : '(empty)')
+            . "\nstdout:\n" . ($stdout !== '' ? $stdout : '(empty)')
+        );
     }
 
     /**

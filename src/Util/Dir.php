@@ -141,27 +141,34 @@ class Dir {
      * @return array 返回文件路径的数组
      */
     public static function find(string $dir, int $deep = -1): array {
-        $files = [];
-
         if (!is_dir($dir)) {
             echo "Not a directory: $dir\n";
+            return [];
+        }
+        if ($deep === 0) {
+            return [];
+        }
+
+        try {
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::LEAVES_ONLY
+            );
+            if ($deep > 0) {
+                // find -maxdepth=1 只包含目标目录的直接文件；迭代器深度从 0 开始。
+                $iterator->setMaxDepth($deep - 1);
+            }
+            $files = [];
+            foreach ($iterator as $fileInfo) {
+                if ($fileInfo->isFile()) {
+                    $files[] = $fileInfo->getPathname();
+                }
+            }
             return $files;
+        } catch (Exception $e) {
+            error_log("Error scanning directory {$dir}: " . $e->getMessage());
+            return [];
         }
-
-        // 构建 find 命令
-        $maxDepth = ($deep == -1) ? '' : "-maxdepth $deep";
-        $command = "find \"$dir\" $maxDepth -type f";
-
-        // 执行 find 命令并获取输出
-        exec($command, $output, $returnVar);
-
-        if ($returnVar === 0) {
-            $files = $output;
-        } else {
-            echo "Error executing find command.\n";
-        }
-
-        return $files;
     }
 
     /**

@@ -23,18 +23,31 @@ class GatewayHealthMonitorProcess extends AbstractRuntimeProcess {
         return new Process(function (Process $process) {
             run(function () use ($process) {
                 $this->call('mark_gateway_sub_process_context');
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time());
+                $managerGeneration = $this->captureManagerGeneration();
+                $processPid = getmypid() ?: 0;
+                if (!$this->claimRuntimeOwnership(
+                    $managerGeneration,
+                    Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+                    Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT,
+                    $processPid
+                )) {
+                    return;
+                }
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_HEALTH_MONITOR_TRACE_SNAPSHOT, '');
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【GatewayHealth】健康检查PID:" . $process->pid, false);
                 }
                 $socket = $process->exportSocket();
-                while (true) {
+                try {
+                    while (true) {
                     $loopStartedAt = microtime(true);
 
                     $aliveCheckStartedAt = microtime(true);
-                    $serverAlive = Runtime::instance()->serverIsAlive();
+                    $serverAlive = !$this->managedRuntimeShouldStop(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+                        $processPid
+                    );
                     $this->call('trace_heartbeat_step', 'GatewayHealth.loop.server_alive', $aliveCheckStartedAt, [
                         'alive' => $serverAlive ? 1 : 0,
                     ]);
@@ -45,7 +58,12 @@ class GatewayHealthMonitorProcess extends AbstractRuntimeProcess {
                     }
 
                     $touchStartedAt = microtime(true);
-                    $this->call('touch_managed_heartbeat', Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT, time(), 'GatewayHealthMonitor');
+                    $this->touchRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+                        Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT,
+                        $processPid
+                    );
                     $this->call('trace_heartbeat_step', 'GatewayHealth.loop.touch_heartbeat', $touchStartedAt);
 
                     $readyCheckStartedAt = microtime(true);
@@ -73,6 +91,14 @@ class GatewayHealthMonitorProcess extends AbstractRuntimeProcess {
                         break;
                     }
                     $this->call('trace_heartbeat_step', 'GatewayHealth.loop.total', $loopStartedAt);
+                    }
+                } finally {
+                    $this->clearRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
+                        Key::RUNTIME_GATEWAY_HEALTH_MONITOR_HEARTBEAT_AT,
+                        $processPid
+                    );
                 }
             });
         });

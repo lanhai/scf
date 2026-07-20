@@ -31,17 +31,34 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
             run(function () use ($process) {
                 $this->call('mark_gateway_sub_process_context');
                 App::mount();
-                Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID, (int)$process->pid);
+                $managerGeneration = $this->captureManagerGeneration();
+                $processPid = getmypid() ?: 0;
+                if (!$this->claimRuntimeOwnership(
+                    $managerGeneration,
+                    Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                    Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+                    $processPid
+                )) {
+                    return;
+                }
                 Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT, '');
-                $this->call('touch_managed_heartbeat', Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【GatewayCluster】集群协调PID:" . $process->pid, false);
                 }
-                if (App::isMaster()) {
-                    $this->runMasterLoop($process);
-                    return;
+                try {
+                    if (App::isMaster()) {
+                        $this->runMasterLoop($process, $managerGeneration, $processPid);
+                        return;
+                    }
+                    $this->runSlaveLoop($process, $managerGeneration, $processPid);
+                } finally {
+                    $this->clearRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                        Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+                        $processPid
+                    );
                 }
-                $this->runSlaveLoop($process);
             });
         });
     }
@@ -50,7 +67,7 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
      * @param Process $process
      * @return void
      */
-    protected function runMasterLoop(Process $process): void {
+    protected function runMasterLoop(Process $process, string $managerGeneration, int $processPid): void {
         MemoryMonitor::start('GatewayCluster');
         $processSocket = $process->exportSocket();
         $lastTickAt = 0;
@@ -59,14 +76,24 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
             $this->call('update_gateway_cluster_trace_snapshot', 'master.loop.start', [
                 'pid' => (int)$process->pid,
             ]);
-            if (!Runtime::instance()->serverIsAlive()) {
-                Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
+            if ($this->managedRuntimeShouldStop(
+                $managerGeneration,
+                Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                $processPid
+            )) {
+                Console::warning('【GatewayCluster】manager 代际或服务器生命周期已结束,当前实例退出', false);
                 MemoryMonitor::stop();
                 $this->call('exit_coroutine_runtime');
                 return;
             }
             $now = time();
-            $this->call('touch_managed_heartbeat', Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, $now, 'GatewayClusterCoordinator');
+            $this->touchRuntimeOwnershipIfCurrent(
+                $managerGeneration,
+                Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+                $processPid,
+                $now
+            );
             $this->call('update_gateway_cluster_trace_snapshot', 'master.loop.heartbeat_touched', [
                 'now' => $now,
             ]);
@@ -105,15 +132,19 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
      * @param Process $process
      * @return void
      */
-    protected function runSlaveLoop(Process $process): void {
+    protected function runSlaveLoop(Process $process, string $managerGeneration, int $processPid): void {
         MemoryMonitor::start('GatewayCluster');
         $processSocket = $process->exportSocket();
         while (true) {
             $this->call('update_gateway_cluster_trace_snapshot', 'slave.connect.start', [
                 'pid' => (int)$process->pid,
             ]);
-            if (!Runtime::instance()->serverIsAlive()) {
-                Console::warning('【GatewayCluster】服务器已关闭,结束运行', false);
+            if ($this->managedRuntimeShouldStop(
+                $managerGeneration,
+                Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                $processPid
+            )) {
+                Console::warning('【GatewayCluster】manager 代际或服务器生命周期已结束,当前实例退出', false);
                 MemoryMonitor::stop();
                 return;
             }
@@ -124,7 +155,11 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
                 while (true) {
                     $loopStartedAt = microtime(true);
                     $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.start');
-                    if (!Runtime::instance()->serverIsAlive()) {
+                    if ($this->managedRuntimeShouldStop(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                        $processPid
+                    )) {
                         try {
                             $socket->close();
                         } catch (Throwable) {
@@ -134,7 +169,12 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
                         $this->call('exit_coroutine_runtime');
                         return;
                     }
-                    $this->call('touch_managed_heartbeat', Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT, time(), 'GatewayClusterCoordinator');
+                    $this->touchRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                        Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_HEARTBEAT_AT,
+                        $processPid
+                    );
                     $this->call('update_gateway_cluster_trace_snapshot', 'slave.loop.heartbeat_touched');
                     if ((time() - $lastKeepaliveAt) >= 15) {
                         try {
@@ -205,7 +245,11 @@ class GatewayClusterCoordinatorProcess extends AbstractRuntimeProcess {
                     MemoryMonitor::updateUsage('GatewayCluster');
                 }
             } catch (Throwable $throwable) {
-                if (!Runtime::instance()->serverIsAlive()) {
+                if ($this->managedRuntimeShouldStop(
+                    $managerGeneration,
+                    Key::RUNTIME_GATEWAY_CLUSTER_COORDINATOR_PID,
+                    $processPid
+                )) {
                     MemoryMonitor::stop();
                     $this->call('exit_coroutine_runtime');
                     return;

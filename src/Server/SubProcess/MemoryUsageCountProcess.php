@@ -29,15 +29,39 @@ class MemoryUsageCountProcess extends AbstractRuntimeProcess {
             $this->call('mark_gateway_sub_process_context');
             $commandPipe = fopen('php://fd/' . $process->pipe, 'r');
             is_resource($commandPipe) and stream_set_blocking($commandPipe, false);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, (int)$process->pid);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
+            $managerGeneration = $this->captureManagerGeneration();
+            $processPid = getmypid() ?: 0;
+            if (!$this->claimRuntimeOwnership(
+                $managerGeneration,
+                Key::RUNTIME_MEMORY_MONITOR_PID,
+                Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT,
+                $processPid
+            )) {
+                is_resource($commandPipe) and fclose($commandPipe);
+                return;
+            }
             if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                 Console::info("【MemoryMonitor】内存监控PID:" . $process->pid, false);
             }
             MemoryMonitor::start('MemoryMonitor');
             $nextTickAt = 0.0;
             while (true) {
-                Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, time());
+                if ($this->managedRuntimeShouldStop(
+                    $managerGeneration,
+                    Key::RUNTIME_MEMORY_MONITOR_PID,
+                    $processPid,
+                    $commandPipe,
+                    true
+                )) {
+                    MemoryMonitor::stop();
+                    break;
+                }
+                $this->touchRuntimeOwnershipIfCurrent(
+                    $managerGeneration,
+                    Key::RUNTIME_MEMORY_MONITOR_PID,
+                    Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT,
+                    $processPid
+                );
                 $msg = is_resource($commandPipe) ? stream_get_contents($commandPipe) : '';
                 if ($msg === false) {
                     $msg = '';
@@ -51,6 +75,14 @@ class MemoryUsageCountProcess extends AbstractRuntimeProcess {
                 if (microtime(true) >= $nextTickAt) {
                     try {
                         $processList = MemoryMonitorTable::instance()->rows();
+                        // 系统内存与所有 PID 都在本轮统一采样。Darwin 下由过去的
+                        // N 次 ps + 3 次系统命令，收敛为 1 次 ps + 1 次 vm_stat
+                        //（hw.memsize 仅冷启动一次），并把 last-good 写入共享 Runtime。
+                        MemoryMonitor::refreshSystemMemorySnapshot(true);
+                        $memoryByPid = MemoryMonitor::getPssRssByPids(array_map(
+                            static fn(array $row): int => (int)($row['pid'] ?? 0),
+                            array_values(array_filter($processList, 'is_array'))
+                        ), true);
                         if ($processList) {
                             foreach ($processList as $processInfo) {
                                 $processName = $processInfo['process'];
@@ -61,7 +93,7 @@ class MemoryUsageCountProcess extends AbstractRuntimeProcess {
                                     continue;
                                 }
 
-                                $mem = MemoryMonitor::getPssRssByPid($pid);
+                                $mem = $memoryByPid[$pid] ?? ['pss_kb' => null, 'rss_kb' => null];
                                 $rss = isset($mem['rss_kb']) ? round($mem['rss_kb'] / 1024, 1) : null;
                                 $pss = isset($mem['pss_kb']) ? round($mem['pss_kb'] / 1024, 1) : null;
                                 $osActualMb = $pss ?? $rss;
@@ -109,8 +141,12 @@ class MemoryUsageCountProcess extends AbstractRuntimeProcess {
 
                 usleep(200000);
             }
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_MEMORY_MONITOR_PID, 0);
+            $this->clearRuntimeOwnershipIfCurrent(
+                $managerGeneration,
+                Key::RUNTIME_MEMORY_MONITOR_PID,
+                Key::RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT,
+                $processPid
+            );
             is_resource($commandPipe) and fclose($commandPipe);
         }, false, SOCK_DGRAM);
     }

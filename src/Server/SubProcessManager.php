@@ -42,6 +42,7 @@ class SubProcessManager {
     protected const PROCESS_HEARTBEAT_HANDLE_COOLDOWN_SECONDS = 30;
     protected const HEARTBEAT_COUNTER_PREFIX = '__hb__:';
     protected const HEARTBEAT_WRITE_FAIL_WARNING_INTERVAL_SECONDS = 30;
+    protected const GATEWAY_CLUSTER_TICK_PENDING_STALE_SECONDS = 5;
     protected const TEMP_HEARTBEAT_TRACE_ENABLED = false;
 
     /**
@@ -69,9 +70,17 @@ class SubProcessManager {
     protected array $processLastRespawnAttemptAt = [];
     protected array $processLastStaleHandleAt = [];
     protected array $manualStoppedProcesses = [];
+    protected array $intentionalManagedProcessRestarts = [];
     protected array $heartbeatWriteFailWarnAt = [];
+    protected ?ProcessRespawnBackoff $processRespawnBackoff = null;
+    /**
+     * 在 server 父进程构造阶段生成，Swoole 自动重建 manager 时各代继承同一值。
+     */
+    protected string $rootProcessInstanceToken;
+    protected ?RootProcessRespawnGuard $rootProcessRespawnGuard = null;
 
     public function __construct(Server $server, $serverConfig, array $options = []) {
+        $this->rootProcessInstanceToken = RootProcessRespawnGuard::newInstanceToken();
         $this->server = $server;
         $this->serverConfig = $serverConfig;
         $this->assertGatewayControlPlaneRuntime();
@@ -221,14 +230,37 @@ class SubProcessManager {
      */
     protected function createManagerProcess(): Process {
         return new Process(function (Process $process) {
-            $process->setBlocking(false);
-            while (true) {
-                if (Runtime::instance()->serverIsReady() && App::isReady()) {
-                    break;
+            $guard = new RootProcessRespawnGuard(
+                'SubProcessManager['
+                    . (defined('APP_DIR_NAME') ? APP_DIR_NAME : 'app')
+                    . ':' . (defined('SERVER_ROLE') ? SERVER_ROLE : 'node')
+                    . ']',
+                $this->rootProcessInstanceToken
+            );
+            $this->rootProcessRespawnGuard = $guard;
+            $guard->begin();
+            $intentionalExit = false;
+            try {
+                $process->setBlocking(false);
+                while (true) {
+                    if (Runtime::instance()->serverIsReady() && App::isReady()) {
+                        break;
+                    }
+                    if (
+                        Runtime::instance()->serverIsDraining()
+                        && !Runtime::instance()->serverIsAlive()
+                    ) {
+                        $intentionalExit = true;
+                        return;
+                    }
+                    usleep(100000);
                 }
-                usleep(100000);
+                $this->run($process);
+                $intentionalExit = true;
+            } finally {
+                $guard->finish($intentionalExit);
+                $this->rootProcessRespawnGuard = null;
             }
-            $this->run($process);
         });
     }
 
@@ -245,11 +277,28 @@ class SubProcessManager {
     private function run(Process $managerProcess): void {
         $shutdownRequested = false;
         $shutdownDispatched = false;
-        Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_PID, getmypid());
+        $managerPid = getmypid();
+        $managerGeneration = $this->rootProcessRespawnGuard?->generationToken() ?? '';
+        if ($managerGeneration === '') {
+            throw new \RuntimeException('SubProcessManager generation token is empty');
+        }
+        $runtime = Runtime::instance();
+        if (
+            !$runtime->set(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION, $managerGeneration)
+            || !hash_equals(
+                $managerGeneration,
+                (string)($runtime->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? '')
+            )
+        ) {
+            throw new \RuntimeException('SubProcessManager generation publish failed');
+        }
+        Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_PID, $managerPid);
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, time());
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, 0);
         $this->manualStoppedProcesses = [];
+        $this->intentionalManagedProcessRestarts = [];
+        $this->processRespawnBackoff = new ProcessRespawnBackoff();
         $this->flushSubprocessControlState();
         try {
             if ($this->consolePushProcess) {
@@ -276,6 +325,7 @@ class SubProcessManager {
                 }
                 Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, time());
                 Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, count($this->aliveManagedProcesses()));
+                $this->rootProcessRespawnGuard?->markStable();
                 // 先消费 manager 自己的控制命令，确保 shutdown/restart 指令能在回收退出子进程前生效，
                 // 避免同一轮里刚收到 shutdown，又把刚退出的子进程重新拉起。
                 $message = @$managerProcess->read();
@@ -334,6 +384,9 @@ class SubProcessManager {
                         $currentProcess = $this->processList[$oldProcessName] ?? null;
                         $currentPid = $currentProcess instanceof Process ? (int)($currentProcess->pid ?? 0) : 0;
                         if ($currentPid > 0 && $currentPid !== $pid) {
+                            if ((int)($this->intentionalManagedProcessRestarts[$oldProcessName] ?? 0) === $pid) {
+                                unset($this->intentionalManagedProcessRestarts[$oldProcessName]);
+                            }
                             Console::warning("【{$oldProcessName}】旧子进程#{$pid}已退出，当前接管PID:{$currentPid}");
                             continue;
                         }
@@ -343,7 +396,26 @@ class SubProcessManager {
                             continue;
                         }
                         if ($this->isManagedProcessManuallyStopped($oldProcessName)) {
+                            unset($this->intentionalManagedProcessRestarts[$oldProcessName]);
                             $this->clearManagedProcessRuntimeState($oldProcessName);
+                            continue;
+                        }
+                        // 退出事件一旦确认，立即清理上一代 pid/heartbeat。退避窗口内
+                        // 其它状态消费者不得把已退出的 monitor/coordinator 当成存活。
+                        $this->clearManagedProcessRuntimeState($oldProcessName);
+                        $intentionalRestart = (int)($this->intentionalManagedProcessRestarts[$oldProcessName] ?? 0) === $pid;
+                        if ($intentionalRestart) {
+                            unset($this->intentionalManagedProcessRestarts[$oldProcessName]);
+                        }
+                        if ($intentionalRestart) {
+                            $this->managedProcessRespawnBackoff()->reset($oldProcessName);
+                            $retryDelay = 0;
+                        } else {
+                            $retryDelay = $this->managedProcessRespawnBackoff()->recordExit($oldProcessName);
+                        }
+                        if ($retryDelay > 0) {
+                            Console::warning("【{$oldProcessName}】子进程#{$pid}短时退出，{$retryDelay}s 后重试");
+                            $this->flushSubprocessControlState();
                             continue;
                         }
                         Console::warning("【{$oldProcessName}】子进程#{$pid}退出，准备重启");
@@ -355,13 +427,34 @@ class SubProcessManager {
                 usleep(200000);
             }
         } finally {
-            Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, 0);
-            Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
-            Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, 0);
-            Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_PID, 0);
+            if ($this->ownsSubprocessManagerGeneration($managerGeneration, $managerPid)) {
+                Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_ALIVE_COUNT, 0);
+                Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_SHUTTING_DOWN, false);
+                Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT, 0);
+                if ($this->ownsSubprocessManagerGeneration($managerGeneration, $managerPid)) {
+                    Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_PID, 0);
+                    if (hash_equals(
+                        $managerGeneration,
+                        (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? '')
+                    )) {
+                        Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION, '');
+                    }
+                }
+            }
             $this->manualStoppedProcesses = [];
-            $this->flushSubprocessControlState();
+            $this->intentionalManagedProcessRestarts = [];
         }
+    }
+
+    /**
+     * 判断共享运行态是否仍由指定 manager 代际持有。
+     */
+    protected function ownsSubprocessManagerGeneration(string $generation, int $pid): bool {
+        $currentGeneration = Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION);
+        return $generation !== ''
+            && is_string($currentGeneration)
+            && hash_equals($generation, $currentGeneration)
+            && (int)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_PID) ?? 0) === $pid;
     }
 
     /**
@@ -381,6 +474,14 @@ class SubProcessManager {
                 $targets = array_values(array_filter($targets, fn(string $target): bool => $this->hasProcess($target)));
                 if (!$targets) {
                     return false;
+                }
+                foreach ($targets as $target) {
+                    $process = $this->processList[$target] ?? null;
+                    $pid = $process instanceof Process ? (int)($process->pid ?? 0) : 0;
+                    if ($pid > 0 && @Process::kill($pid, 0)) {
+                        $this->managedProcessRespawnBackoff()->reset($target);
+                        $this->intentionalManagedProcessRestarts[$target] = $pid;
+                    }
                 }
                 $this->bumpProcessGenerations($targets);
                 $this->sendCommandToProcesses('upgrade', [], $targets);
@@ -488,14 +589,18 @@ class SubProcessManager {
     protected function restartManagedProcessesDirect(array $targets): void {
         foreach ($targets as $name) {
             $this->setManagedProcessManualStopped($name, false);
+            $this->managedProcessRespawnBackoff()->reset($name);
             $process = $this->processList[$name] ?? null;
             if (!$process instanceof Process) {
                 continue;
             }
             $pid = (int)($process->pid ?? 0);
             if ($pid > 0 && @Process::kill($pid, 0)) {
-                @Process::kill($pid, SIGTERM);
-                continue;
+                if (@Process::kill($pid, SIGTERM)) {
+                    $this->intentionalManagedProcessRestarts[$name] = $pid;
+                    continue;
+                }
+                unset($this->intentionalManagedProcessRestarts[$name]);
             }
             $this->recreateManagedProcess($name);
         }
@@ -512,6 +617,7 @@ class SubProcessManager {
      */
     protected function stopManagedProcessesDirect(array $targets): void {
         foreach ($targets as $name) {
+            unset($this->intentionalManagedProcessRestarts[$name]);
             $this->setManagedProcessManualStopped($name, true);
             $process = $this->processList[$name] ?? null;
             if (!$process instanceof Process) {
@@ -558,8 +664,16 @@ class SubProcessManager {
     protected function flushSubprocessControlState(): void {
         Runtime::instance()->set(Key::RUNTIME_SUBPROCESS_CONTROL_STATE, [
             'manual_stopped' => array_values(array_keys($this->manualStoppedProcesses)),
+            'respawn_backoff' => $this->processRespawnBackoff?->allStates() ?? [],
             'updated_at' => time(),
         ]);
+    }
+
+    /**
+     * 返回 manager 进程内唯一的 crash-loop 退避器。
+     */
+    protected function managedProcessRespawnBackoff(): ProcessRespawnBackoff {
+        return $this->processRespawnBackoff ??= new ProcessRespawnBackoff();
     }
 
     /**
@@ -591,18 +705,29 @@ class SubProcessManager {
      * @return bool 是否重建成功
      */
     protected function recreateManagedProcess(string $name): bool {
-        $newProcess = match ($name) {
-            'GatewayClusterCoordinator' => $this->createGatewayClusterCoordinatorProcess(),
-            'MemoryUsageCount' => $this->createMemoryUsageCountProcess(),
-            'GatewayBusinessCoordinator' => $this->createGatewayBusinessCoordinatorProcess(),
-            'GatewayHealthMonitor' => $this->createGatewayHealthMonitorProcess(),
-            'Heartbeat' => $this->createHeartbeatProcess(),
-            'LogBackup' => $this->createLogBackupProcess(),
-            'CrontabManager' => $this->createCrontabManagerProcess(),
-            'FileWatch' => $this->createFileWatchProcess(),
-            'RedisQueue' => $this->createRedisQueueProcess(),
-            default => null,
-        };
+        if (!$this->managedProcessRespawnBackoff()->canStart($name)) {
+            return false;
+        }
+        try {
+            $newProcess = match ($name) {
+                'GatewayClusterCoordinator' => $this->createGatewayClusterCoordinatorProcess(),
+                'MemoryUsageCount' => $this->createMemoryUsageCountProcess(),
+                'GatewayBusinessCoordinator' => $this->createGatewayBusinessCoordinatorProcess(),
+                'GatewayHealthMonitor' => $this->createGatewayHealthMonitorProcess(),
+                'Heartbeat' => $this->createHeartbeatProcess(),
+                'LogBackup' => $this->createLogBackupProcess(),
+                'CrontabManager' => $this->createCrontabManagerProcess(),
+                'FileWatch' => $this->createFileWatchProcess(),
+                'RedisQueue' => $this->createRedisQueueProcess(),
+                default => null,
+            };
+        } catch (Throwable $throwable) {
+            $delay = $this->managedProcessRespawnBackoff()->recordStartFailure($name);
+            $this->clearManagedProcessRuntimeState($name);
+            $this->flushSubprocessControlState();
+            Console::warning("【{$name}】子进程工厂异常，{$delay}s 后重试: " . $throwable->getMessage());
+            return false;
+        }
         if (!$newProcess instanceof Process) {
             return false;
         }
@@ -629,16 +754,22 @@ class SubProcessManager {
         try {
             $startedPid = (int)($process->start() ?: 0);
         } catch (Throwable $throwable) {
+            $this->managedProcessRespawnBackoff()->recordStartFailure($name);
+            $this->flushSubprocessControlState();
             Console::warning("【{$name}】子进程启动异常: " . $throwable->getMessage());
             return false;
         }
         $pid = $startedPid > 0 ? $startedPid : (int)($process->pid ?? 0);
         if ($pid <= 0 || !@Process::kill($pid, 0)) {
+            $this->managedProcessRespawnBackoff()->recordStartFailure($name);
+            $this->flushSubprocessControlState();
             Console::warning("【{$name}】子进程启动失败: pid=0");
             return false;
         }
         $this->pidList[$pid] = $name;
+        $this->managedProcessRespawnBackoff()->recordStarted($name);
         unset($this->processLastRespawnAttemptAt[$name], $this->processLastStaleHandleAt[$name]);
+        $this->flushSubprocessControlState();
         if ($recreated) {
             Console::warning("【{$name}】子进程已重拉，PID:{$pid}");
         }
@@ -670,6 +801,9 @@ class SubProcessManager {
                 if ($pid > 0) {
                     unset($this->pidList[$pid]);
                 }
+                if (!$this->managedProcessRespawnBackoff()->canStart($name, $now)) {
+                    continue;
+                }
                 $lastAttemptAt = (int)($this->processLastRespawnAttemptAt[$name] ?? 0);
                 if (($now - $lastAttemptAt) < self::PROCESS_RESPAWN_RETRY_SECONDS) {
                     continue;
@@ -680,6 +814,9 @@ class SubProcessManager {
                     Console::warning("【{$name}】子进程重拉失败，等待下轮重试");
                 }
                 continue;
+            }
+            if ($this->managedProcessRespawnBackoff()->markStable($name, $now)) {
+                $this->flushSubprocessControlState();
             }
 
             $heartbeatKey = $this->managedProcessHeartbeatRuntimeKey($name);
@@ -1506,12 +1643,33 @@ class SubProcessManager {
      * @return bool 是否成功投递到 worker pipe
      */
     protected function sendGatewayPipeMessage(string $event, array $data = []): bool {
+        $coalesceClusterTick = $event === 'gateway_cluster_tick';
+        if ($coalesceClusterTick) {
+            $now = time();
+            $pendingAt = (int)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT) ?? 0);
+            if (
+                $pendingAt > 0
+                && $pendingAt <= ($now + 1)
+                && ($now - $pendingAt) < self::GATEWAY_CLUSTER_TICK_PENDING_STALE_SECONDS
+            ) {
+                return true;
+            }
+            // worker pipe 投递成功但消费方异常退出时，pending 不得永久阻断后续 tick。
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT, $now);
+        }
         try {
-            return (bool)$this->server->sendMessage(JsonHelper::toJson([
+            $sent = (bool)$this->server->sendMessage(JsonHelper::toJson([
                 'event' => $event,
                 'data' => $data,
             ]), 0);
+            if (!$sent && $coalesceClusterTick) {
+                Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT, 0);
+            }
+            return $sent;
         } catch (Throwable) {
+            if ($coalesceClusterTick) {
+                Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT, 0);
+            }
             return false;
         }
     }

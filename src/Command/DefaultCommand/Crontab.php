@@ -12,6 +12,7 @@ use Scf\Core\Env;
 use Scf\Core\Server;
 use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Task\Crontab as TaskCrontab;
+use Scf\Util\ProcessInspector;
 use Swoole\Coroutine;
 use Throwable;
 use function Swoole\Coroutine\run;
@@ -596,14 +597,7 @@ class Crontab implements CommandInterface {
             }
         }
 
-        $ps = trim((string)@shell_exec('command -v ps'));
-        if ($ps === '') {
-            return '';
-        }
-
-        $output = [];
-        @exec($ps . ' -p ' . (int)$pid . ' -o command= 2>/dev/null', $output);
-        return trim(implode(' ', $output));
+        return ProcessInspector::command($pid, true);
     }
 
     /**

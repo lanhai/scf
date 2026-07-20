@@ -529,8 +529,8 @@ trait GatewayClusterHeartbeatTrait {
      *
      * @return void
      */
-    protected function refreshLocalGatewayNodeStatus(): void {
-        ServerNodeStatusTable::instance()->set('localhost', $this->buildGatewayClusterNode());
+    protected function refreshLocalGatewayNodeStatus(?array $upstreams = null): void {
+        ServerNodeStatusTable::instance()->set('localhost', $this->buildGatewayClusterNode($upstreams));
     }
 
     protected function buildRemoteGatewayNodes(): array {
@@ -550,9 +550,9 @@ trait GatewayClusterHeartbeatTrait {
      *
      * @return array<string, mixed>
      */
-    protected function buildGatewayClusterNode(): array {
+    protected function buildGatewayClusterNode(?array $upstreams = null): array {
         $previousNode = (array)(ServerNodeStatusTable::instance()->get('localhost') ?: []);
-        $node = $this->buildGatewayNode();
+        $node = $this->buildGatewayNode($upstreams);
         $node['host'] = 'localhost';
         $node['id'] = APP_NODE_ID;
         $node['appid'] = App::id() ?: 'scf_app';

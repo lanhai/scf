@@ -14,6 +14,7 @@ use Scf\Core\Table\Counter;
 use Scf\Core\Table\CrontabTable;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
+use Scf\Server\ProcessRespawnBackoff;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Swoole\Process;
@@ -22,8 +23,12 @@ use Symfony\Component\Console\Output\ConsoleOutput;
 use Throwable;
 
 class CrontabManager {
+    private const TASK_RESPAWN_STATE_KEY_PREFIX = 'r_ctrs_';
+
     protected static array $tasks = [];
     protected static array $_instances = [];
+    protected static ?ProcessRespawnBackoff $taskRespawnBackoff = null;
+    protected static array $loadedTaskRespawnStates = [];
 
     /**
      * @throws Exception
@@ -43,11 +48,10 @@ class CrontabManager {
      * 加载定时任务
      * @return void
      */
-    private static function load(): void {
+    private static function load(int $managerId, string $managerGeneration): void {
         self::$tasks = [];
         $serverConfig = Config::server();
         $list = [];
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         $enableStatistics = $serverConfig['db_statistics_enable'] ?? false;
         if (App::isMaster() && $enableStatistics) {
             $list[] = [
@@ -83,8 +87,13 @@ class CrontabManager {
             foreach ($list as $task) {
                 $task['id'] = 'CRONTAB:' . md5(App::id() . $task['namespace']);
                 $task['manager_id'] = $managerId;
+                $task['manager_generation'] = $managerGeneration;
                 $task['created'] = time();
                 $task['timeout'] = $task['timeout'] ?? 3600;
+                $respawnState = self::taskRespawnState($task['id']);
+                $task['respawn_attempts'] = (int)($respawnState['attempts'] ?? 0);
+                $task['next_retry_at'] = (int)($respawnState['next_retry_at'] ?? 0);
+                $task['respawn_exit_recorded'] = 0;
                 self::$tasks[substr($task['namespace'], 1)] = $task;
             }
         }
@@ -96,30 +105,76 @@ class CrontabManager {
      * 开启进程
      * @return array
      */
-    public static function start(): array {
-        if (!App::isReady() || SERVER_CRONTAB_ENABLE != SWITCH_ON) {
+    public static function start(?int $managerId = null, ?string $managerGeneration = null): array {
+        $managerId ??= (int)(Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS) ?: 0);
+        $managerGeneration = trim((string)($managerGeneration
+            ?? Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION)
+            ?? ''));
+        if (
+            !App::isReady()
+            || SERVER_CRONTAB_ENABLE != SWITCH_ON
+            || $managerId <= 0
+            || !self::managerGenerationIsCurrent($managerGeneration)
+        ) {
             return [];
         }
-        $process = new Process(function () {
+        $process = new Process(function () use ($managerId, $managerGeneration) {
+            if (!self::managerGenerationIsCurrent($managerGeneration)) {
+                return;
+            }
             App::mount();
-            self::load();
+            self::load($managerId, $managerGeneration);
             if (self::$tasks) {
                 foreach (self::$tasks as $task) {
-                    static::add($task['id'], $task);
+                    static::addIfOwnedGeneration($task['id'], $task, $managerId, $managerGeneration);
                 }
             }
         });
-        $process->start();
-        Process::wait();
+        $loaderPid = (int)($process->start() ?: 0);
+        if ($loaderPid <= 0) {
+            return [];
+        }
+        while ($ret = Process::wait(false)) {
+            if ((int)($ret['pid'] ?? 0) === $loaderPid) {
+                break;
+            }
+        }
+        if (@Process::kill($loaderPid, 0)) {
+            Process::wait();
+        }
+        if (!self::managerGenerationIsCurrent($managerGeneration)) {
+            return [];
+        }
         sleep(1);
-        $taskList = static::getTaskTable();
+        $taskList = array_filter(
+            static::getTaskTable(),
+            static fn(array $task): bool => self::taskMatchesOwner(
+                $task,
+                $managerId,
+                $managerGeneration
+            )
+        );
         if (!$taskList) {
             //没有任务返回空等待下一轮查询
             return [];
         }
-        $managerId = Counter::instance()->get(Key::COUNTER_CRONTAB_PROCESS);
         Console::info("【Crontab】#{$managerId} 开始创建任务进程");
         foreach ($taskList as &$task) {
+            if (!self::managerGenerationIsCurrent($managerGeneration)) {
+                break;
+            }
+            if (!static::canStartTask($task['id'])) {
+                $state = static::taskRespawnState($task['id']);
+                static::updateTaskTableIfOwned($task['id'], $managerId, $managerGeneration, [
+                    'pid' => 0,
+                    'process_is_alive' => STATUS_OFF,
+                    'respawn_attempts' => (int)($state['attempts'] ?? 0),
+                    'next_retry_at' => (int)($state['next_retry_at'] ?? 0),
+                    'respawn_exit_recorded' => 1,
+                ]);
+                $task['pid'] = 0;
+                continue;
+            }
             $task['pid'] = static::createTaskProcess($task);
         }
         $output = new ConsoleOutput();
@@ -154,7 +209,26 @@ class CrontabManager {
      * @return bool|int|array
      */
     public static function createTaskProcess($task, int $restartNum = 0): bool|int|array {
-        $process = new Process(function (Process $process) use ($task) {
+        $taskId = (string)($task['id'] ?? '');
+        $managerId = (int)($task['manager_id'] ?? 0);
+        $managerGeneration = (string)($task['manager_generation'] ?? '');
+        if (
+            $taskId === ''
+            || !self::canStartTask($taskId)
+            || !self::managerGenerationIsCurrent($managerGeneration)
+            || !self::taskMatchesOwner(
+                self::getTaskTableById($taskId),
+                $managerId,
+                $managerGeneration,
+                (int)($task['pid'] ?? 0)
+            )
+        ) {
+            return 0;
+        }
+        $process = new Process(function (Process $process) use ($task, $managerGeneration) {
+            if (!self::managerGenerationIsCurrent($managerGeneration)) {
+                return;
+            }
             App::mount();
             // 保留 task 级 fatal 记录，避免这次 warning 修复把原有错误观测链一起删掉。
             register_shutdown_function(function () use ($task) {
@@ -175,16 +249,195 @@ class CrontabManager {
                 }
             }
         }, false, 0, true);
-        $pid = $process->start();
-        self::updateTaskTable($task['id'], [
+        try {
+            $pid = (int)($process->start() ?: 0);
+        } catch (Throwable $throwable) {
+            $pid = 0;
+            Console::warning("【Crontab】{$task['namespace']} 任务进程启动异常: " . $throwable->getMessage());
+        }
+        if ($pid <= 0) {
+            $delay = self::recordTaskStartFailure($task);
+            Console::warning("【Crontab】{$task['namespace']} 任务进程启动失败，{$delay}s 后重试");
+            return 0;
+        }
+        if (
+            !self::managerGenerationIsCurrent($managerGeneration)
+            || !self::taskMatchesOwner(
+                self::getTaskTableById($taskId),
+                $managerId,
+                $managerGeneration,
+                (int)($task['pid'] ?? 0)
+            )
+        ) {
+            @Process::kill($pid, SIGTERM);
+            return 0;
+        }
+        self::recordTaskStarted($task, $pid);
+        self::updateTaskTableIfOwned($task['id'], $managerId, $managerGeneration, [
             'namespace' => $task['namespace'],
             'pid' => $pid,
             'process_is_alive' => STATUS_ON,
             'restart_num' => $restartNum,
-            'manager_id' => $task['manager_id']
+            'manager_id' => $task['manager_id'],
+            'manager_generation' => $managerGeneration,
+            'respawn_exit_recorded' => 0,
         ]);
-        Process::wait(false);
         return $pid;
+    }
+
+    /**
+     * 判断任务是否已到允许重拉的时间。
+     */
+    public static function canStartTask(string $taskId, ?int $now = null): bool {
+        self::loadTaskRespawnState($taskId);
+        return self::taskRespawnBackoff()->canStart($taskId, $now);
+    }
+
+    /**
+     * 记录任务进程已经成功 fork。状态写入 Runtime，manager 自身重建后仍可恢复。
+     */
+    public static function recordTaskStarted(array $task, int $pid, ?int $now = null): void {
+        $taskId = (string)($task['id'] ?? '');
+        if ($taskId === '') {
+            return;
+        }
+        self::loadTaskRespawnState($taskId);
+        self::taskRespawnBackoff()->recordStarted($taskId, $now);
+        self::persistTaskRespawnState($taskId, (string)($task['namespace'] ?? ''));
+        $state = self::taskRespawnState($taskId);
+        self::updateTaskTableIfOwned(
+            $taskId,
+            (int)($task['manager_id'] ?? 0),
+            (string)($task['manager_generation'] ?? ''),
+            [
+            'pid' => $pid,
+            'process_is_alive' => STATUS_ON,
+            'respawn_attempts' => (int)($state['attempts'] ?? 0),
+            'next_retry_at' => (int)($state['next_retry_at'] ?? 0),
+            'respawn_exit_recorded' => 0,
+            ],
+            (int)($task['pid'] ?? 0)
+        );
+    }
+
+    /**
+     * 记录短命退出并返回本次退避秒数。
+     */
+    public static function recordTaskExit(array $task, ?int $now = null): int {
+        $taskId = (string)($task['id'] ?? '');
+        if ($taskId === '') {
+            return 60;
+        }
+        self::loadTaskRespawnState($taskId);
+        $delay = self::taskRespawnBackoff()->recordExit($taskId, $now);
+        self::persistTaskRespawnState($taskId, (string)($task['namespace'] ?? ''));
+        $state = self::taskRespawnState($taskId);
+        self::updateTaskTableIfOwned(
+            $taskId,
+            (int)($task['manager_id'] ?? 0),
+            (string)($task['manager_generation'] ?? ''),
+            [
+            'pid' => 0,
+            'process_is_alive' => STATUS_OFF,
+            'respawn_attempts' => (int)($state['attempts'] ?? 0),
+            'next_retry_at' => (int)($state['next_retry_at'] ?? 0),
+            'respawn_exit_recorded' => 1,
+            ],
+            (int)($task['pid'] ?? 0)
+        );
+        return $delay;
+    }
+
+    /**
+     * 记录 fork/start 失败；该路径没有可等待的 child，同样必须进入退避。
+     */
+    public static function recordTaskStartFailure(array $task, ?int $now = null): int {
+        $taskId = (string)($task['id'] ?? '');
+        if ($taskId === '') {
+            return 60;
+        }
+        self::loadTaskRespawnState($taskId);
+        $delay = self::taskRespawnBackoff()->recordStartFailure($taskId, $now);
+        self::persistTaskRespawnState($taskId, (string)($task['namespace'] ?? ''));
+        $state = self::taskRespawnState($taskId);
+        self::updateTaskTableIfOwned(
+            $taskId,
+            (int)($task['manager_id'] ?? 0),
+            (string)($task['manager_generation'] ?? ''),
+            [
+            'pid' => 0,
+            'process_is_alive' => STATUS_OFF,
+            'respawn_attempts' => (int)($state['attempts'] ?? 0),
+            'next_retry_at' => (int)($state['next_retry_at'] ?? 0),
+            'respawn_exit_recorded' => 1,
+            ],
+            (int)($task['pid'] ?? 0)
+        );
+        return $delay;
+    }
+
+    /**
+     * 存活达到稳定窗口后清零历史失败次数，避免一次旧故障永久放大后续恢复时间。
+     */
+    public static function markTaskStable(array $task, ?int $now = null): bool {
+        $taskId = (string)($task['id'] ?? '');
+        if ($taskId === '') {
+            return false;
+        }
+        self::loadTaskRespawnState($taskId);
+        if (!self::taskRespawnBackoff()->markStable($taskId, $now)) {
+            return false;
+        }
+        self::persistTaskRespawnState($taskId, (string)($task['namespace'] ?? ''));
+        $state = self::taskRespawnState($taskId);
+        self::updateTaskTableIfOwned(
+            $taskId,
+            (int)($task['manager_id'] ?? 0),
+            (string)($task['manager_generation'] ?? ''),
+            [
+            'respawn_attempts' => (int)($state['attempts'] ?? 0),
+            'next_retry_at' => (int)($state['next_retry_at'] ?? 0),
+            ],
+            (int)($task['pid'] ?? 0)
+        );
+        return true;
+    }
+
+    /**
+     * @return array{attempts:int,next_retry_at:int,started_at:int,last_started_at:int,last_exit_at:int}
+     */
+    public static function taskRespawnState(string $taskId): array {
+        self::loadTaskRespawnState($taskId);
+        return self::taskRespawnBackoff()->state($taskId);
+    }
+
+    protected static function taskRespawnBackoff(): ProcessRespawnBackoff {
+        return self::$taskRespawnBackoff ??= new ProcessRespawnBackoff();
+    }
+
+    protected static function loadTaskRespawnState(string $taskId): void {
+        if ($taskId === '' || isset(self::$loadedTaskRespawnStates[$taskId])) {
+            return;
+        }
+        self::$loadedTaskRespawnStates[$taskId] = true;
+        $stored = Runtime::instance()->get(self::taskRespawnRuntimeKey($taskId));
+        if (is_array($stored)) {
+            $state = isset($stored['state']) && is_array($stored['state']) ? $stored['state'] : $stored;
+            self::taskRespawnBackoff()->restoreState($taskId, $state);
+        }
+    }
+
+    protected static function persistTaskRespawnState(string $taskId, string $namespace): void {
+        Runtime::instance()->set(self::taskRespawnRuntimeKey($taskId), [
+            'task_id' => $taskId,
+            'namespace' => $namespace,
+            'state' => self::taskRespawnBackoff()->state($taskId),
+            'updated_at' => time(),
+        ]);
+    }
+
+    protected static function taskRespawnRuntimeKey(string $taskId): string {
+        return self::TASK_RESPAWN_STATE_KEY_PREFIX . md5($taskId);
     }
 
     public static function getTaskTable(): array {
@@ -242,8 +495,52 @@ class CrontabManager {
         return CrontabTable::instance()->rows();
     }
 
-    private static function add(string $id, array $data): void {
-        CrontabTable::instance()->set($id, $data);
+    /**
+     * 按 manager generation 比较后更新，旧 task/manager 不得覆盖新代同名 row。
+     */
+    public static function updateTaskTableIfOwned(
+        string $id,
+        int $managerId,
+        string $managerGeneration,
+        array $data,
+        ?int $expectedPid = null
+    ): bool {
+        $task = CrontabTable::instance()->get($id);
+        if (!self::taskMatchesOwner($task ?: [], $managerId, $managerGeneration, $expectedPid)) {
+            return false;
+        }
+        foreach ($data as $key => $value) {
+            if ($key === 'error_count') {
+                $task[$key] = ($task['error_count'] ?? 0) + $value;
+            } else {
+                $task[$key] = $value;
+            }
+        }
+        return (bool)CrontabTable::instance()->set($id, $task);
+    }
+
+    private static function addIfOwnedGeneration(
+        string $id,
+        array $data,
+        int $managerId,
+        string $managerGeneration
+    ): bool {
+        if (!self::managerGenerationIsCurrent($managerGeneration)) {
+            return false;
+        }
+        $existing = CrontabTable::instance()->get($id);
+        if (
+            $existing
+            && !self::taskMatchesOwner((array)$existing, $managerId, $managerGeneration)
+        ) {
+            return false;
+        }
+        if ($existing && (int)($existing['pid'] ?? 0) > 0) {
+            return true;
+        }
+        $data['manager_id'] = $managerId;
+        $data['manager_generation'] = $managerGeneration;
+        return (bool)CrontabTable::instance()->set($id, $data);
     }
 
     public static function removeTaskTable($id): array {
@@ -251,6 +548,44 @@ class CrontabManager {
             CrontabTable::instance()->delete($id);
         }
         return CrontabTable::instance()->rows();
+    }
+
+    /**
+     * 删除前重新比较完整 owner；用于旧 manager 排空，避免删掉新代复用 task id 的 row。
+     */
+    public static function removeTaskTableIfOwned(
+        string $id,
+        int $managerId,
+        string $managerGeneration,
+        ?int $expectedPid = null
+    ): bool {
+        $task = CrontabTable::instance()->get($id);
+        if (!self::taskMatchesOwner($task ?: [], $managerId, $managerGeneration, $expectedPid)) {
+            return false;
+        }
+        return (bool)CrontabTable::instance()->delete($id);
+    }
+
+    public static function taskMatchesOwner(
+        array $task,
+        int $managerId,
+        string $managerGeneration,
+        ?int $expectedPid = null
+    ): bool {
+        $taskGeneration = (string)($task['manager_generation'] ?? '');
+        return $managerId > 0
+            && $managerGeneration !== ''
+            && (int)($task['manager_id'] ?? 0) === $managerId
+            && $taskGeneration !== ''
+            && hash_equals($managerGeneration, $taskGeneration)
+            && ($expectedPid === null || (int)($task['pid'] ?? 0) === $expectedPid);
+    }
+
+    public static function managerGenerationIsCurrent(string $managerGeneration): bool {
+        $current = (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? '');
+        return $managerGeneration !== ''
+            && $current !== ''
+            && hash_equals($current, $managerGeneration);
     }
 
     /**
@@ -270,17 +605,24 @@ class CrontabManager {
         $errorKey = 'CRONTAB_' . $processTask['id'] . '_ERROR';
         $errorInfoKey = 'CRONTAB_' . $processTask['id'] . '_ERROR_INFO';
         $errorInfo = Runtime::instance()->get($errorInfoKey) ?: "未知错误";
-        static::updateTaskTable($processTask['id'], [
+        static::updateTaskTableIfOwned(
+            (string)$processTask['id'],
+            (int)($processTask['manager_id'] ?? 0),
+            (string)($processTask['manager_generation'] ?? ''),
+            [
             'process_is_alive' => STATUS_OFF,
             'remark' => "致命错误",
             'error_count' => 1
-        ]);
+            ],
+            (int)($processTask['pid'] ?? 0)
+        );
         $sendError = new Process(function () use ($processTask, $errorInfo) {
             App::mount();
             Log::instance()->error("{$processTask['name']}[{$processTask['namespace']}]致命错误: " . $errorInfo);
         });
         $sendError->start();
-        Process::wait();
+        // 统一由 CrontabManager 主循环 wait(false) 回收。这里若直接 wait()，
+        // 可能误收走另一个刚退出的任务 child，导致该任务永远收不到退出事件。
         $left = Counter::instance()->decr($errorKey);
         // 任务恢复后清理归零计数 key，避免历史 task id 长期占用 Counter 行。
         if ($left <= 0) {

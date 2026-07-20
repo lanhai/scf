@@ -17,6 +17,8 @@ use Scf\Core\Console;
 use Scf\Core\Env;
 use RuntimeException;
 use Scf\Server\Http;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use Swoole\Process;
 
 /**
@@ -716,24 +718,20 @@ class CliBootstrap {
         if ($gatewayPort <= 0) {
             return [];
         }
-        $output = @shell_exec('ps -eo pid=,command= 2>/dev/null');
-        if (!is_string($output) || trim($output) === '') {
+        $snapshot = ProcessInspector::snapshot();
+        if (!$snapshot) {
             return [];
         }
 
         $keep = array_fill_keys(array_map('intval', array_filter($keepPorts, static fn($port) => (int)$port > 0)), true);
         $instancesByEndpoint = [];
-        foreach (preg_split('/\r?\n/', trim($output)) as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(.+)$/', $line, $matches)) {
-                continue;
-            }
-            $pid = (int)$matches[1];
-            $command = (string)$matches[2];
+        foreach ($snapshot as $pid => $processInfo) {
+            $pid = (int)$pid;
+            $command = (string)($processInfo['command'] ?? '');
             if (!str_contains($command, '/boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, '-app=' . APP_DIR_NAME)) {
+            if (!ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)) {
                 continue;
             }
             if (self::extractIntFlag($command, 'gateway_port') !== $gatewayPort) {

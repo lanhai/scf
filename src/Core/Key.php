@@ -29,6 +29,9 @@ class Key {
     public const RUNTIME_GATEWAY_CLUSTER_COORDINATOR_TRACE_SNAPSHOT = 'r_gccts';
     public const RUNTIME_MEMORY_MONITOR_PID = 'r_mmp';
     public const RUNTIME_MEMORY_MONITOR_HEARTBEAT_AT = 'r_mmha';
+    public const RUNTIME_SYSTEM_MEMORY_SNAPSHOT = 'r_sms';
+    public const RUNTIME_PROCESS_MEMORY_SNAPSHOT = 'r_pms';
+    public const RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT = 'r_gctpa';
     public const RUNTIME_HEARTBEAT_PID = 'r_hbp';
     public const RUNTIME_HEARTBEAT_PROCESS_HEARTBEAT_AT = 'r_hbpha';
     public const RUNTIME_LOG_BACKUP_PID = 'r_lbp';
@@ -38,6 +41,8 @@ class Key {
     public const RUNTIME_REDIS_QUEUE_MANAGER_PID = 'r_rqmp';
     public const RUNTIME_REDIS_QUEUE_MANAGER_HEARTBEAT_AT = 'r_rqmha';
     public const RUNTIME_REDIS_QUEUE_WORKER_PID = 'r_rqwp';
+    public const RUNTIME_REDIS_QUEUE_WORKER_STATE = 'r_rqws';
+    public const RUNTIME_REDIS_QUEUE_RESPAWN_STATE = 'r_rqrs';
     public const RUNTIME_FILE_WATCHER_PID = 'r_fwp';
     public const RUNTIME_FILE_WATCHER_HEARTBEAT_AT = 'r_fwha';
     public const RUNTIME_GATEWAY_INSTALL_TAKEOVER = 'r_gitk';
@@ -49,9 +54,17 @@ class Key {
     public const RUNTIME_GATEWAY_STARTUP_SUMMARY_READY = 'gw_sum_r';
     public const RUNTIME_SUBPROCESS_MANAGER_PID = 'r_smp';
     public const RUNTIME_SUBPROCESS_MANAGER_HEARTBEAT_AT = 'r_smha';
+    public const RUNTIME_SUBPROCESS_MANAGER_GENERATION = 'r_smg';
     public const RUNTIME_SUBPROCESS_ALIVE_COUNT = 'r_smac';
     public const RUNTIME_SUBPROCESS_SHUTTING_DOWN = 'r_smsd';
     public const RUNTIME_SUBPROCESS_CONTROL_STATE = 'r_smcs';
+    /**
+     * Swoole addProcess 根进程跨代退避状态的动态 key 前缀。
+     *
+     * 完整 key 由进程角色与父代生成的 instance token 哈希组成，确保同一
+     * server 内不同根进程、以及同机不同 gateway 实例之间互不干扰。
+     */
+    public const RUNTIME_ROOT_PROCESS_RESPAWN_STATE_PREFIX = 'r_rprs_';
     public const COUNTER_CRONTAB_PROCESS = 'c_cmp';
     public const COUNTER_REDIS_QUEUE_PROCESS = 'c_rqmp';
     public const COUNTER_REQUEST = 'c_req_t';

@@ -11,18 +11,36 @@ if (json_last_error() == JSON_ERROR_NONE) {
     $requires = $composerData['require'] ?? [];
     $requiresDev = $composerData['require-dev'] ?? [];
     if (array_key_exists($packageName, $requires) || array_key_exists($packageName, $requiresDev)) {
-        $cmd = 'composer show --working-dir=' . SCF_ROOT . ' ' . $packageName;
-        // 运行 composer show 命令
-        if ($composerOutput = shell_exec($cmd)) {
-            // 使用正则表达式匹配版本号
-            preg_match('/versions\s*:\s*\*?\s*v([\d.]+)/', $composerOutput, $matches);
-            if (isset($matches[1])) {
-                $scfVersion = $matches[1];
+        // 版本信息直接读取 Composer 已生成的本地元数据。Const.php 会被每个
+        // Gateway/upstream/CLI 入口加载，绝不能在这里执行 Composer CLI，
+        // 否则一次重拉会派生出一批 composer + php 进程。
+        $prettyVersion = null;
+        $installedFile = SCF_ROOT . '/vendor/composer/installed.php';
+        if (is_file($installedFile)) {
+            $installed = require $installedFile;
+            $prettyVersion = $installed['versions'][$packageName]['pretty_version'] ?? null;
+        }
+        if (!is_string($prettyVersion) || $prettyVersion === '') {
+            $lockFile = SCF_ROOT . '/composer.lock';
+            $lockData = is_file($lockFile)
+                ? json_decode((string)file_get_contents($lockFile), true)
+                : null;
+            if (is_array($lockData)) {
+                foreach (array_merge($lockData['packages'] ?? [], $lockData['packages-dev'] ?? []) as $package) {
+                    if (($package['name'] ?? '') !== $packageName) {
+                        continue;
+                    }
+                    $prettyVersion = (string)($package['pretty_version'] ?? ($package['version'] ?? ''));
+                    break;
+                }
             }
+        }
+        if (is_string($prettyVersion) && preg_match('/v?(\d+(?:\.\d+)+)/', $prettyVersion, $matches)) {
+            $scfVersion = (string)$matches[1];
         }
     }
 }
-define("SCF_COMPOSER_VERSION", $scfVersion);
+defined('SCF_COMPOSER_VERSION') || define("SCF_COMPOSER_VERSION", $scfVersion);
 const APP_MODULE_STYLE_SINGLE = 1;
 const APP_MODULE_STYLE_MULTI = 2;
 const NETWORK_MODE_SINGLE = 'single';

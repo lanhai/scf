@@ -161,23 +161,53 @@ trait GatewayTelemetryTrait {
             return $instances;
         }
 
+        // 多个 dashboard/API 协程可能同时请求同一份状态。已有采样未完成时返回
+        // last-good；短时间内重复请求也直接复用，避免对 upstream 形成扇出排队。
+        $now = microtime(true);
+        if (
+            $this->lastDashboardUpstreamSnapshot
+            && ($this->dashboardUpstreamFetchInFlight || ($now - $this->lastDashboardUpstreamSnapshotAt) < 0.75)
+        ) {
+            return $this->lastDashboardUpstreamSnapshot;
+        }
+        if ($this->dashboardUpstreamFetchInFlight) {
+            return $this->dashboardUpstreams(false);
+        }
+        $this->dashboardUpstreamFetchInFlight = true;
         $instances = array_fill(0, count($plans), null);
-        $barrier = Barrier::make();
-        foreach ($plans as $index => $plan) {
-            Coroutine::create(function () use ($barrier, &$instances, $index, $plan): void {
-                $generation = (array)($plan['generation'] ?? []);
-                $instance = (array)($plan['instance'] ?? []);
-                $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
-                $instances[$index] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus, false);
-            });
-        }
         try {
-            Barrier::wait($barrier);
-        } catch (Throwable) {
-            // dashboard 状态链路里并发探测异常时，降级为已完成分支结果，避免整包状态失败。
+            $barrier = Barrier::make();
+            foreach ($plans as $index => $plan) {
+                Coroutine::create(function () use ($barrier, &$instances, $index, $plan): void {
+                    $generation = (array)($plan['generation'] ?? []);
+                    $instance = (array)($plan['instance'] ?? []);
+                    $generationStatus = (string)($generation['status'] ?? '');
+                    $host = (string)($instance['host'] ?? '127.0.0.1');
+                    $port = (int)($instance['port'] ?? 0);
+                    if (!in_array($generationStatus, ['active', 'draining', 'prepared'], true)) {
+                        // offline 代际只展示最近快照，不再周期性探测一个确定已下线的端口。
+                        $runtimeStatus = $this->instanceManager->instanceRuntimeStatus($host, $port, 30);
+                        $instances[$index] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus, true);
+                        return;
+                    }
+                    $runtimeStatus = $this->fetchUpstreamRuntimeStatus($instance);
+                    $instances[$index] = $this->buildUpstreamNode($generation, $instance, $runtimeStatus, false);
+                });
+            }
+            try {
+                Barrier::wait($barrier);
+            } catch (Throwable) {
+                // dashboard 状态链路里并发探测异常时，降级为已完成分支结果，避免整包状态失败。
+            }
+            $result = array_values(array_filter($instances, static fn($item): bool => is_array($item)));
+            if ($result) {
+                $this->lastDashboardUpstreamSnapshot = $result;
+                $this->lastDashboardUpstreamSnapshotAt = microtime(true);
+            }
+            return $result ?: $this->lastDashboardUpstreamSnapshot;
+        } finally {
+            $this->dashboardUpstreamFetchInFlight = false;
         }
-
-        return array_values(array_filter($instances, static fn($item): bool => is_array($item)));
     }
 
     protected function refreshManagedUpstreamRuntimeStates(): void {
@@ -684,17 +714,19 @@ trait GatewayTelemetryTrait {
             'fingerprint' => APP_FINGERPRINT . ':gateway',
         ];
         $heartbeatStatus = ServerNodeStatusTable::instance()->get('localhost');
-        $useHeartbeatStatus = is_array($heartbeatStatus)
-            && $heartbeatStatus
+        $hasHeartbeatStatus = is_array($heartbeatStatus) && $heartbeatStatus;
+        $useFreshHeartbeatStatus = $hasHeartbeatStatus
             && $this->isLocalGatewayHeartbeatStatusFresh($heartbeatStatus);
-        if ($useHeartbeatStatus) {
+        if ($hasHeartbeatStatus) {
             $node = array_replace_recursive($node, $heartbeatStatus);
         }
         $upstreams ??= $this->dashboardUpstreams();
-        if ($useHeartbeatStatus) {
+        if ($hasHeartbeatStatus) {
             // 心跳快照存在时仍叠加一次“轻量实时业务指标”，让 dashboard 1s 推送
-            // 的连接数/并发类数据不再停留在 heartbeat 的 5s 粒度。
+            // 的连接数/并发类数据不再停留在 heartbeat 的 5s 粒度。心跳过期时保留
+            // last-good 内存快照，绝不升级成逐 PID 的重采样正反馈。
             $node = $this->composeGatewayNodeRealtimeBusinessMetrics($node, $upstreams);
+            $node['heartbeat_stale'] = !$useFreshHeartbeatStatus;
         } else {
             $node = $this->composeGatewayNodeRuntimeStatus($node, $upstreams);
         }
@@ -910,21 +942,6 @@ trait GatewayTelemetryTrait {
             ]);
             return [];
         }
-        $listenCheckStartedAt = microtime(true);
-        if ($this->launcher && !$this->launcher->isListening($host, $port, 0.2)) {
-            $this->traceGatewayHealthStep('fetch.internal.listen_check', $listenCheckStartedAt, [
-                'path' => $path,
-                'plan' => $planLabel,
-                'listening' => 0,
-            ]);
-            return [];
-        }
-        $this->traceGatewayHealthStep('fetch.internal.listen_check', $listenCheckStartedAt, [
-            'path' => $path,
-            'plan' => $planLabel,
-            'listening' => 1,
-        ]);
-
         try {
             $ipcAction = $this->mapUpstreamStatusPathToIpcAction($path);
             if ($ipcAction !== '') {
@@ -1245,15 +1262,17 @@ trait GatewayTelemetryTrait {
         $autoRestart = (int)($snapshotRow['auto_restart'] ?? 0);
 
         $alive = $pid > 0 && @Process::kill($pid, 0);
-        $rssMb = null;
-        $pssMb = null;
-        $osActualMb = null;
-        if ($alive) {
-            $mem = \Scf\Util\MemoryMonitor::getPssRssByPid($pid);
-            $rssMb = isset($mem['rss_kb']) && is_numeric($mem['rss_kb']) ? round(((float)$mem['rss_kb']) / 1024, 1) : null;
-            $pssMb = isset($mem['pss_kb']) && is_numeric($mem['pss_kb']) ? round(((float)$mem['pss_kb']) / 1024, 1) : null;
-            $osActualMb = $pssMb ?? $rssMb;
-        }
+        // upstream 已按 5 秒窗口批量补齐 rss/pss；gateway 聚合只消费快照，
+        // 不得在 dashboard/heartbeat 热路径再次逐 PID 启动 ps。
+        $rssMb = is_numeric($snapshotRow['rss_mb'] ?? null)
+            ? (float)$snapshotRow['rss_mb']
+            : ($this->extractMemoryValue($fallbackRow['rss'] ?? null) ?: null);
+        $pssMb = is_numeric($snapshotRow['pss_mb'] ?? null)
+            ? (float)$snapshotRow['pss_mb']
+            : ($this->extractMemoryValue($fallbackRow['pss'] ?? null) ?: null);
+        $osActualMb = is_numeric($snapshotRow['os_actual'] ?? null)
+            ? (float)$snapshotRow['os_actual']
+            : ($pssMb ?? $rssMb);
 
         $serverConfig = Config::server();
         $autoRestartEnabled = (bool)($serverConfig['worker_memory_auto_restart'] ?? false);
@@ -1585,8 +1604,8 @@ trait GatewayTelemetryTrait {
         return $url . $separator . 'time=' . time();
     }
 
-    protected function pushDashboardStatus(?int $fd = null): void {
-        $payload = $this->buildDashboardRealtimeStatus();
+    protected function pushDashboardStatus(?int $fd = null, ?array $upstreams = null): void {
+        $payload = $this->buildDashboardRealtimeStatus($upstreams);
         $this->pushDashboardEvent($payload, $fd);
     }
 

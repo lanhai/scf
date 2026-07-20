@@ -461,11 +461,20 @@ class Oss extends Aliyun {
      * @param ?string $app
      * @param int $appid
      * @param int $timeout
+     * @param ?string $referer 下载请求 Referer；null 保持源 URL 默认值，空字符串表示不发送
      * @return Result
      */
-    public function downloadFile($url, ?string $object = null, int $mode = 1, ?string $app = null, int $appid = 0, int $timeout = 600): Result {
+    public function downloadFile(
+        $url,
+        ?string $object = null,
+        int $mode = 1,
+        ?string $app = null,
+        int $appid = 0,
+        int $timeout = 600,
+        ?string $referer = null
+    ): Result {
         if (is_null($object)) {
-            $extension = $this->guessExtensionFromUrl($url, 8);
+            $extension = $this->guessExtensionFromUrl($url, 8, $referer);
             $object = '/download/' . Date::today() . '/' . Sn::create_guid() . '.' . $extension;
         } else {
             // If caller provided object but without/with invalid ext, try to guess
@@ -473,14 +482,16 @@ class Oss extends Aliyun {
             if ($pathExt && isset($this->allowTypes[$pathExt])) {
                 $extension = $pathExt;
             } else {
-                $extension = $this->guessExtensionFromUrl($url, 8);
+                $extension = $this->guessExtensionFromUrl($url, 8, $referer);
                 if (!$pathExt) {
                     $object .= (str_ends_with($object, '.') ? '' : '.') . $extension;
                 }
             }
         }
         $client = Http::create($url);
-        $client->setHeader('Referer', $url);
+        if ($referer !== '') {
+            $client->setHeader('Referer', $referer ?? $url);
+        }
         $tmpFile = APP_TMP_PATH . '/' . md5($object) . ($extension ? ('.' . $extension) : '');
         $downloadResult = $client->download($tmpFile, $timeout);
         $client->close();
@@ -488,7 +499,15 @@ class Oss extends Aliyun {
             file_exists($tmpFile) and unlink($tmpFile);
             if ((int)$client->statusCode() == 302) {
                 $playUrlHeaders = $client->getHeaders();
-                return $this->downloadFile($playUrlHeaders['location'], $object, $mode, $app, $appid, $timeout);
+                return $this->downloadFile(
+                    $playUrlHeaders['location'],
+                    $object,
+                    $mode,
+                    $app,
+                    $appid,
+                    $timeout,
+                    $referer
+                );
             }
             return Result::error('源文件下载失败:' . $downloadResult->getMessage());
         } elseif (!file_exists($tmpFile)) {
@@ -644,7 +663,7 @@ class Oss extends Aliyun {
      * Guess extension from URL path or HTTP headers.
      * Priority: URL path extension (validated) -> HEAD Content-Type -> fallback 'bin'.
      */
-    private function guessExtensionFromUrl(string $url, int $timeout = 10): string {
+    private function guessExtensionFromUrl(string $url, int $timeout = 10, ?string $referer = null): string {
         // 1) Try path extension from URL (safe; domain not considered)
         $path = parse_url($url, PHP_URL_PATH) ?: '';
         $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
@@ -684,7 +703,9 @@ class Oss extends Aliyun {
         // 2) Try HEAD first; if HEAD not allowed or inconclusive, try GET
         try {
             $client = Http::create($url);
-            $client->setHeader('Referer', $url);
+            if ($referer !== '') {
+                $client->setHeader('Referer', $referer ?? $url);
+            }
             // Attempt HEAD
             $client->setMethod('HEAD');
             $client->get($timeout); // some servers may still respond with headers
@@ -697,7 +718,9 @@ class Oss extends Aliyun {
         }
         try {
             $client = Http::create($url);
-            $client->setHeader('Referer', $url);
+            if ($referer !== '') {
+                $client->setHeader('Referer', $referer ?? $url);
+            }
             $client->get($timeout); // we only need headers; body will be read by real download
             $headers = $client->getHeaders() ?: [];
             $client->close();

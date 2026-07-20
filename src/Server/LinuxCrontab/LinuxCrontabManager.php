@@ -5,9 +5,11 @@ namespace Scf\Server\LinuxCrontab;
 use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Exception;
+use Scf\Util\BoundedProcessRunner;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;
+use Scf\Util\ProcessInspector;
 use Swoole\Process;
 
 /**
@@ -105,6 +107,13 @@ class LinuxCrontabManager {
      * @var string|null
      */
     protected ?string $timeoutPath = null;
+
+    /**
+     * crontab 命令解析结果缓存。
+     *
+     * @var string|null
+     */
+    protected ?string $systemCrontabPath = null;
 
     /**
      * 返回 dashboard 页面初始化所需的全部数据。
@@ -894,7 +903,9 @@ class LinuxCrontabManager {
             }
         }
 
-        $current = $this->readSystemCrontab();
+        // 同步属于破坏性写边界：读取超时、熔断、输出截断或 crontab
+        // 命令异常都不能伪装成“当前为空”，否则会把用户的非 SCF 条目覆盖掉。
+        $current = $this->readSystemCrontab(true);
         $unmanagedLines = $this->stripManagedLines($current);
         $nextLines = $unmanagedLines;
         $scopeMarker = $this->scopeMarker();
@@ -1886,20 +1897,78 @@ class LinuxCrontabManager {
      *
      * @return string
      */
-    protected function readSystemCrontab(): string {
+    protected function readSystemCrontab(bool $failOnReadError = false): string {
         $command = $this->resolveSystemCrontabCommand();
         if ($command === '') {
+            if ($failOnReadError) {
+                throw new Exception('系统未安装 crontab 命令，无法安全读取当前配置');
+            }
             return '';
         }
 
-        $output = [];
-        $code = 0;
-        @exec($command . ' -l 2>/dev/null', $output, $code);
-        if ($code !== 0 && !$output) {
+        $result = $this->runSystemCrontabListCommand($command);
+        $output = (string)$result['output'];
+        if (
+            $result['started']
+            && !$result['timed_out']
+            && !$result['truncated']
+            && $result['exit_code'] === 0
+        ) {
+            return rtrim($output, "\r\n");
+        }
+
+        // `crontab -l` 在“当前用户确实没有任何条目”时通常以 exit=1
+        // 返回 `no crontab for <user>`。这是合法空状态，不属于读取失败。
+        if ($this->isMissingSystemCrontabResult($result)) {
             return '';
         }
 
-        return implode(PHP_EOL, $output);
+        if ($failOnReadError) {
+            $detail = trim((string)($result['error'] ?? ''));
+            if ($detail === '') {
+                $detail = trim($output);
+            }
+            $detail = $detail === '' ? '(empty)' : substr($detail, 0, 1000);
+            throw new Exception(
+                '读取系统 crontab 失败，已中止同步以保护现有用户条目'
+                . ': started=' . ($result['started'] ? 'true' : 'false')
+                . ', timed_out=' . ($result['timed_out'] ? 'true' : 'false')
+                . ', truncated=' . ($result['truncated'] ? 'true' : 'false')
+                . ', exit_code=' . (int)$result['exit_code']
+                . ', detail=' . $detail
+            );
+        }
+
+        return '';
+    }
+
+    /**
+     * 执行只读的 `crontab -l`，独立成可测试边界。
+     *
+     * @return array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool}
+     */
+    protected function runSystemCrontabListCommand(string $command): array {
+        return BoundedProcessRunner::run([$command, '-l'], 5.0, 4 * 1024 * 1024);
+    }
+
+    /**
+     * 判断非零退出是否只是“当前用户尚无 crontab”这一合法空状态。
+     *
+     * @param array{output:string,error:string,exit_code:int,timed_out:bool,started:bool,truncated:bool} $result
+     */
+    protected function isMissingSystemCrontabResult(array $result): bool {
+        if (
+            !$result['started']
+            || $result['timed_out']
+            || $result['truncated']
+            || (int)$result['exit_code'] === 0
+            || trim((string)$result['output']) !== ''
+        ) {
+            return false;
+        }
+
+        $error = strtolower(trim((string)$result['error']));
+        return $error !== '' && preg_match('/\bno\s+crontab\s+for\b/i', $error) === 1;
     }
 
     /**
@@ -1925,11 +1994,17 @@ class LinuxCrontabManager {
                 throw new Exception('写入临时 crontab 文件失败');
             }
 
-            $output = [];
-            $code = 0;
-            @exec($command . ' ' . escapeshellarg($tempFile) . ' 2>&1', $output, $code);
-            if ($code !== 0) {
-                throw new Exception('写入系统 crontab 失败: ' . implode("\n", $output));
+            $result = BoundedProcessRunner::run([$command, $tempFile], 5.0, 4 * 1024 * 1024);
+            if (!$result['started'] || $result['timed_out'] || $result['exit_code'] !== 0) {
+                $detail = trim((string)$result['error']);
+                if ($detail === '') {
+                    $detail = trim((string)$result['output']);
+                }
+                throw new Exception(
+                    '写入系统 crontab 失败'
+                    . ($result['timed_out'] ? '(执行超时)' : '')
+                    . ($detail !== '' ? ': ' . $detail : '')
+                );
             }
         } finally {
             @unlink($tempFile);
@@ -2010,21 +2085,16 @@ class LinuxCrontabManager {
      * @return array<int, array{pid:int,ppid:int,command:string}>
      */
     protected function listSystemProcesses(): array {
-        $output = [];
-        @exec('ps -eo pid=,ppid=,command= 2>/dev/null', $output);
         $processes = [];
-        foreach ($output as $line) {
-            if (!preg_match('/^\s*(\d+)\s+(\d+)\s+(.*)$/', (string)$line, $matches)) {
-                continue;
-            }
-            $pid = (int)$matches[1];
+        foreach (ProcessInspector::snapshot(true) as $pid => $processInfo) {
+            $pid = (int)$pid;
             if ($pid <= 0) {
                 continue;
             }
             $processes[$pid] = [
                 'pid' => $pid,
-                'ppid' => (int)$matches[2],
-                'command' => trim((string)$matches[3]),
+                'ppid' => (int)($processInfo['ppid'] ?? 0),
+                'command' => trim((string)($processInfo['command'] ?? '')),
             ];
         }
         return $processes;
@@ -2487,12 +2557,6 @@ class LinuxCrontabManager {
             return $this->flockPath;
         }
 
-        $resolved = trim((string)@shell_exec('command -v flock 2>/dev/null'));
-        if ($resolved !== '' && is_executable($resolved)) {
-            $this->flockPath = $resolved;
-            return $this->flockPath;
-        }
-
         $candidates = [];
         $pathEnv = (string)(getenv('PATH') ?: '');
         if ($pathEnv !== '') {
@@ -2533,12 +2597,6 @@ class LinuxCrontabManager {
      */
     protected function resolveTimeoutPath(): string {
         if (!is_null($this->timeoutPath)) {
-            return $this->timeoutPath;
-        }
-
-        $resolved = trim((string)@shell_exec('command -v timeout 2>/dev/null'));
-        if ($resolved !== '' && is_executable($resolved)) {
-            $this->timeoutPath = $resolved;
             return $this->timeoutPath;
         }
 
@@ -2833,23 +2891,36 @@ class LinuxCrontabManager {
      * @return string
      */
     protected function resolveSystemCrontabCommand(): string {
-        $command = trim((string)@shell_exec('command -v crontab 2>/dev/null'));
-        if ($command !== '' && is_executable($command)) {
-            return $command;
+        if (!is_null($this->systemCrontabPath)) {
+            return $this->systemCrontabPath;
         }
 
-        foreach ([
+        $candidates = [];
+        $pathEnv = (string)(getenv('PATH') ?: '');
+        if ($pathEnv !== '') {
+            foreach (explode(PATH_SEPARATOR, $pathEnv) as $directory) {
+                $directory = trim($directory);
+                if ($directory !== '') {
+                    $candidates[] = rtrim($directory, DIRECTORY_SEPARATOR)
+                        . DIRECTORY_SEPARATOR . 'crontab';
+                }
+            }
+        }
+        $candidates = array_merge($candidates, [
             '/usr/bin/crontab',
             '/bin/crontab',
             '/usr/sbin/crontab',
             '/opt/homebrew/bin/crontab',
             '/usr/local/bin/crontab',
-        ] as $candidate) {
+        ]);
+        foreach (array_unique($candidates) as $candidate) {
             if (is_executable($candidate)) {
-                return $candidate;
+                $this->systemCrontabPath = $candidate;
+                return $this->systemCrontabPath;
             }
         }
 
-        return '';
+        $this->systemCrontabPath = '';
+        return $this->systemCrontabPath;
     }
 }

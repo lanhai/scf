@@ -10,6 +10,7 @@ use Scf\Core\Console;
 use Scf\Core\Key;
 use Scf\Core\Table\Runtime;
 use Scf\Helper\JsonHelper;
+use Scf\Server\RootProcessRespawnGuard;
 use Scf\Util\Auth;
 use Swoole\Coroutine;
 use Swoole\Process;
@@ -31,6 +32,11 @@ class UpstreamSupervisor {
     protected array $managedInstances = [];
     protected bool $running = true;
     protected bool $shutdownManagedInstancesOnExit = true;
+    /**
+     * 父进程级实例 token 在 Swoole 自动重建的各代 callback 中保持不变。
+     */
+    protected string $rootProcessInstanceToken;
+    protected ?RootProcessRespawnGuard $rootProcessRespawnGuard = null;
 
     public function __construct(
         protected AppServerLauncher $launcher,
@@ -41,7 +47,28 @@ class UpstreamSupervisor {
         protected int $gatewayLeaseGraceSeconds = 20,
         protected int $defaultRecycleGraceSeconds = 30
     ) {
-        $this->process = new Process([$this, 'run'], false, SOCK_DGRAM, false);
+        $this->rootProcessInstanceToken = RootProcessRespawnGuard::newInstanceToken();
+        $this->process = new Process(function (Process $process): void {
+            $guard = new RootProcessRespawnGuard(
+                'UpstreamSupervisor['
+                    . (defined('APP_DIR_NAME') ? APP_DIR_NAME : 'app')
+                    . ':' . (defined('SERVER_ROLE') ? SERVER_ROLE : 'node')
+                    . ':port=' . $this->gatewayPort
+                    . ':epoch=' . $this->ownerEpoch
+                    . ']',
+                $this->rootProcessInstanceToken
+            );
+            $this->rootProcessRespawnGuard = $guard;
+            $guard->begin();
+            $intentionalExit = false;
+            try {
+                $this->run($process);
+                $intentionalExit = true;
+            } finally {
+                $guard->finish($intentionalExit);
+                $this->rootProcessRespawnGuard = null;
+            }
+        }, false, SOCK_DGRAM, false);
         $this->defaultRecycleGraceSeconds = max(3, $this->defaultRecycleGraceSeconds);
     }
 
@@ -90,6 +117,7 @@ class UpstreamSupervisor {
 
         while ($this->running) {
             Runtime::instance()->set(Key::RUNTIME_UPSTREAM_SUPERVISOR_HEARTBEAT_AT, time());
+            $this->rootProcessRespawnGuard?->markStable();
             $data = is_resource($commandPipe) ? fread($commandPipe, 65535) : false;
             if ($data === false || $data === '') {
                 // 父进程退出或 pipe 已被内核回收后，继续 read 只会反复抛出
@@ -257,6 +285,10 @@ class UpstreamSupervisor {
                 'metadata' => [
                     'managed' => true,
                     'pid' => (int)($instance['pid'] ?? 0),
+                    'launch_pid' => (int)($instance['launch_pid'] ?? 0),
+                    'launch_token' => (string)($instance['launch_token'] ?? ''),
+                    'launch_lock_file' => (string)($instance['launch_lock_file'] ?? ''),
+                    'rpc_port' => $rpcPort,
                 ],
             ], 1);
             $message = $rpcPort > 0
@@ -273,6 +305,9 @@ class UpstreamSupervisor {
             'metadata' => [
                 'managed' => true,
                 'pid' => (int)($instance['pid'] ?? 0),
+                'launch_pid' => (int)($instance['launch_pid'] ?? 0),
+                'launch_token' => (string)($instance['launch_token'] ?? ''),
+                'launch_lock_file' => (string)($instance['launch_lock_file'] ?? ''),
                 'role' => (string)($plan['role'] ?? SERVER_ROLE),
                 'rpc_port' => (int)($plan['rpc_port'] ?? 0),
                 'command' => (string)($instance['command'] ?? ''),

@@ -26,6 +26,8 @@ use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
 use Scf\Util\MemoryMonitor;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use RuntimeException;
 use Swoole\Coroutine;
 use Swoole\Process;
@@ -456,28 +458,26 @@ class Http extends \Scf\Core\Server {
             }
             return [];
         }
-        $output = @shell_exec('ps -axo pid=,command=');
-        if (!is_string($output) || trim($output) === '') {
+        // 该列表会进入破坏性回收路径，必须只使用本轮新鲜快照。
+        $snapshot = ProcessInspector::snapshot(true);
+        if (!$snapshot) {
             return [];
         }
 
-        $gatewayPortFlag = '-gateway_port=' . $this->upstreamGatewayPort;
-        $gatewayEpochFlag = '-gateway_epoch=' . $this->upstreamOwnerEpoch;
         $matches = [];
-        foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(.+)$/', $line, $parts)) {
-                continue;
-            }
-            $pid = (int)$parts[1];
-            $command = $parts[2];
+        foreach ($snapshot as $pid => $processInfo) {
+            $pid = (int)$pid;
+            $command = (string)($processInfo['command'] ?? '');
             if ($pid <= 0 || $pid === getmypid()) {
                 continue;
             }
             if (!str_contains($command, 'boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, $gatewayPortFlag) || !str_contains($command, $gatewayEpochFlag)) {
+            if (
+                !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $this->upstreamGatewayPort)
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_epoch', $this->upstreamOwnerEpoch)
+            ) {
                 continue;
             }
             $matches[$pid] = $pid;
@@ -646,9 +646,8 @@ class Http extends \Scf\Core\Server {
         $this->server->set($setting);
         //监听HTTP&socket连接
         try {
-            // gateway 分配 upstream 端口时使用的是“真实监听态”判定；这里必须保持同一语义，
-            // 否则会出现“gateway 认为端口可用，但 upstream 启动前用 bind 判定又误报占用”的分裂。
-            $httpPortOccupied = self::isListeningPortInUse($this->bindPort);
+            // 启动边界关心的是能否真实 bind；健康/回收链才使用 connect-only LISTEN 语义。
+            $httpPortOccupied = self::isPortInUse($this->bindPort, $this->bindHost);
             if ($httpPortOccupied) {
                 throw new RuntimeException('upstream HTTP端口已被占用，等待gateway重新分配:' . $this->bindHost . ':' . $this->bindPort);
             }
@@ -678,8 +677,7 @@ class Http extends \Scf\Core\Server {
                 $rpcPort = $rport;
                 $rpcBindHost = '127.0.0.1';
                 // 尝试杀掉占用端口的进程
-                // upstream RPC 端口同样采用监听态判定，避免 bind 误判导致不必要的重试。
-                $rpcPortOccupied = self::isListeningPortInUse($rpcPort);
+                $rpcPortOccupied = self::isPortInUse($rpcPort, $rpcBindHost);
                 if ($rpcPortOccupied) {
                     throw new RuntimeException('upstream RPC端口已被占用，等待gateway重新分配:' . '127.0.0.1:' . $rpcPort);
                 }
@@ -995,25 +993,41 @@ class Http extends \Scf\Core\Server {
     }
 
     /**
-     * 返回 upstream 当前内存表的原始快照，供 gateway 侧按 pid 补采 OS 物理内存。
+     * 返回 upstream 当前内存表与批量 OS 采样快照。
      *
-     * 这里刻意只返回 worker 活跃时写入的表数据，不在 upstream 再做二次 /proc 采样，
-     * 这样就能移除独立的 MemoryUsageCount 子进程，同时保留现有 usage/real/peak 记录口径。
+     * upstream master 会复用 MemoryMonitor::sum() 的 5 秒 last-good；缓存过期时
+     * 所有 PID 也只触发一次批量 ps，gateway 不再逐行创建外部进程。
      *
      * @return array<int, array<string, mixed>>
      */
     protected function buildProxyUpstreamMemoryRows(): array {
         $rows = [];
-        foreach (MemoryMonitorTable::instance()->rows() as $row) {
+        $sourceRows = MemoryMonitorTable::instance()->rows();
+        $memoryByPid = MemoryMonitor::getPssRssByPids(array_map(
+            static fn(array $row): int => (int)($row['pid'] ?? 0),
+            array_values(array_filter($sourceRows, 'is_array'))
+        ));
+        foreach ($sourceRows as $row) {
             if (!is_array($row)) {
                 continue;
             }
+            $pid = (int)($row['pid'] ?? 0);
+            $pidMemory = $memoryByPid[$pid] ?? [];
+            $rssMb = isset($pidMemory['rss_kb']) && is_numeric($pidMemory['rss_kb'])
+                ? round(((float)$pidMemory['rss_kb']) / 1024, 1)
+                : (is_numeric($row['rss_mb'] ?? null) ? (float)$row['rss_mb'] : null);
+            $pssMb = isset($pidMemory['pss_kb']) && is_numeric($pidMemory['pss_kb'])
+                ? round(((float)$pidMemory['pss_kb']) / 1024, 1)
+                : (is_numeric($row['pss_mb'] ?? null) ? (float)$row['pss_mb'] : null);
             $rows[] = [
                 'process' => (string)($row['process'] ?? ''),
-                'pid' => (int)($row['pid'] ?? 0),
+                'pid' => $pid,
                 'usage_mb' => (float)($row['usage_mb'] ?? 0),
                 'real_mb' => (float)($row['real_mb'] ?? 0),
                 'peak_mb' => (float)($row['peak_mb'] ?? 0),
+                'rss_mb' => $rssMb,
+                'pss_mb' => $pssMb,
+                'os_actual' => $pssMb ?? $rssMb,
                 'updated' => (int)($row['updated'] ?? 0),
                 'usage_updated' => (int)($row['usage_updated'] ?? 0),
                 'restart_ts' => (int)($row['restart_ts'] ?? 0),

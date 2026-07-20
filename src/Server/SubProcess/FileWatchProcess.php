@@ -28,8 +28,17 @@ class FileWatchProcess extends AbstractRuntimeProcess {
         return new Process(function (Process $process) {
             $this->call('mark_gateway_sub_process_context');
             run(function () use ($process) {
-                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, (int)$process->pid);
-                Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
+                $managerGeneration = $this->captureManagerGeneration();
+                $processPid = getmypid() ?: 0;
+                if (!$this->claimRuntimeOwnership(
+                    $managerGeneration,
+                    Key::RUNTIME_FILE_WATCHER_PID,
+                    Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT,
+                    $processPid
+                )) {
+                    return;
+                }
+                try {
                 if (!(bool)(Runtime::instance()->get(Key::RUNTIME_GATEWAY_STARTUP_SUMMARY_PENDING) ?? false)) {
                     Console::info("【FileWatcher】文件改动监听服务PID:" . $process->pid, false);
                 }
@@ -51,15 +60,28 @@ class FileWatchProcess extends AbstractRuntimeProcess {
                     $meta && $fileList[$path] = $meta;
                 }
                 while (true) {
-                    Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, time());
+                    if ($this->managedRuntimeShouldStop(
+                        $managerGeneration,
+                        Key::RUNTIME_FILE_WATCHER_PID,
+                        $processPid
+                    )) {
+                        Timer::clearAll();
+                        MemoryMonitor::stop();
+                        $this->call('exit_coroutine_runtime');
+                        return;
+                    }
+                    $this->touchRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_FILE_WATCHER_PID,
+                        Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT,
+                        $processPid
+                    );
                     $socket = $process->exportSocket();
                     $msg = $socket->recv(timeout: 0.1);
                     if ($msg == 'shutdown') {
                         Timer::clearAll();
                         MemoryMonitor::stop();
                         Console::warning("【FileWatcher】管理进程退出,结束监听", false);
-                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
-                        Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
                         $this->call('exit_coroutine_runtime');
                         return;
                     }
@@ -103,8 +125,6 @@ class FileWatchProcess extends AbstractRuntimeProcess {
                             $this->call('trigger_restart');
                             MemoryMonitor::stop();
                             Console::warning("【FileWatcher】管理进程退出,结束监听", false);
-                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT, 0);
-                            Runtime::instance()->set(Key::RUNTIME_FILE_WATCHER_PID, 0);
                             $this->call('exit_coroutine_runtime');
                             return;
                         }
@@ -112,6 +132,14 @@ class FileWatchProcess extends AbstractRuntimeProcess {
                     }
                     MemoryMonitor::updateUsage('FileWatcher');
                     Coroutine::sleep(2);
+                }
+                } finally {
+                    $this->clearRuntimeOwnershipIfCurrent(
+                        $managerGeneration,
+                        Key::RUNTIME_FILE_WATCHER_PID,
+                        Key::RUNTIME_FILE_WATCHER_HEARTBEAT_AT,
+                        $processPid
+                    );
                 }
             });
         }, false, SOCK_DGRAM);

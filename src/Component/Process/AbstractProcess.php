@@ -9,6 +9,7 @@
 namespace Scf\Component\Process;
 
 use Scf\Component\Timer;
+use Scf\Server\RootProcessRespawnGuard;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Process;
@@ -18,6 +19,11 @@ abstract class AbstractProcess {
     private $swooleProcess;
     /** @var Config */
     private $config;
+    /**
+     * Process 对象构造时生成并由 Swoole 各代 callback 继承，用于隔离同名实例。
+     */
+    private string $rootProcessInstanceToken;
+    private ?RootProcessRespawnGuard $rootProcessRespawnGuard = null;
 
 
     /**
@@ -30,6 +36,7 @@ abstract class AbstractProcess {
      * @param bool $enableCoroutine
      */
     function __construct(...$args) {
+        $this->rootProcessInstanceToken = RootProcessRespawnGuard::newInstanceToken();
         $arg1 = array_shift($args);
         if ($arg1 instanceof Config) {
             $this->config = $arg1;
@@ -85,6 +92,29 @@ abstract class AbstractProcess {
     }
 
     function __start(Process $process) {
+        $guard = new RootProcessRespawnGuard(
+            'AbstractProcess['
+                . ($this->config->getProcessGroup() ?: 'default')
+                . ':' . ($this->config->getProcessName() ?: static::class)
+                . ']',
+            $this->rootProcessInstanceToken
+        );
+        $this->rootProcessRespawnGuard = $guard;
+        $guard->begin();
+        $intentionalExit = false;
+        try {
+            $this->runProcessLifecycle($process);
+            $intentionalExit = true;
+        } finally {
+            $guard->finish($intentionalExit);
+            $this->rootProcessRespawnGuard = null;
+        }
+    }
+
+    /**
+     * 执行原有自定义进程生命周期；外层 __start 只负责跨代崩溃退避。
+     */
+    private function runProcessLifecycle(Process $process): void {
         $table = Manager::getInstance()->getProcessTable();
         $table->set($process->pid, [
             'pid' => $process->pid,
@@ -98,6 +128,7 @@ abstract class AbstractProcess {
                 'memoryUsage' => memory_get_usage(),
                 'memoryPeakUsage' => memory_get_peak_usage(true)
             ]);
+            $this->rootProcessRespawnGuard?->markStable();
         });
 
         $banOS = ['Darwin', 'CYGWIN', 'WINNT'];

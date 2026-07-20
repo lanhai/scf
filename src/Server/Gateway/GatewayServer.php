@@ -98,6 +98,10 @@ class GatewayServer {
     protected array $pendingManagedRecycleWarnState = [];
     protected array $pendingManagedRecycleCompletions = [];
     protected array $pendingManagedRecycleCheckInFlight = [];
+    protected bool $gatewayClusterTickInFlight = false;
+    protected bool $dashboardUpstreamFetchInFlight = false;
+    protected array $lastDashboardUpstreamSnapshot = [];
+    protected float $lastDashboardUpstreamSnapshotAt = 0.0;
     protected array $pendingManagedRecycleEndpointReservations = [];
     protected array $quarantinedManagedRecycles = [];
     protected array $quarantinedManagedRecycleWarnState = [];
@@ -285,6 +289,10 @@ class GatewayServer {
             if ($workerId !== 0) {
                 return;
             }
+            // worker0 重启后必须释放 coordinator 的跨进程 pending 标记，避免上一代
+            // worker 在处理中退出后，后续 cluster tick 被永久合并。
+            $this->gatewayClusterTickInFlight = false;
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT, 0);
             Runtime::instance()->serverIsDraining(false);
             Runtime::instance()->serverIsReady(true);
             $this->startGatewayLeaseRenewTimer();
@@ -335,10 +343,23 @@ class GatewayServer {
         $event = (string)($payload['event'] ?? '');
         switch ($event) {
             case 'gateway_cluster_tick':
-                $this->refreshLocalGatewayNodeStatus();
-                $this->pruneDisconnectedNodeClients();
-                if ($this->dashboardClients) {
-                    $this->pushDashboardStatus();
+                // 状态 IPC 和系统探针都可能在故障时让出协程。慢轮次未结束前直接
+                // 合并后续 tick，保证控制面最多只有一个采样链，不形成排队风暴。
+                if ($this->gatewayClusterTickInFlight) {
+                    break;
+                }
+                $this->gatewayClusterTickInFlight = true;
+                try {
+                    // 同一轮只抓一次 upstream，节点表与 dashboard 广播复用同一份快照。
+                    $upstreams = $this->dashboardUpstreams();
+                    $this->refreshLocalGatewayNodeStatus($upstreams);
+                    $this->pruneDisconnectedNodeClients();
+                    if ($this->dashboardClients) {
+                        $this->pushDashboardStatus(null, $upstreams);
+                    }
+                } finally {
+                    $this->gatewayClusterTickInFlight = false;
+                    Runtime::instance()->set(Key::RUNTIME_GATEWAY_CLUSTER_TICK_PENDING_AT, 0);
                 }
                 break;
             case 'gateway_control_shutdown':

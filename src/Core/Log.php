@@ -15,8 +15,8 @@ use Scf\Server\Manager;
 use Scf\Util\Date;
 use Scf\Util\Dir;
 use Scf\Util\File;
+use Scf\Util\ReverseFileReader;
 use Scf\Util\Time;
-use Swoole\Coroutine\System;
 use Throwable;
 use Scf\Cloud\Ali\Dingtalk;
 
@@ -446,21 +446,66 @@ class Log extends Component {
         }
         $day = date('Y-m-d', strtotime($log['day']));
         $fileName = $dir . $day . '.log';
-        $success = File::write($fileName, !is_string($message) ? JsonHelper::toJson($message) : $message, true);
-        if ($success && $day == date('Y-m-d')) {
+        $serializedMessage = !is_string($message) ? JsonHelper::toJson($message) : $message;
+
+        return (bool)$this->withLogCounterLock($fileName, function () use (
+            $fileName,
+            $serializedMessage,
+            $day,
+            $type,
+            $message
+        ): bool {
             $taskName = is_array($message) ? ($message['task'] ?? null) : null;
-            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
+            [$todayCountKey, $todayStampKey, $todaySizeKey, $todayInodeKey, $todayMtimeKey]
+                = $this->todayLogCounterKeys($type, $taskName);
             $todayStamp = (int)date('Ymd');
-            $savedStamp = (int)(Counter::instance()->get($todayStampKey) ?: 0);
-            // 日切时复用同一组 key 并重置计数，避免“按日期扩张 key”把 Counter 表打满。
-            if ($savedStamp !== $todayStamp || !Counter::instance()->exist($todayCountKey)) {
-                Counter::instance()->set($todayCountKey, $this->countFileLines($fileName));
-                Counter::instance()->set($todayStampKey, $todayStamp);
-            } else {
-                Counter::instance()->incr($todayCountKey);
+            $before = $this->logFileSignature($fileName);
+            $counterReady = $day === date('Y-m-d')
+                && (int)(Counter::instance()->get($todayStampKey) ?: 0) === $todayStamp
+                && Counter::instance()->exist($todayCountKey)
+                && $this->logCounterSignatureMatches(
+                    $before,
+                    $todaySizeKey,
+                    $todayInodeKey,
+                    $todayMtimeKey
+                );
+
+            $success = File::write($fileName, $serializedMessage, true);
+            if (!$success || $day !== date('Y-m-d')) {
+                return $success;
             }
-        }
-        return $success;
+
+            if ($counterReady) {
+                Counter::instance()->incr(
+                    $todayCountKey,
+                    '_value',
+                    substr_count($serializedMessage, "\n") + 1
+                );
+                // File::write 的 append 模式固定补一个换行。按预期字节数推进，
+                // 旁路写入会造成 stat 不匹配并在下次 count 自动重建。
+                Counter::instance()->set(
+                    $todaySizeKey,
+                    (int)($before['size'] ?? 0) + strlen($serializedMessage) + 1
+                );
+                $after = $this->logFileSignature($fileName);
+                Counter::instance()->set($todayInodeKey, (int)($after['inode'] ?? 0));
+                Counter::instance()->set($todayMtimeKey, (int)($after['mtime'] ?? 0));
+                Counter::instance()->set($todayStampKey, $todayStamp);
+                return true;
+            }
+
+            // 冷启动、跨日、truncate/rotate 或旁路写入后只在这里重建一次。
+            $this->rebuildTodayLogCounter(
+                $fileName,
+                $todayStamp,
+                $todayCountKey,
+                $todayStampKey,
+                $todaySizeKey,
+                $todayInodeKey,
+                $todayMtimeKey
+            );
+            return true;
+        });
     }
 
     /**
@@ -484,23 +529,60 @@ class Log extends Component {
         $fileName = $dir . $day . '.log';
         $today = date('Y-m-d');
         if ($day === $today) {
-            [$todayCountKey, $todayStampKey] = $this->todayLogCounterKeys($type, $taskName);
+            [$todayCountKey, $todayStampKey, $todaySizeKey, $todayInodeKey, $todayMtimeKey]
+                = $this->todayLogCounterKeys($type, $taskName);
             $todayStamp = (int)date('Ymd');
             $savedStamp = (int)(Counter::instance()->get($todayStampKey) ?: 0);
-            $cachedCount = null;
-            if ($savedStamp === $todayStamp && Counter::instance()->exist($todayCountKey)) {
-                $cachedCount = (int)(Counter::instance()->get($todayCountKey) ?: 0);
+            $signature = $this->logFileSignature($fileName);
+            if (
+                $savedStamp === $todayStamp
+                && Counter::instance()->exist($todayCountKey)
+                && $this->logCounterSignatureMatches(
+                    $signature,
+                    $todaySizeKey,
+                    $todayInodeKey,
+                    $todayMtimeKey
+                )
+            ) {
+                return (int)(Counter::instance()->get($todayCountKey) ?: 0);
             }
-            $count = $this->countFileLines($fileName);
-            if ($cachedCount === null || $cachedCount !== $count) {
-                Counter::instance()->set($todayCountKey, $count);
-                Counter::instance()->set($todayStampKey, $todayStamp);
-            }
-            return $count;
+
+            return (int)$this->withLogCounterLock($fileName, function () use (
+                $fileName,
+                $todayStamp,
+                $todayCountKey,
+                $todayStampKey,
+                $todaySizeKey,
+                $todayInodeKey,
+                $todayMtimeKey
+            ): int {
+                // 等待并发 writer 后再次确认，正常写入无需扫描文件。
+                $signature = $this->logFileSignature($fileName);
+                if (
+                    (int)(Counter::instance()->get($todayStampKey) ?: 0) === $todayStamp
+                    && Counter::instance()->exist($todayCountKey)
+                    && $this->logCounterSignatureMatches(
+                        $signature,
+                        $todaySizeKey,
+                        $todayInodeKey,
+                        $todayMtimeKey
+                    )
+                ) {
+                    return (int)(Counter::instance()->get($todayCountKey) ?: 0);
+                }
+                return $this->rebuildTodayLogCounter(
+                    $fileName,
+                    $todayStamp,
+                    $todayCountKey,
+                    $todayStampKey,
+                    $todaySizeKey,
+                    $todayInodeKey,
+                    $todayMtimeKey
+                );
+            });
         }
 
-        $count = $this->countFileLines($fileName);
-        return $count;
+        return $this->countFileLines($fileName);
     }
 
     /**
@@ -512,12 +594,100 @@ class Log extends Component {
      *
      * @param string $type
      * @param string|null $taskName
-     * @return array{string,string}
+     * @return array{string,string,string,string,string}
      */
     protected function todayLogCounterKeys(string $type, ?string $taskName = null): array {
         $scope = $taskName ? ($type . ':' . $taskName) : $type;
         $hash = md5('LOG_TODAY_COUNTER:' . $scope);
-        return ['LCNT_' . $hash, 'LCNT_DAY_' . $hash];
+        return [
+            'LCNT_' . $hash,
+            'LCNT_DAY_' . $hash,
+            'LCNT_SIZE_' . $hash,
+            'LCNT_INO_' . $hash,
+            'LCNT_MTIME_' . $hash,
+        ];
+    }
+
+    /**
+     * 用同一日志文件的锁串行化“append + Counter 提交”与异常重建。
+     */
+    protected function withLogCounterLock(string $fileName, callable $callback): mixed {
+        $lockFile = $fileName . '.counter.lock';
+        $handle = @fopen($lockFile, 'c');
+        if (!is_resource($handle)) {
+            return $callback();
+        }
+        @flock($handle, LOCK_EX);
+        try {
+            return $callback();
+        } finally {
+            @flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
+     * @return array{size:int,inode:int,mtime:int}
+     */
+    protected function logFileSignature(string $fileName): array {
+        clearstatcache(true, $fileName);
+        $stat = @stat($fileName);
+        return [
+            'size' => is_array($stat) ? (int)($stat['size'] ?? 0) : 0,
+            'inode' => is_array($stat) ? (int)($stat['ino'] ?? 0) : 0,
+            'mtime' => is_array($stat) ? (int)($stat['mtime'] ?? 0) : 0,
+        ];
+    }
+
+    protected function logCounterSignatureMatches(
+        array $signature,
+        string $sizeKey,
+        string $inodeKey,
+        string $mtimeKey
+    ): bool {
+        return Counter::instance()->exist($sizeKey)
+            && Counter::instance()->exist($inodeKey)
+            && Counter::instance()->exist($mtimeKey)
+            && (int)(Counter::instance()->get($sizeKey) ?: 0) === (int)($signature['size'] ?? 0)
+            && (int)(Counter::instance()->get($inodeKey) ?: 0) === (int)($signature['inode'] ?? 0)
+            && (int)(Counter::instance()->get($mtimeKey) ?: 0) === (int)($signature['mtime'] ?? 0);
+    }
+
+    protected function rebuildTodayLogCounter(
+        string $fileName,
+        int $todayStamp,
+        string $countKey,
+        string $stampKey,
+        string $sizeKey,
+        string $inodeKey,
+        string $mtimeKey
+    ): int {
+        $count = 0;
+        $stable = false;
+        $signature = $this->logFileSignature($fileName);
+        // 旁路 writer 不遵循本锁时，最多重试一次；仍变化则不提交 stamp，
+        // 下一次读取继续校正，避免把不一致快照伪装成有效缓存。
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $before = $this->logFileSignature($fileName);
+            $count = $this->countFileLines($fileName);
+            $signature = $this->logFileSignature($fileName);
+            if ($before === $signature) {
+                $stable = true;
+                break;
+            }
+        }
+        if (!$stable) {
+            Counter::instance()->set($stampKey, 0);
+            return $count;
+        }
+
+        Counter::instance()->set($countKey, $count);
+        Counter::instance()->set($sizeKey, (int)$signature['size']);
+        Counter::instance()->set($inodeKey, (int)$signature['inode']);
+        Counter::instance()->set($mtimeKey, (int)$signature['mtime']);
+        // stamp 最后提交；所有读取都在同一锁下，看到正确 stamp 即代表整组状态完整。
+        Counter::instance()->set($stampKey, $todayStamp);
+        return $count;
     }
 
     /**
@@ -598,18 +768,7 @@ class Log extends Component {
         }
         clearstatcache();
         $logs = [];
-        // 使用 tac 命令倒序读取文件，然后用 sed 命令读取指定行数
-        $command = sprintf(
-            'tac %s | sed -n %d,%dp',
-            escapeshellarg($fileName),
-            $start + 1,
-            $start + $size
-        );
-        $result = System::exec($command);
-        if ($result === false) {
-            return [];
-        }
-        $lines = explode("\n", $result['output']);
+        $lines = ReverseFileReader::page($fileName, (int)$start, (int)$size);
         foreach ($lines as $line) {
             if (trim($line) && ($log = JsonHelper::is($line) ? JsonHelper::recover($line) : $line)) {
                 $logs[] = $log;
@@ -641,32 +800,29 @@ class Log extends Component {
      * @return int
      */
     protected function countFileLines($file): int {
-        $line = 0; //初始化行数
-        if (file_exists($file)) {
-            // Log 组件既会跑在 Swoole worker 协程里，也会跑在 Linux cron 这种普通 CLI 进程里。
-            // `System::exec()` 只能在协程上下文调用，因此这里需要给一次性任务保留非协程兜底路径。
-            if (class_exists(\Swoole\Coroutine::class) && \Swoole\Coroutine::getCid() > 0) {
-                $result = System::exec("wc -l " . escapeshellarg($file));
-                if ($result !== false) {
-                    $output = trim((string)($result['output'] ?? ''));
-                    $arr = preg_split('/\s+/', $output);
-                    $line = (int)($arr[0] ?? 0);
-                    return $line;
-                }
-            }
-
-            $handler = @fopen($file, 'rb');
-            if (is_resource($handler)) {
-                while (!feof($handler)) {
-                    $chunk = fgets($handler);
-                    if ($chunk !== false) {
-                        $line++;
-                    }
-                }
-                fclose($handler);
-            }
+        if (!is_file($file)) {
+            return 0;
         }
-        return $line;
+        $handler = @fopen($file, 'rb');
+        if (!is_resource($handler)) {
+            return 0;
+        }
+        $lines = 0;
+        $lastByte = '';
+        while (!feof($handler)) {
+            $chunk = fread($handler, 1024 * 1024);
+            if (!is_string($chunk) || $chunk === '') {
+                break;
+            }
+            $lines += substr_count($chunk, "\n");
+            $lastByte = substr($chunk, -1);
+        }
+        fclose($handler);
+        // 兼容没有尾换行的旁路日志；File::write 正常路径始终以换行结尾。
+        if ($lastByte !== '' && $lastByte !== "\n") {
+            $lines++;
+        }
+        return $lines;
     }
 
     protected function formatBackTrace($backTrace): array {

@@ -5,6 +5,8 @@ namespace Scf\Server\Gateway;
 use RuntimeException;
 use Scf\Core\Console;
 use Scf\Core\Server as CoreServer;
+use Scf\Util\ProcessCommandLine;
+use Scf\Util\ProcessInspector;
 use Swoole\Coroutine;
 use Swoole\Coroutine\Http\Client as CoroutineHttpClient;
 use Swoole\Process;
@@ -29,6 +31,13 @@ class AppServerLauncher {
     public const NORMAL_RECYCLE_GRACE_SECONDS = 1800;
     protected const RECYCLE_WARN_AFTER_SECONDS = 60;
     protected const RECYCLE_WARN_INTERVAL_SECONDS = 60;
+    protected const PROCESS_STATE_CACHE_TTL_SECONDS = 5;
+    protected const PROCESS_STATE_FAILURE_CACHE_TTL_SECONDS = 1;
+    protected array $processStateCache = [];
+    /**
+     * @var array<int, array{token:string,lock_file:string,started_at:float}>
+     */
+    protected array $trustedLaunches = [];
 
     /**
      * 探测指定主机端口是否已在监听。
@@ -44,14 +53,10 @@ class AppServerLauncher {
         }
         $host = $this->normalizeProbeHost($host);
 
-        // 健康检查高频路径先走一次快速 connect 探活，成功即认为监听存在；
-        // connect 失败时再回落到 LISTEN 级 PID 扫描，避免在 macOS 下的
-        // TIME_WAIT/SO_REUSEPORT 边界场景把端口状态误判成可用。
+        // 高频路径只允许原生 connect。PID ownership 仅在真正发送信号的
+        // 低频边界查询，禁止健康/状态轮询周期性启动 lsof。
         if ($this->isLocalProbeHost($host)) {
-            if ($this->probeTcpConnectivity('127.0.0.1', $port, min(0.05, max(0.01, $timeoutSeconds)))) {
-                return true;
-            }
-            return CoreServer::isListeningPortInUse($port);
+            return $this->probeTcpConnectivity($host, $port, min(0.05, max(0.01, $timeoutSeconds)));
         }
 
         return $this->probeTcpConnectivity($host, $port, $timeoutSeconds);
@@ -133,8 +138,9 @@ class AppServerLauncher {
      */
     public function findAvailablePort(string $host, int $startPort, int $maxScan = 200): int {
         $port = max(1025, $startPort);
+        $bindHost = $this->normalizeBindHost($host);
         for ($i = 0; $i < $maxScan; $i++, $port++) {
-            if (!CoreServer::isListeningPortInUse($port)) {
+            if (!CoreServer::isPortInUse($port, $bindHost)) {
                 return $port;
             }
         }
@@ -165,15 +171,28 @@ class AppServerLauncher {
         }
 
         $port = max(1025, $startPort);
+        $bindHost = $this->normalizeBindHost($host);
         for ($i = 0; $i < $maxScan; $i++, $port++) {
             if (isset($reserved[$port])) {
                 continue;
             }
-            if (!CoreServer::isListeningPortInUse($port)) {
+            if (!CoreServer::isPortInUse($port, $bindHost)) {
                 return $port;
             }
         }
         throw new RuntimeException("未找到可用端口(含保留端口约束)，起始端口:{$startPort}");
+    }
+
+    /**
+     * 归一化真实 socket_bind 使用的地址；与 connect 探测语义分开。
+     */
+    protected function normalizeBindHost(string $host): string {
+        $host = trim($host);
+        return match ($host) {
+            '', '::' => '0.0.0.0',
+            'localhost', '::1' => '127.0.0.1',
+            default => $host,
+        };
     }
 
     /**
@@ -202,9 +221,35 @@ class AppServerLauncher {
         $command = $this->buildCommand($app, $env, $role, $port, $rpcPort, $src, $extra);
         $binary = PHP_BINARY;
         $args = array_slice($command, 1);
+        $launchToken = bin2hex(random_bytes(16));
+        $launchLockFile = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR . 'scf-upstream-launch-' . $launchToken . '.lock';
 
-        $process = new Process(function (Process $process) use ($binary, $args) {
+        $process = new Process(function (Process $process) use ($binary, $args, $launchToken, $launchLockFile) {
+            // 在 exec(PHP_BINARY) 之前取得唯一身份锁。即便新 PHP 卡在
+            // macOS 的 _dyld_start，父进程也能在不依赖 ps/lsof 的情况下
+            // 精确识别并回收自己刚创建的 PID。
+            $lock = @fopen($launchLockFile, 'c+');
+            if (!is_resource($lock) || !@flock($lock, LOCK_EX | LOCK_NB)) {
+                if (is_resource($lock)) {
+                    @fclose($lock);
+                }
+                exit(1);
+            }
+            $identity = json_encode([
+                'pid' => getmypid(),
+                'token' => $launchToken,
+                'started_at' => microtime(true),
+            ], JSON_UNESCAPED_SLASHES);
+            @rewind($lock);
+            @ftruncate($lock, 0);
+            @fwrite($lock, is_string($identity) ? $identity : '');
+            @fflush($lock);
             $process->exec($binary, $args);
+            // exec 只有失败才会返回；成功时文件描述符随新进程继续持锁。
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+            @unlink($launchLockFile);
             exit(1);
         }, false, SOCK_DGRAM, false);
 
@@ -214,6 +259,8 @@ class AppServerLauncher {
             'host' => (string)($options['host'] ?? '127.0.0.1'),
             'role' => $role,
             'command' => $binary . ' ' . implode(' ', array_map('escapeshellarg', $args)),
+            'launch_token' => $launchToken,
+            'launch_lock_file' => $launchLockFile,
         ];
     }
 
@@ -244,15 +291,23 @@ class AppServerLauncher {
      * @throws RuntimeException 当进程启动失败时抛出。
      */
     public function launch(array $options): array {
+        $this->reapTrustedLaunches();
         $spec = $this->createManagedProcess($options);
         /** @var Process $process */
         $process = $spec['process'];
         $pid = $process->start();
         if ($pid <= 0) {
+            @unlink((string)($spec['launch_lock_file'] ?? ''));
             throw new RuntimeException('拉起业务 server 失败:process start failed');
         }
 
         $spec['pid'] = $pid;
+        $spec['launch_pid'] = $pid;
+        $this->trustedLaunches[$pid] = [
+            'token' => (string)($spec['launch_token'] ?? ''),
+            'lock_file' => (string)($spec['launch_lock_file'] ?? ''),
+            'started_at' => microtime(true),
+        ];
         unset($spec['process']);
         return $spec;
     }
@@ -453,51 +508,59 @@ class AppServerLauncher {
         $masterPid = (int)($metadata['master_pid'] ?? 0);
         $managerPid = (int)($metadata['manager_pid'] ?? 0);
         $pid = (int)($metadata['pid'] ?? 0);
+        $launchPid = (int)($metadata['launch_pid'] ?? 0);
         $signal = $hard ? SIGKILL : SIGTERM;
+        // 单次回收只允许采一份 pid/ppid/command 快照，后续 owner 解析与
+        // 进程树回收全部复用，禁止每个 PID 再启动一次 ps。
+        $snapshot = $this->loadProcessSnapshot();
         $targetRootPids = [];
-        if ($masterPid > 0 && @Process::kill($masterPid, 0)) {
+        $hasOwnedRoot = false;
+        $masterCommand = (string)($snapshot[$masterPid]['command'] ?? '');
+        if (
+            $masterPid > 0
+            && @Process::kill($masterPid, 0)
+            && $this->commandMatchesManagedOwnership($masterCommand, $instance)
+        ) {
             $targetRootPids[$masterPid] = $masterPid;
+            $hasOwnedRoot = true;
         }
         if ($managerPid > 0 && @Process::kill($managerPid, 0)) {
-            $snapshot = $this->loadProcessSnapshot();
             $resolvedRootPid = $this->resolveOwnedManagedRootPid($managerPid, $snapshot, $instance);
-            if ($resolvedRootPid <= 0) {
-                $fallbackRootPid = $this->resolveProcessTreeRootPid($managerPid, $snapshot);
-                if (
-                    $fallbackRootPid > 0
-                    && (
-                        ($port > 0 && $this->processTreeOwnsPort($fallbackRootPid, $port, $snapshot))
-                        || ($rpcPort > 0 && $this->processTreeOwnsPort($fallbackRootPid, $rpcPort, $snapshot))
-                    )
-                ) {
-                    $resolvedRootPid = $fallbackRootPid;
-                }
-            }
             if ($resolvedRootPid > 0) {
                 $targetRootPids[$resolvedRootPid] = $resolvedRootPid;
+                $hasOwnedRoot = true;
             }
         }
         if ($pid > 0) {
-            $snapshot = $this->loadProcessSnapshot();
             // metadata.pid 可能短暂指向 manager/worker。强制回收必须先解析到 owner 根进程，
             // 否则只杀 manager 会被 master 立刻补拉 worker，出现“关闭后又启动”的假象。
             $resolvedRootPid = $this->resolveOwnedManagedRootPid($pid, $snapshot, $instance);
             if ($resolvedRootPid > 0) {
                 $targetRootPids[$resolvedRootPid] = $resolvedRootPid;
-            } elseif ($masterPid <= 0 && $managerPid <= 0) {
-                // 仅在没有明确 master/manager PID 可用时，才把原始 pid 作为最后兜底，
-                // 防止 “无目标可杀” 导致回收状态机永远卡在 pending。
-                $targetRootPids[$pid] = $pid;
+                $hasOwnedRoot = true;
             }
         }
-        if ($port > 0) {
-            foreach ($this->collectOwnedManagedRootPids($instance, $port, true) as $ownerRootPid) {
-                $targetRootPids[$ownerRootPid] = $ownerRootPid;
-            }
+        if (
+            !$hasOwnedRoot
+            && $launchPid > 0
+            && $this->isTrustedLaunchedProcess($launchPid, $metadata)
+        ) {
+            // ps 本身也可能卡在系统验证链。唯一身份锁允许这里只回收
+            // 本 launcher 刚创建的准确 PID，不信任普通 metadata.pid。
+            $targetRootPids[$launchPid] = $launchPid;
+            $hasOwnedRoot = true;
         }
-        if ($rpcPort > 0) {
-            foreach ($this->collectOwnedManagedRootPids($instance, $rpcPort, false) as $ownerRootPid) {
-                $targetRootPids[$ownerRootPid] = $ownerRootPid;
+        // 只有 metadata/父链无法解析 owner 时才做端口级兜底；正常路径不再执行 lsof。
+        if (!$hasOwnedRoot) {
+            if ($port > 0) {
+                foreach ($this->collectOwnedManagedRootPids($instance, $port, true, $snapshot) as $ownerRootPid) {
+                    $targetRootPids[$ownerRootPid] = $ownerRootPid;
+                }
+            }
+            if ($rpcPort > 0) {
+                foreach ($this->collectOwnedManagedRootPids($instance, $rpcPort, false, $snapshot) as $ownerRootPid) {
+                    $targetRootPids[$ownerRootPid] = $ownerRootPid;
+                }
             }
         }
 
@@ -505,7 +568,83 @@ class AppServerLauncher {
         // pending 项可能短暂持有旧 pid（例如 manager）。这里统一补充“按端口 ownership
         // 反查得到的实例根 pid”，确保软/硬回收都能命中真正的 upstream master 进程。
         foreach ($targetRootPids as $targetPid) {
-            $this->killProcessTree((int)$targetPid, $signal);
+            $this->killProcessTree((int)$targetPid, $signal, $snapshot);
+        }
+    }
+
+    /**
+     * 校验启动身份锁是否仍由指定 PID/token 的子进程持有。
+     *
+     * @param int $pid
+     * @param array<string, mixed> $metadata
+     * @return bool
+     */
+    protected function isTrustedLaunchedProcess(int $pid, array $metadata): bool {
+        if ($pid <= 0 || !@Process::kill($pid, 0)) {
+            $this->forgetTrustedLaunch($pid);
+            return false;
+        }
+
+        $registered = (array)($this->trustedLaunches[$pid] ?? []);
+        $token = (string)($metadata['launch_token'] ?? ($registered['token'] ?? ''));
+        $lockFile = (string)($metadata['launch_lock_file'] ?? ($registered['lock_file'] ?? ''));
+        if (
+            $token === ''
+            || $lockFile === ''
+            || (string)($registered['token'] ?? $token) !== $token
+            || (string)($registered['lock_file'] ?? $lockFile) !== $lockFile
+            || !is_file($lockFile)
+        ) {
+            if ($registered && (microtime(true) - (float)($registered['started_at'] ?? 0)) >= 1.0) {
+                $this->forgetTrustedLaunch($pid);
+            }
+            return false;
+        }
+
+        $lock = @fopen($lockFile, 'r+');
+        if (!is_resource($lock)) {
+            return false;
+        }
+        if (@flock($lock, LOCK_EX | LOCK_NB)) {
+            // 文件仍在但已无人持锁，说明原进程已退出；清理残留身份文件。
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+            $this->forgetTrustedLaunch($pid);
+            return false;
+        }
+
+        @rewind($lock);
+        $raw = @stream_get_contents($lock);
+        @fclose($lock);
+        $identity = is_string($raw) ? json_decode($raw, true) : null;
+        return is_array($identity)
+            && (int)($identity['pid'] ?? 0) === $pid
+            && hash_equals($token, (string)($identity['token'] ?? ''));
+    }
+
+    /**
+     * 清除已经失效的 launcher 身份记录和锁文件。
+     */
+    protected function forgetTrustedLaunch(int $pid): void {
+        $registered = (array)($this->trustedLaunches[$pid] ?? []);
+        unset($this->trustedLaunches[$pid]);
+        $lockFile = (string)($registered['lock_file'] ?? '');
+        if ($lockFile !== '') {
+            @unlink($lockFile);
+        }
+    }
+
+    /**
+     * 回收已经退出的启动身份，避免正常运行期间累积无主临时文件。
+     */
+    protected function reapTrustedLaunches(): void {
+        foreach (array_keys($this->trustedLaunches) as $pid) {
+            $pid = (int)$pid;
+            $registered = (array)($this->trustedLaunches[$pid] ?? []);
+            if ((microtime(true) - (float)($registered['started_at'] ?? 0)) < 1.0) {
+                continue;
+            }
+            $this->isTrustedLaunchedProcess($pid, []);
         }
     }
 
@@ -605,13 +744,38 @@ class AppServerLauncher {
      */
     protected function isProcessRunning(int $pid): bool {
         if ($pid <= 0 || !@Process::kill($pid, 0)) {
+            unset($this->processStateCache[$pid]);
             return false;
         }
-        $stat = @shell_exec("ps -o stat= -p " . (int)$pid . " 2>/dev/null");
-        if (!is_string($stat) || trim($stat) === '') {
-            return false;
+        $cached = $this->processStateCache[$pid] ?? null;
+        if (
+            is_array($cached)
+            && (microtime(true) - (float)($cached['sampled_at'] ?? 0)) < (
+                ($cached['sample_ok'] ?? false)
+                    ? self::PROCESS_STATE_CACHE_TTL_SECONDS
+                    : self::PROCESS_STATE_FAILURE_CACHE_TTL_SECONDS
+            )
+        ) {
+            return (bool)($cached['running'] ?? false);
         }
-        return !str_contains(trim($stat), 'Z');
+        $processInfo = ProcessInspector::find($pid);
+        if (!is_array($processInfo)) {
+            // kill(0) 已确认 PID 存在；ps 快照超时或进程恰好退出时不能把它
+            // 误判成已回收，否则旧实例可能仍在监听。下轮会再次核验。
+            $this->processStateCache[$pid] = [
+                'sampled_at' => microtime(true),
+                'sample_ok' => false,
+                'running' => true,
+            ];
+            return true;
+        }
+        $running = !str_contains((string)($processInfo['state'] ?? ''), 'Z');
+        $this->processStateCache[$pid] = [
+            'sampled_at' => microtime(true),
+            'sample_ok' => true,
+            'running' => $running,
+        ];
+        return $running;
     }
 
     /**
@@ -637,11 +801,11 @@ class AppServerLauncher {
      * @param int $signal SIGTERM 或 SIGKILL
      * @return void
      */
-    protected function killProcessTree(int $rootPid, int $signal): void {
+    protected function killProcessTree(int $rootPid, int $signal, array $snapshot): void {
         if ($rootPid <= 0 || !@Process::kill($rootPid, 0)) {
             return;
         }
-        $tree = $this->collectDescendantPids($rootPid);
+        $tree = $this->collectDescendantPids($rootPid, $snapshot);
         // 先杀子进程再杀根，避免 manager 在 root 存活期间立刻补拉 worker。
         foreach (array_reverse($tree) as $pid) {
             if ($pid <= 0) {
@@ -662,23 +826,15 @@ class AppServerLauncher {
      * @param int $rootPid 根进程 PID
      * @return array<int, int>
      */
-    protected function collectDescendantPids(int $rootPid): array {
+    protected function collectDescendantPids(int $rootPid, array $snapshot): array {
         if ($rootPid <= 0) {
-            return [];
-        }
-        $output = @shell_exec('ps -axo pid=,ppid= 2>/dev/null');
-        if (!is_string($output) || trim($output) === '') {
             return [];
         }
 
         $childrenByParent = [];
-        foreach (preg_split('/\r?\n/', trim($output)) ?: [] as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)$/', $line, $matches)) {
-                continue;
-            }
-            $pid = (int)($matches[1] ?? 0);
-            $ppid = (int)($matches[2] ?? 0);
+        foreach ($snapshot as $pid => $processInfo) {
+            $pid = (int)$pid;
+            $ppid = (int)($processInfo['ppid'] ?? 0);
             if ($pid <= 0 || $ppid <= 0) {
                 continue;
             }
@@ -711,7 +867,12 @@ class AppServerLauncher {
      * @param bool $matchHttpPort true 表示按 `-port` 匹配；false 表示按 `-rport` 匹配
      * @return array<int, int>
      */
-    protected function collectOwnedManagedListenerPids(array $instance, int $listenPort, bool $matchHttpPort): array {
+    protected function collectOwnedManagedListenerPids(
+        array $instance,
+        int $listenPort,
+        bool $matchHttpPort,
+        array $snapshot
+    ): array {
         if ($listenPort <= 0) {
             return [];
         }
@@ -720,36 +881,31 @@ class AppServerLauncher {
         $rpcPort = (int)($instance['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
         $gatewayPort = (int)($metadata['gateway_port'] ?? 0);
         $ownerEpoch = (int)($metadata['owner_epoch'] ?? 0);
-        $appFlag = '-app=' . APP_DIR_NAME;
-        $expectedPortFlag = $matchHttpPort ? ('-port=' . $httpPort) : ($rpcPort > 0 ? ('-rport=' . $rpcPort) : '');
-
         $owned = [];
-        foreach (CoreServer::findPidsByPort($listenPort) as $pid) {
+        foreach (CoreServer::findPidsByPort($listenPort, true) as $pid) {
             $pid = (int)$pid;
             if ($pid <= 0 || !@Process::kill($pid, 0)) {
                 continue;
             }
-            $command = @shell_exec('ps -o command= -p ' . $pid . ' 2>/dev/null');
-            $command = is_string($command) ? trim($command) : '';
+            $command = trim((string)($snapshot[$pid]['command'] ?? ''));
             if ($command === '' || !str_contains($command, 'boot gateway_upstream start')) {
                 continue;
             }
-            if (!str_contains($command, $appFlag)) {
+            if (!ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)) {
                 continue;
             }
-            if ($expectedPortFlag !== '' && !str_contains($command, $expectedPortFlag)) {
+            $expectedPortOption = $matchHttpPort ? 'port' : 'rport';
+            $expectedPort = $matchHttpPort ? $httpPort : $rpcPort;
+            if ($expectedPort > 0 && !ProcessCommandLine::hasOptionValue($command, $expectedPortOption, $expectedPort)) {
                 continue;
             }
 
             // 只清理 owner 匹配的实例，避免误伤同机其它 gateway/upstream。
-            if ($gatewayPort > 0 && !str_contains($command, '-gateway_port=' . $gatewayPort)) {
+            if ($gatewayPort > 0 && !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $gatewayPort)) {
                 continue;
             }
             if ($ownerEpoch > 0) {
-                if (!preg_match('/(?:^|\s)-gateway_epoch=(\d+)(?:\s|$)/', $command, $matches)) {
-                    continue;
-                }
-                if ((int)($matches[1] ?? 0) !== $ownerEpoch) {
+                if (!ProcessCommandLine::hasOptionValue($command, 'gateway_epoch', $ownerEpoch)) {
                     continue;
                 }
             }
@@ -771,12 +927,16 @@ class AppServerLauncher {
      * @param bool $matchHttpPort true 表示按 `-port` 匹配；false 表示按 `-rport` 匹配
      * @return array<int, int>
      */
-    protected function collectOwnedManagedRootPids(array $instance, int $listenPort, bool $matchHttpPort): array {
-        $listenerPids = $this->collectOwnedManagedListenerPids($instance, $listenPort, $matchHttpPort);
+    protected function collectOwnedManagedRootPids(
+        array $instance,
+        int $listenPort,
+        bool $matchHttpPort,
+        array $snapshot
+    ): array {
+        $listenerPids = $this->collectOwnedManagedListenerPids($instance, $listenPort, $matchHttpPort, $snapshot);
         if (!$listenerPids) {
             return [];
         }
-        $snapshot = $this->loadProcessSnapshot();
         $roots = [];
         foreach ($listenerPids as $listenerPid) {
             $rootPid = $this->resolveOwnedManagedRootPid((int)$listenerPid, $snapshot, $instance);
@@ -794,28 +954,7 @@ class AppServerLauncher {
      * @return array<int, array{ppid:int, command:string}>
      */
     protected function loadProcessSnapshot(): array {
-        $snapshot = [];
-        $output = @shell_exec('ps -axo pid=,ppid=,command= 2>/dev/null');
-        if (!is_string($output) || trim($output) === '') {
-            return $snapshot;
-        }
-        foreach (preg_split('/\r?\n/', trim($output)) ?: [] as $line) {
-            $line = trim((string)$line);
-            if ($line === '' || !preg_match('/^(\d+)\s+(\d+)\s+(.+)$/', $line, $matches)) {
-                continue;
-            }
-            $pid = (int)($matches[1] ?? 0);
-            $ppid = (int)($matches[2] ?? 0);
-            $command = trim((string)($matches[3] ?? ''));
-            if ($pid <= 0 || $ppid < 0 || $command === '') {
-                continue;
-            }
-            $snapshot[$pid] = [
-                'ppid' => $ppid,
-                'command' => $command,
-            ];
-        }
-        return $snapshot;
+        return ProcessInspector::snapshot(true);
     }
 
     /**
@@ -837,12 +976,12 @@ class AppServerLauncher {
         $depth = 0;
         while ($currentPid > 0 && isset($snapshot[$currentPid]) && $depth < 64) {
             $depth++;
-            if ($expectedMasterPid > 0 && $currentPid === $expectedMasterPid) {
-                return $currentPid;
-            }
             $command = (string)($snapshot[$currentPid]['command'] ?? '');
             if (!$this->commandMatchesManagedOwnership($command, $instance)) {
                 break;
+            }
+            if ($expectedMasterPid > 0 && $currentPid === $expectedMasterPid) {
+                return $currentPid;
             }
             $lastOwnedPid = $currentPid;
             $parentPid = (int)($snapshot[$currentPid]['ppid'] ?? 0);
@@ -868,24 +1007,27 @@ class AppServerLauncher {
         }
 
         $metadata = (array)($instance['metadata'] ?? []);
-        $appFlag = '-app=' . APP_DIR_NAME;
-        if (!str_contains($command, $appFlag)) {
+        if (!ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)) {
             return false;
         }
 
         $gatewayPort = (int)($metadata['gateway_port'] ?? 0);
-        if ($gatewayPort > 0 && !str_contains($command, '-gateway_port=' . $gatewayPort)) {
+        if ($gatewayPort > 0 && !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $gatewayPort)) {
             return false;
         }
 
         $ownerEpoch = (int)($metadata['owner_epoch'] ?? 0);
-        if ($ownerEpoch > 0) {
-            if (!preg_match('/(?:^|\s)-gateway_epoch=(\d+)(?:\s|$)/', $command, $matches)) {
-                return false;
-            }
-            if ((int)($matches[1] ?? 0) !== $ownerEpoch) {
-                return false;
-            }
+        if ($ownerEpoch > 0 && !ProcessCommandLine::hasOptionValue($command, 'gateway_epoch', $ownerEpoch)) {
+            return false;
+        }
+
+        $httpPort = (int)($instance['port'] ?? 0);
+        if ($httpPort > 0 && !ProcessCommandLine::hasOptionValue($command, 'port', $httpPort)) {
+            return false;
+        }
+        $rpcPort = (int)($instance['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
+        if ($rpcPort > 0 && !ProcessCommandLine::hasOptionValue($command, 'rport', $rpcPort)) {
+            return false;
         }
         return true;
     }
