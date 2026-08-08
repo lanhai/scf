@@ -339,7 +339,7 @@ class {$className} extends Dao {
     protected string \$_dbName = "{$db}";
     protected string \$_table = "{$table}";
     protected string \$_primaryKey = "{$primaryKey}";
-    
+
 {$bodyContent}
 }
 EOF;
