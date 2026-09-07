@@ -21,6 +21,8 @@ class GatewayNginxProxyHandler {
     private const NGINX_CONTROL_TIMEOUT_SECONDS = 10.0;
     private const NGINX_MAX_OUTPUT_BYTES = 16_777_216;
 
+    protected ?NginxConfigTransaction $configTransaction = null;
+    protected ?string $lastAppliedConfigHash = null;
     protected ?array $nginxRuntimeMeta = null;
     protected ?string $lastObservedRuntimeMetaSignature = null;
     protected bool $runtimeMetaLoadedFromCache = false;
@@ -57,21 +59,16 @@ class GatewayNginxProxyHandler {
      * 让后续真正需要 sync 时能够直接复用缓存结果；它不会生成业务配置，也不会
      * 触发 nginx test/reload/start。
      *
+     * @param bool $ensureRunning 保留旧调用签名，启动动作统一在实例就绪后的 sync 完成。
      * @return array<string, mixed> 包含 runtime_meta 及其是否首次观测到变化。
      */
     public function warmupRuntimeMeta(bool $ensureRunning = false): array {
         $meta = $this->nginxRuntimeMeta();
-        $started = false;
-        if ($ensureRunning && !$this->isNginxRunning()) {
-            // 启动早期如果发现 nginx 进程不存在，就直接按当前主配置拉起，
-            // 避免 gateway 自己已上线但入口层仍然是断的。
-            $this->startNginx();
-            $started = true;
-        }
+        // 预热不能启动 nginx：旧 include 尚未核对，新业务也尚未就绪。
         return [
             'runtime_meta' => $meta,
             'runtime_meta_changed' => $this->markRuntimeMetaObserved($meta),
-            'started' => $started,
+            'started' => false,
         ];
     }
 
@@ -85,15 +82,42 @@ class GatewayNginxProxyHandler {
      * @throws RuntimeException 当配置写入、校验或 reload/start 失败时抛出。
      */
     public function sync(?string $reason = null): array {
+        $transaction = new NginxConfigTransaction($this->confDir());
+        $this->configTransaction = $transaction;
+        try {
+            return $this->syncLocked($reason);
+        } catch (\Throwable $error) {
+            $transaction->rollback();
+            $this->lastAppliedConfigHash = null;
+            throw $error;
+        } finally {
+            $this->configTransaction = null;
+            $transaction->close();
+        }
+    }
+
+    /**
+     * 在 nginx 配置锁内完成文件发布、校验及入口确认。
+     * @param string|null $reason 同步原因。
+     * @return array 同步结果。
+     * @throws RuntimeException 配置或入口确认失败。
+     */
+    protected function syncLocked(?string $reason): array {
         $runtimeMeta = $this->nginxRuntimeMeta();
         $globalFile = $this->generatedGlobalFile();
         $upstreamFile = $this->generatedUpstreamFile();
         $serverFile = $this->generatedServerFile();
         $exampleFile = $this->generatedExampleServerFile();
-        $conflictCleaned = $this->cleanupConflictingManagedConfigFiles();
+        $conflictCleaned = $this->cleanupRetiredManagedConfigFiles();
+        $conflictCleaned = $this->cleanupConflictingManagedConfigFiles() || $conflictCleaned;
         $globalContent = $this->renderGlobalConfig();
         $upstreamContent = $this->renderUpstreamConfig();
         $serverContent = $this->renderServerConfig();
+        $configHash = hash('sha256', $globalContent . $upstreamContent . $serverContent);
+        // -t/-T 只读取磁盘，-s reload 只确认信号发送。用 nginx 自身返回的配置指纹确认 HUP 已生效。
+        $serverContent = preg_replace('/\bserver\s*\{/', "server {\n"
+            . '    location = /_scf_internal/nginx/config_hash { if ($remote_addr !~ "^(127[.]0[.]0[.]1|::1)$") { return 403; } '
+            . 'default_type text/plain; return 200 "' . $configHash . '"; }' . "\n", $serverContent, 1);
 
         $globalChanged = $this->writeIfChanged($globalFile, $globalContent);
         $upstreamChanged = $this->writeIfChanged($upstreamFile, $upstreamContent);
@@ -119,7 +143,8 @@ class GatewayNginxProxyHandler {
         // 另外在 gateway 启动接管阶段，即使生成出来的 include 文件内容与上一轮一致，
         // 也要强制执行一次 reload。否则“文件已经在磁盘上，但 nginx 仍跑着旧配置”
         // 的场景下，启动日志会显示“已同步”，实际入口层却没有吃到新的 upstream。
-        if ($configChanged || $shouldEnsureRunning || $shouldForceReload) {
+        if ($configChanged || $shouldEnsureRunning || $shouldForceReload
+            || ($this->shouldReloadNginx() && $this->lastAppliedConfigHash !== $configHash)) {
             $this->testNginxConfig();
             $tested = true;
             if ($this->shouldReloadNginx()) {
@@ -132,6 +157,8 @@ class GatewayNginxProxyHandler {
         // 里看到这些文件。手工 reload 模式下配置可以先落盘、稍后再由运维触发加载。
         if ($reloaded) {
             $this->validateManagedFilesLoaded([$globalFile, $upstreamFile, $serverFile]);
+            $this->waitForAppliedConfig($configHash);
+            $this->lastAppliedConfigHash = $configHash;
         }
 
         return [
@@ -207,15 +234,10 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 校验当前 nginx 生效配置里已经包含 gateway 生成的 include 文件。
+     * 校验 nginx 主配置的 include 链覆盖 gateway 生成文件。
      *
-     * 这里使用 `nginx -T` 读取当前完整配置展开结果。如果这些文件没有出现在
-     * 生效配置里，就说明：
-     * 1. 主配置没有 include 到目标目录；
-     * 2. reload/start 后入口层仍未加载这批配置；
-     * 3. 当前使用的 nginx 与生成文件目录不一致。
-     *
-     * 无论哪种情况，都必须直接报错而不是继续把“已同步”打印成成功。
+     * `nginx -T` 展开的是磁盘配置，不能证明运行中的 worker 已加载它。
+     * 本方法只验证 include 链，实际生效结果由 waitForAppliedConfig 从入口验证。
      *
      * @param array<int, string> $paths 需要确认已被加载的文件路径。
      * @return void
@@ -932,13 +954,102 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 清理与当前 gateway 端口冲突的历史 managed 配置文件。
-     *
-     * 历史版本文件名可能包含 app/role（例如 `scf_gateway_{app}_{role}_{port}`），
-     * 也可能是当前端口收敛命名（`scf_upsteam_{port}`）。只要文件解析出的端口与
-     * 当前 businessPort 一致、且不是当前基础名，就视作冲突并删除。
-     *
-     * @return bool 本轮是否实际清理了冲突文件
+     * 隔离本应用已退役的其它端口配置，避免其监听冲突阻断整台 nginx。
+     * 必须同时确认 SCF 生成标记、应用归属、租约过期、无所有者进程及所有本机端点离线。
+     * 不操作外部进程或其它应用配置，备份由事务保存在 include 目录外。
+     * @return bool 本轮是否隔离了退役配置。
+     */
+    protected function cleanupRetiredManagedConfigFiles(): bool {
+        $snapshot = ProcessInspector::snapshot(true);
+        // 无法确认进程归属时保留配置，绝不把探测失败当成服务退役。
+        if (!$snapshot) return false;
+        $changed = false;
+        foreach (array_merge(glob($this->confDir() . '/scf_gateway_*.upstreams.conf') ?: [],
+            glob($this->confDir() . '/scf_upsteam_*.conf') ?: []) as $path) {
+            if (is_link($path) || !is_file($path)) continue;
+            $content = (string)file_get_contents($path);
+            if (!str_starts_with($content, '# generated by SCF Gateway')
+                || !preg_match('/^# app=([^,]+), role=([^,]+), port=(\d+)$/m', $content, $match)
+                || $match[1] !== APP_DIR_NAME) continue;
+            $port = (int)$match[3];
+            if ($port === $this->gateway->businessPort()
+                || $port !== $this->extractManagedConfigPortFromBasename(basename($path))) continue;
+            $lease = GatewayLease::readLease($port, $match[2]);
+            if ($lease && in_array($lease['state'] ?? '', ['running', 'restarting'], true)
+                && (int)($lease['expires_at'] ?? 0) + max(20, (int)($lease['meta']['restart_grace_seconds'] ?? 120)) >= time()) continue;
+            $live = false;
+            foreach ($snapshot as $process) {
+                $command = (string)($process['command'] ?? '');
+                if (\Scf\Util\ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)
+                    && ((str_contains($command, 'boot gateway start')
+                            && \Scf\Util\ProcessCommandLine::hasOptionValue($command, 'port', $port))
+                        || (str_contains($command, 'boot gateway_upstream start')
+                            && \Scf\Util\ProcessCommandLine::hasOptionValue($command, 'gateway_port', $port)))) {
+                    $live = true;
+                    break;
+                }
+            }
+            if ($live) continue;
+            preg_match_all('/^\s*server\s+([^;\s]+)[^;]*;/m', $content, $servers);
+            if (empty($servers[1])) continue;
+            foreach ($servers[1] as $endpoint) {
+                if (!preg_match('/^(127\.0\.0\.1|localhost|\[::1\]):(\d+)$/', $endpoint, $target)) {
+                    $live = true;
+                    break;
+                }
+                $socket = @stream_socket_client('tcp://' . $endpoint, $errno, $error, 0.2);
+                if (is_resource($socket)) {
+                    fclose($socket);
+                    $live = true;
+                    break;
+                }
+            }
+            if ($live) continue;
+            $base = preg_replace('/(?:\.upstreams)?\.conf$/', '', $path);
+            foreach ([$path, $base . '.server.conf', $base . '.server.example'] as $retired) {
+                if (is_link($retired)) continue;
+                $changed = $this->configTransaction->quarantine($retired) || $changed;
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * 通过真实 nginx 入口确认新 worker 已加载本轮配置；不能把信号发送成功当作切流成功。
+     * @param string $expected 配置指纹。
+     * @return void
+     * @throws RuntimeException 入口仍使用旧配置或不可达。
+     */
+    protected function waitForAppliedConfig(string $expected): void {
+        $port = $this->gateway->businessPort();
+        $host = $this->gateway->resolvedGatewayIngressProbeHost($port);
+        $deadline = microtime(true) + 5;
+        do {
+            $path = '/_scf_internal/nginx/config_hash';
+            if (\Swoole\Coroutine::getCid() >= 0) {
+                $client = new \Swoole\Coroutine\Http\Client('127.0.0.1', $port);
+                try {
+                    $client->set(['timeout' => 0.5]);
+                    $client->setHeaders(['Host' => $host, 'Connection' => 'close']);
+                    $client->get($path);
+                    $body = $client->statusCode === 200 ? $client->body : '';
+                } finally {
+                    $client->close();
+                }
+            } else {
+                $context = stream_context_create(['http' => ['timeout' => 0.5,
+                    'header' => "Host: {$host}\r\nConnection: close\r\n"]]);
+                $body = @file_get_contents('http://127.0.0.1:' . $port . $path, false, $context);
+            }
+            if (is_string($body) && hash_equals($expected, trim($body))) return;
+            NginxConfigTransaction::pause();
+        } while (microtime(true) < $deadline);
+        throw new RuntimeException('nginx 入口未加载本轮配置: port=' . $port);
+    }
+
+    /**
+     * 隔离同端口的旧命名配置；失败时由持锁事务恢复。
+     * @return bool 是否变化。
      */
     protected function cleanupConflictingManagedConfigFiles(): bool {
         $confDir = $this->confDir();
@@ -976,7 +1087,7 @@ class GatewayNginxProxyHandler {
                 if (str_starts_with($basename, $currentBase . '.')) {
                     continue;
                 }
-                if (@unlink($path)) {
+                if ($this->configTransaction->quarantine($path)) {
                     $removed[] = $basename;
                 }
             }
@@ -1040,10 +1151,8 @@ class GatewayNginxProxyHandler {
         if ($existing === $content) {
             return false;
         }
-        if (@file_put_contents($path, $content) === false) {
-            throw new RuntimeException('写入nginx配置失败: ' . $path);
-        }
-        return true;
+        if (!$this->configTransaction) throw new RuntimeException('nginx 配置写入必须持有事务锁');
+        return $this->configTransaction->write($path, $content);
     }
 
     /**
@@ -1133,7 +1242,11 @@ class GatewayNginxProxyHandler {
         if ($pid <= 0) {
             return false;
         }
-        return function_exists('posix_kill') ? @posix_kill($pid, 0) : is_dir('/proc/' . $pid);
+        $alive = function_exists('posix_kill') ? @posix_kill($pid, 0) : is_dir('/proc/' . $pid);
+        if (!$alive) return false;
+        $snapshot = ProcessInspector::snapshot(true);
+        if (!$snapshot) throw new RuntimeException('无法确认 nginx PID 归属，停止启动或重载');
+        return str_contains((string)($snapshot[$pid]['command'] ?? ''), 'nginx: master process');
     }
 
     /**
@@ -1241,6 +1354,13 @@ class GatewayNginxProxyHandler {
                 $meta['conf_path'] = $this->extractNginxBuildArg($versionInfo, 'conf-path');
             }
             $meta['pid_path'] = $this->extractNginxBuildArg($versionInfo, 'pid-path');
+        }
+        // 运行时 pid 指令优先于编译默认值，否则会对正在运行的 nginx 再次执行 start。
+        $mainConfig = is_file($meta['conf_path']) ? (string)file_get_contents($meta['conf_path']) : '';
+        if (preg_match('/^\s*pid\s+[\'"]?([^;\'"\s]+)[\'"]?\s*;/m', $mainConfig, $pidMatch)) {
+            $pidPath = $pidMatch[1];
+            $prefix = $this->extractNginxBuildArg($versionInfo, 'prefix');
+            $meta['pid_path'] = str_starts_with($pidPath, '/') ? $pidPath : rtrim($prefix, '/') . '/' . $pidPath;
         }
 
         // 双 nginx / 面板改造环境里，http include 目录可能同时存在 conf.d 与

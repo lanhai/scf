@@ -251,6 +251,26 @@ trait GatewayControlCommandTrait {
                     'internal_error_status' => 409,
                     'internal_success_status' => 200,
                 ];
+            case 'handoff':
+                if (!$this->nginxProxyModeEnabled() || !defined('SCF_BOOT_LOOP_PID')
+                    || ($params['app'] ?? '') !== APP_DIR_NAME
+                    || ($params['role'] ?? '') !== SERVER_ROLE
+                    || (int)($params['port'] ?? 0) !== $this->businessPort()) {
+                    return ['result' => Result::error('当前 Gateway 不支持此启动交接'), 'internal_error_status' => 409];
+                }
+                if ($this->gatewayShutdownScheduled) {
+                    return ['result' => Result::error('Gateway 已在关闭中'), 'internal_error_status' => 409];
+                }
+                // 针对旧 boot PID 标记退出，保留 upstream；新 boot 不会消费这个标记。
+                $flag = scf_process_control_flag_path($_SERVER['argv'], 'stop.' . SCF_BOOT_LOOP_PID);
+                if ($flag === '' || file_put_contents($flag, 'handoff') === false) {
+                    return ['result' => Result::error('无法停止旧 boot 监督循环'), 'internal_error_status' => 409];
+                }
+                return [
+                    'result' => Result::success('Gateway 已接受启动交接，保留业务实例'),
+                    'internal_success_status' => 200,
+                    'after_write' => function (): void { $this->scheduleGatewayShutdown(true); },
+                ];
             case 'restart':
                 if ($this->gatewayShutdownScheduled) {
                     return [
@@ -260,7 +280,7 @@ trait GatewayControlCommandTrait {
                 }
                 // restart 在 dashboard 里对应 Reboot。
                 // 语义是先 shutdown 当前 gateway，再等待外部 boot 重新拉起。
-                $preserveManagedUpstreams = (bool)($params['preserve_managed_upstreams'] ?? false);
+                $preserveManagedUpstreams = (bool)($params['preserve_managed_upstreams'] ?? $this->nginxProxyModeEnabled());
                 return [
                     'result' => Result::success($preserveManagedUpstreams
                         ? 'Gateway 已开始 Reboot，保留业务实例等待外部 boot 拉起'

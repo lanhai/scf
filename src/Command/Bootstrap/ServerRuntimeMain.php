@@ -187,6 +187,7 @@ function scf_parse_cli_args(array $argv): array {
 }
 
 function scf_run_server_process_loop(array $argv): void {
+    defined('SCF_BOOT_LOOP_PID') || define('SCF_BOOT_LOOP_PID', getmypid());
     $stopFlag = scf_process_control_flag_path($argv, 'stop');
     if ($stopFlag !== '' && file_exists($stopFlag)) {
         @unlink($stopFlag);
@@ -196,7 +197,13 @@ function scf_run_server_process_loop(array $argv): void {
         if (scf_bool_constant('IS_SERVER_PROCESS_START')) {
             // 新实例拉起前先由 bootstrap 层处理旧监听者，避免把端口冲突处理责任
             // 留给可能仍是旧版本的 pack 运行时逻辑。
-            scf_prepare_command_ports_for_start($argv);
+            try {
+                scf_prepare_command_ports_for_start($argv);
+            } catch (\RuntimeException $exception) {
+                scf_stderr('【Boot】本次启动未完成: ' . $exception->getMessage());
+                // 仅退出 fork 前的外层 CLI：尚无本轮 child、共享表或 worker timer，旧服务不受影响。
+                exit(1);
+            }
         }
         $runStartedAt = microtime(true);
         $managerPid = 0;
@@ -385,6 +392,12 @@ function scf_reexec_current_boot(array $argv): never {
 }
 
 function scf_should_stop_server_process_loop(array $argv): bool {
+    // 新启动者只停止被交接的那一个 boot，避免同 app/role 不同端口互相消费 stop 标记。
+    $handoffFlag = scf_process_control_flag_path($argv, 'stop.' . getmypid());
+    if ($handoffFlag !== '' && is_file($handoffFlag)) {
+        @unlink($handoffFlag);
+        return true;
+    }
     $flagFile = scf_process_control_flag_path($argv, 'stop');
     if ($flagFile === '') {
         return false;

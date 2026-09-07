@@ -119,7 +119,8 @@ class CliBootstrap {
         $registry = new UpstreamRegistry($startup['state_file']);
         $manager = new AppInstanceManager($registry);
         $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
-        $preservedUpstreamPorts = [];
+        $preservedUpstreamPorts = self::restartHandoffPorts($startup, $manager);
+        $handoff = $preservedUpstreamPorts !== [];
         if ($upstreamBootstrap['spawn_metadata'] && !$upstreamBootstrap['managed_upstream_plans']) {
             $preservedPort = (int)($upstreamBootstrap['upstream_port'] ?? 0);
             if ($preservedPort > 0) {
@@ -131,13 +132,22 @@ class CliBootstrap {
         }
 
         self::reconcileRegistry($manager, $launcher, $startup['bind_host'], $startup['bind_port']);
-        self::cleanupManagedUpstreams($manager, $launcher);
+        self::cleanupManagedUpstreams($manager, $launcher, $preservedUpstreamPorts);
         self::cleanupOrphanManagedUpstreams($launcher, $startup['bind_port'], $preservedUpstreamPorts);
         self::forgetGatewayRegistryEntries($manager, $startup['bind_host'], $startup['bind_port']);
 
         // upstream 端口选择必须基于 cleanup 之后的真实监听态；否则一旦历史实例在
         // resolve 之后、spawn 之前才被清理或仍未完全退出，就会拿着过期端口继续启动。
         $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
+        if ($handoff) {
+            // 同版本重复 start 也必须使用独立 generation，否则 activate/removeOtherInstances
+            // 会把仍由 nginx 承载的旧端点直接覆盖，无法回滚或排空长请求。
+            foreach ($upstreamBootstrap['managed_upstream_plans'] as &$plan) {
+                $plan['metadata']['display_version'] = $plan['version'];
+                $plan['version'] .= '-start-' . bin2hex(random_bytes(6));
+            }
+            unset($plan);
+        }
 
         if ($upstreamBootstrap['spawn_metadata'] && !$upstreamBootstrap['managed_upstream_plans']) {
             foreach ($manager->otherInstances($startup['version'], $startup['upstream_host'], $upstreamBootstrap['upstream_port']) as $instance) {
@@ -662,8 +672,9 @@ class CliBootstrap {
      * @param AppServerLauncher $launcher 进程和端口探测工具
      * @return void
      */
-    protected static function cleanupManagedUpstreams(AppInstanceManager $manager, AppServerLauncher $launcher): void {
-        $managedInstances = $manager->managedInstances();
+    protected static function cleanupManagedUpstreams(AppInstanceManager $manager, AppServerLauncher $launcher, array $keepPorts = []): void {
+        $managedInstances = array_filter($manager->managedInstances(), static fn(array $instance): bool =>
+            !in_array((int)($instance['port'] ?? 0), $keepPorts, true));
         if (!$managedInstances) {
             return;
         }
@@ -676,9 +687,39 @@ class CliBootstrap {
             $rpcInfo = $rpcPort > 0 ? ", RPC:{$rpcPort}" : '';
             echo Console::timestamp() . " 【Gateway】清理历史托管实例: {$host}:{$port}{$rpcInfo}" . PHP_EOL;
             $launcher->stop($instance, 2);
+            $manager->removeInstance($host, $port);
         }
-        $manager->removeManagedInstances();
         echo Console::timestamp() . " 【Gateway】历史托管实例清理完成" . PHP_EOL;
+    }
+
+    /**
+     * 只续接计划重启中、进程身份与租约一致的 managed 端点。
+     * 这些实例继续接收 nginx 请求，直到新 generation 完成实际入口验证。
+     * @param array $startup 启动上下文。
+     * @param AppInstanceManager $manager 原 registry。
+     * @return array<int,int> 需要跨控制面重启保留的端口。
+     */
+    protected static function restartHandoffPorts(array $startup, AppInstanceManager $manager): array {
+        if ($startup['traffic_mode'] !== 'nginx' || !$startup['spawn_upstream']) return [];
+        $lease = GatewayLease::readLease((int)$startup['bind_port'], SERVER_ROLE);
+        $grace = max(20, (int)($startup['server_config']['gateway_lease_restart_reuse_grace']
+            ?? ($startup['server_config']['gateway_lease_restart_grace'] ?? 120)));
+        if (($lease['state'] ?? '') !== 'restarting' || (int)($lease['epoch'] ?? 0) <= 0
+            || (int)($lease['expires_at'] ?? 0) + $grace < time()) return [];
+        $processes = ProcessInspector::snapshot(true);
+        $ports = [];
+        foreach ($manager->managedInstances() as $instance) {
+            $meta = (array)($instance['metadata'] ?? []);
+            $command = (string)($processes[(int)($meta['pid'] ?? 0)]['command'] ?? '');
+            if ((int)($meta['owner_epoch'] ?? 0) !== (int)$lease['epoch']
+                || !str_contains($command, 'boot gateway_upstream start')
+                || !ProcessCommandLine::hasOptionValue($command, 'app', APP_DIR_NAME)
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_port', $startup['bind_port'])
+                || !ProcessCommandLine::hasOptionValue($command, 'gateway_epoch', $lease['epoch'])
+                || !ProcessCommandLine::hasOptionValue($command, 'port', $instance['port'])) continue;
+            $ports[] = (int)$instance['port'];
+        }
+        return array_values(array_unique($ports));
     }
 
     /**

@@ -548,6 +548,30 @@ class Dao extends Struct {
 
 
     /**
+     * 原子比较并更新单行，供任务状态机和执行令牌隔离使用。
+     *
+     * 所有条件直接进入同一条 UPDATE，不能先查询主键再丢弃版本条件。
+     * 与批量 update() 分开，保持既有调用语义；数据库异常交给调用方回滚事务。
+     *
+     * @param array<string,mixed> $expected 必须包含一个明确的主键值及预期状态
+     * @param array<string,mixed> $data 更新字段；JSON 字段须预先编码
+     * @return int 1 表示更新成功，0 表示预期状态已改变
+     * @throws Throwable 数据库写入失败，或缺少单行主键条件
+     */
+    public static function compareAndUpdate(array $expected, array $data): int {
+        $dao = static::select();
+        $id = $expected[$dao->getPrimaryKey()] ?? null;
+        if ((!is_int($id) && !is_string($id)) || $id === '') {
+            throw new \InvalidArgumentException('compareAndUpdate requires a scalar primary key');
+        }
+        $rows = $dao->where($expected)->connection(DBS_MASTER)->updates($data)->rowCount();
+        if ($rows > 0) {
+            $dao->deleteArCache($id);
+        }
+        return $rows;
+    }
+
+    /**
      * 删除数据
      * @param int $size
      * @return int

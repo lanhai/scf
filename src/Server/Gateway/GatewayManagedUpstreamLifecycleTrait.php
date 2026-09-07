@@ -485,6 +485,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
         $this->flushPendingNginxSyncSummary();
         foreach ($newPlans as $plan) {
             $this->appendManagedPlan($plan);
+            $this->startupCutoverCompleted[$plan['version'] . '@' . $plan['host'] . ':' . $plan['port']] = true;
         }
         // 先明确“切流校验已通过且入口已稳定命中新代”，再进入旧代回收，
         // 避免日志时序看起来像“还在切流就提前回收旧实例”。

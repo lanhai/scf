@@ -30,9 +30,25 @@ function scf_prepare_command_ports_for_start(array $argv): void {
         return;
     }
 
+    if (scf_request_gateway_start_handoff($argv, $ports)) {
+        scf_stdout('【Boot】旧 Gateway 交接/退出状态已确认，等待控制面释放');
+        $deadline = microtime(true) + 40;
+        do {
+            if (!scf_conflicting_listener_pids($argv, $ports)) return;
+            usleep(200000);
+        } while (microtime(true) < $deadline);
+        // 已进入交接就不能再发送 SIGKILL：旧控制面仍可能正在确认 supervisor detach。
+        throw new RuntimeException('Gateway 平滑交接未完成，保留现有实例，请检查关停日志');
+    }
+
+    // HTTP 往返期间监听者可能已退出；仅回收本次开始时确认的旧 PID，不能追杀新一代。
+    $pids = array_values(array_intersect($pids, scf_conflicting_listener_pids($argv, $ports)));
+    if (!$pids) return;
+    // 旧版本或已失效的控制面：先停同一命令的外层 boot，防止回收 child 时再次抢占端口。
+    scf_signal_processes(scf_conflicting_boot_ancestor_pids($argv, $pids), SIGTERM);
     scf_stdout('【Boot】发现旧命令监听占用，开始优雅回收: ports=' . implode(', ', $ports) . '; pids=' . implode(', ', $pids));
     scf_signal_processes($pids, SIGTERM);
-    if (scf_wait_ports_released($ports, 8)) {
+    if (scf_wait_owned_command_listeners_released($argv, $ports, 8)) {
         scf_stdout('【Boot】命令监听端口已释放');
         return;
     }
@@ -41,10 +57,191 @@ function scf_prepare_command_ports_for_start(array $argv): void {
     if (!$remaining) {
         return;
     }
+    if (array_diff($remaining, $pids)) {
+        throw new RuntimeException('监听已被另一代 Gateway 接管，停止本次回收');
+    }
 
     scf_stderr('【Boot】SIGTERM 后仍有监听存活，开始强制回收: pids=' . implode(', ', $remaining));
     scf_signal_processes($remaining, SIGKILL);
-    scf_wait_ports_released($ports, 5);
+    if (!scf_wait_owned_command_listeners_released($argv, $ports, 5)) {
+        throw new RuntimeException('旧命令监听未释放，停止本次启动');
+    }
+}
+
+/**
+ * 从已确认的监听者向上追踪同一 PHP boot 命令，找出负责自动重拉的非监听父进程。
+ * 不向下扩大回收范围；命令、app、role、port 必须一致，遇到 shell 或无关父进程立即停止。
+ * @param array $argv 当前启动命令。
+ * @param array<int,int> $listeners 已确认的旧监听者。
+ * @return array<int,int> 非监听 boot 祖先进程。
+ */
+function scf_conflicting_boot_ancestor_pids(array $argv, array $listeners): array {
+    $output = scf_process_output(['/bin/ps', '-axo', 'pid=,ppid=,command=']);
+    $processes = [];
+    foreach (preg_split('/\r?\n/', trim($output)) ?: [] as $line) {
+        if (preg_match('/^\s*(\d+)\s+(\d+)\s+(.+)$/', $line, $match)) {
+            $processes[(int)$match[1]] = ['ppid' => (int)$match[2], 'command' => $match[3]];
+        }
+    }
+    $ancestors = [];
+    foreach ($listeners as $pid) {
+        $seen = [];
+        while (($parent = (int)($processes[$pid]['ppid'] ?? 0)) > 1 && !isset($seen[$parent])) {
+            $seen[$parent] = true;
+            if ($parent === getmypid()) break;
+            if (!scf_boot_command_matches($argv, (string)($processes[$parent]['command'] ?? ''))) break;
+            if (!in_array($parent, $listeners, true)) $ancestors[$parent] = $parent;
+            $pid = $parent;
+        }
+    }
+    return array_values($ancestors);
+}
+
+/**
+ * 核实可回收进程的完整命令身份；监听端口相交或 app 名相同不足以授权发送信号。
+ * @param array $argv 当前启动命令。
+ * @param string $processCommand ps 返回的目标命令行。
+ * @return bool 是否属于相同 app、环境、角色及业务端口的 PHP boot start。
+ */
+function scf_boot_command_matches(array $argv, string $processCommand): bool {
+    $parts = preg_split('/\s+/', trim($processCommand)) ?: [];
+    if (!preg_match('/^php[0-9.]*$/', basename($parts[0] ?? ''))
+        || basename($parts[1] ?? '') !== 'boot'
+        || ($parts[2] ?? '') !== ($argv[1] ?? '') || ($parts[3] ?? '') !== 'start') return false;
+    $expected = scf_parse_opts($argv);
+    $options = scf_parse_opts($parts);
+    foreach (['app' => getenv('APP_DIR') ?: 'app', 'role' => getenv('SERVER_ROLE') ?: 'master', 'port' => 9580] as $name => $default) {
+        if ((string)($options[$name] ?? $default) !== (string)($expected[$name] ?? $default)) return false;
+    }
+    return scf_boot_command_environment($argv) === scf_boot_command_environment($parts);
+}
+
+/**
+ * 遵守 scf_define_runtime_constants 的环境解析规则，供 fork 前的身份与租约核验使用。
+ * @param array $argv 命令参数。
+ * @return string dev 或 prod。
+ */
+function scf_boot_command_environment(array $argv): string {
+    return getenv('APP_ENV') === 'dev' || strtolower((string)(scf_option_value($argv, 'env') ?? '')) === 'dev'
+        || scf_has_arg($argv, '-dev') ? 'dev' : 'prod';
+}
+
+/**
+ * 通过已确认属于本命令的本机控制面请求交接；响应丢失时核对租约和旧监听者。
+ * @param array $argv 启动参数。
+ * @param array<int,int> $ports 本命令端口。
+ * @return bool true 表示交接已确认或旧监听已退出，false 表示允许兼容回收。
+ * @throws RuntimeException 现有服务明确拒绝交接，或无法确认安全恢复条件。
+ */
+function scf_request_gateway_start_handoff(array $argv, array $ports): bool {
+    if (($argv[1] ?? '') !== 'gateway') return false;
+    $opts = scf_parse_opts($argv);
+    $port = (int)($opts['port'] ?? 9580);
+    $controlPort = (int)($opts['control_port'] ?? ($opts['gateway_control_port'] ?? ($port + 1000)));
+    $listeners = scf_conflicting_listener_pids($argv, [$controlPort]);
+    if (!in_array($controlPort, $ports, true) || !$listeners) return false;
+    $bootAncestors = scf_conflicting_boot_ancestor_pids($argv, $listeners);
+    $payload = json_encode(['command' => 'handoff', 'params' => [
+        'app' => $opts['app'] ?? (getenv('APP_DIR') ?: 'app'),
+        'role' => $opts['role'] ?? (getenv('SERVER_ROLE') ?: 'master'),
+        'port' => $port,
+    ]]);
+    $context = stream_context_create(['http' => ['method' => 'POST', 'timeout' => 3,
+        'ignore_errors' => true, 'header' => "Content-Type: application/json\r\nConnection: close\r\n",
+        'content' => $payload]]);
+    error_clear_last();
+    $body = @file_get_contents('http://127.0.0.1:' . $controlPort . '/_gateway/internal/command', false, $context);
+    $transportError = error_get_last()['message'] ?? '空响应或非 JSON 响应';
+    $result = is_string($body) ? json_decode($body, true) : null;
+    if (is_array($result) && ($result['accepted'] ?? false) === true) return true;
+    if (is_array($result) && str_contains((string)($result['message'] ?? ''), '暂不支持的命令:handoff')) return false;
+    if (is_array($result) && isset($result['message']) && $result['message'] !== 'Gateway 已在关闭中') {
+        throw new RuntimeException('Gateway 拒绝启动交接，保留当前服务: ' . (string)$result['message']);
+    }
+
+    scf_stdout('【Boot】未收到交接回执，核对旧控制面租约与退出状态: control_port=' . $controlPort);
+    $deadline = microtime(true) + 40;
+    $lease = null;
+    do {
+        $remaining = scf_conflicting_listener_pids($argv, [$controlPort]);
+        if (!$remaining) {
+            // 回执丢失也可能是 child 异常退出，外层 boot 尚在 2 秒重拉窗口。
+            // 旧控制监听已全部退出后，停止请求前记录的 boot 祖先，避免随后重拉抢占。
+            foreach ($bootAncestors as $pid) {
+                if (scf_boot_command_matches($argv, scf_read_process_command($pid))) {
+                    scf_signal_processes([$pid], SIGTERM);
+                }
+            }
+            return true;
+        }
+        if (array_diff($remaining, $listeners)) {
+            throw new RuntimeException('交接等待期间另一代 Gateway 已启动，保留现有服务');
+        }
+        $lease = scf_gateway_startup_lease($argv);
+        if ($lease !== null) {
+            $state = (string)($lease['state'] ?? '');
+            $ownerPid = (int)($lease['meta']['gateway_pid'] ?? 0);
+            $ownerMatches = in_array($ownerPid, $listeners, true)
+                || ($ownerPid > 0 && function_exists('posix_kill') && !@posix_kill($ownerPid, 0));
+            $grace = $state === 'restarting'
+                ? max(0, (int)($lease['meta']['restart_grace_seconds'] ?? 120))
+                : max(0, (int)($lease['meta']['grace_seconds'] ?? 20));
+            $expiresAt = (int)($lease['expires_at'] ?? 0);
+            // stopped 已明确撤销服务；其它状态必须超过 upstream 同样遵守的租约宽限期。
+            // 有效 restarting 仍可能在等待 supervisor detach，不能因回执丢失强杀它。
+            if ($ownerMatches && ($state === 'stopped'
+                || ($expiresAt > 0 && time() > $expiresAt + $grace))) {
+                scf_stdout('【Boot】旧控制面租约已失效，恢复残留监听: state=' . $state
+                    . ', epoch=' . (int)($lease['epoch'] ?? 0) . ', pids=' . implode(',', $remaining));
+                return false;
+            }
+        }
+        // 此处是 fork 前的 CLI boot，不在 Swoole worker/协程中；等待不阻塞现有业务进程。
+        usleep(200000);
+    } while (microtime(true) < $deadline);
+    throw new RuntimeException('Gateway 交接未完成，保留当前服务: control_port=' . $controlPort
+        . ', pids=' . implode(',', $listeners) . ', lease=' . (string)($lease['state'] ?? 'unknown')
+        . ', epoch=' . (int)($lease['epoch'] ?? 0) . ', transport=' . $transportError);
+}
+
+/**
+ * 在 framework/App 尚未初始化的 boot 层只读租约；内容身份必须与本次命令完全匹配。
+ * 文件名遵守 GatewayLease::leaseStateFile 的持久化协议，不加载可能仍为旧版的 pack 类。
+ * @param array $argv 原始启动参数。
+ * @return array<string,mixed>|null 完整租约，未知或不匹配时不授权回收。
+ */
+function scf_gateway_startup_lease(array $argv): ?array {
+    $opts = scf_parse_opts($argv);
+    $app = (string)($opts['app'] ?? (getenv('APP_DIR') ?: 'app'));
+    $role = (string)($opts['role'] ?? (getenv('SERVER_ROLE') ?: 'master'));
+    $env = scf_boot_command_environment($argv);
+    $port = (int)($opts['port'] ?? 9580);
+    $safe = array_map(static fn(string $value): string => preg_replace('/[^a-zA-Z0-9_-]+/', '_', $value), [$app, $env, $role]);
+    $appsRoot = defined('SCF_APPS_ROOT') ? SCF_APPS_ROOT : dirname(SCF_ROOT) . '/apps';
+    $file = $appsRoot . '/' . $app . '/update/gateway_lease_' . implode('_', $safe) . '_' . $port . '.json';
+    $body = @file_get_contents($file);
+    $lease = is_string($body) ? json_decode($body, true) : null;
+    if (!is_array($lease) || ($lease['app'] ?? '') !== $app || ($lease['env'] ?? '') !== $env
+        || ($lease['role'] ?? '') !== $role || (int)($lease['gateway_port'] ?? 0) !== $port
+        || (int)($lease['epoch'] ?? 0) <= 0
+        || !in_array($lease['state'] ?? '', ['running', 'restarting', 'stopped'], true)) return null;
+    return $lease;
+}
+
+/**
+ * 等待本命令的监听者退出；nginx 持有业务端口是正常状态。
+ * @param array $argv 启动参数。
+ * @param array<int,int> $ports 监听端口。
+ * @param int $seconds 等待上限。
+ * @return bool 是否释放。
+ */
+function scf_wait_owned_command_listeners_released(array $argv, array $ports, int $seconds): bool {
+    $deadline = microtime(true) + $seconds;
+    do {
+        if (!scf_conflicting_listener_pids($argv, $ports)) return true;
+        usleep(200000);
+    } while (microtime(true) < $deadline);
+    return false;
 }
 
 function scf_wait_command_ports_released(array $argv, int $timeoutSeconds = 20, int $intervalMs = 200): void {
@@ -229,13 +426,7 @@ function scf_command_listen_ports(array $argv): array {
  */
 function scf_conflicting_listener_pids(array $argv, array $ports): array {
     $command = (string)($argv[1] ?? '');
-    $app = (string)(scf_option_value($argv, 'app') ?: (getenv('APP_DIR') ?: 'app'));
-    $expectedMarker = match ($command) {
-        'gateway' => 'boot gateway start',
-        'server' => 'boot server start',
-        default => '',
-    };
-    if ($expectedMarker === '') {
+    if (!in_array($command, ['gateway', 'server'], true)) {
         return [];
     }
 
@@ -247,13 +438,7 @@ function scf_conflicting_listener_pids(array $argv, array $ports): array {
                 continue;
             }
             $processCommand = scf_read_process_command($pid);
-            if ($processCommand === '') {
-                continue;
-            }
-            if (!str_contains($processCommand, $expectedMarker)) {
-                continue;
-            }
-            if ($app !== '' && str_contains($processCommand, '-app=' . $app)) {
+            if (scf_boot_command_matches($argv, $processCommand)) {
                 $pids[$pid] = $pid;
             }
         }

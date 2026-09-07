@@ -165,14 +165,14 @@ class RQueue {
                         Timer::tick(self::WORKER_HEARTBEAT_INTERVAL_MS, static function () use ($workerToken, $managerGeneration): void {
                             self::publishWorkerHeartbeat($workerToken, $managerGeneration);
                         });
-                        Coroutine\run(function () use ($config, $managerGeneration): void {
-                            self::instance()->prepareExitChannel();
-                            self::instance()->watch(
-                                (int)($config['redis_queue_mc'] ?? 32),
-                                $managerGeneration
-                            );
-                            self::instance()->waitForExitSignal();
-                        });
+                        // Process 已启用原生协程。监控 Timer 创建事件循环之后不能再调用
+                        // Coroutine\run，否则 Scheduler 拒绝启动，留下只有心跳的空消费进程。
+                        self::instance()->prepareExitChannel();
+                        self::instance()->watch(
+                            (int)($config['redis_queue_mc'] ?? 32),
+                            $managerGeneration
+                        );
+                        self::instance()->waitForExitSignal();
                         self::markWorkerHeartbeatStopped($workerToken, $managerGeneration);
                         MemoryMonitor::stop();
                     }
@@ -184,7 +184,7 @@ class RQueue {
                         @fclose($workerLease);
                     }
                 }
-            }, false, 0, false);
+            }, false, 0, true);
             $pid = (int)($process->start() ?: 0);
             if ($pid <= 0) {
                 @flock($workerLease, LOCK_UN);
@@ -309,7 +309,35 @@ class RQueue {
      * @return array{held?:bool,pid?:int,token?:string,manager_pid?:int,started_at?:int}
      */
     public static function workerLockOwner(): array {
-        $handle = @fopen(self::workerLockFile(), 'c+');
+        return self::readLockedWorkerOwner(self::workerLockFile());
+    }
+
+    /**
+     * 读取本节点 Gateway 队列消费者的跨进程身份。
+     *
+     * 业务 upstream 和 Linux crontab 不共享 Gateway 的 Runtime 表，upstream 的
+     * PID 文件还按端口隔离。这里读取 Gateway 已持有的同一把锁，不创建消费者、
+     * 不改变锁文件；worker 释放锁后，遗留 JSON 不再代表有效执行身份。
+     *
+     * @return array{held?:bool,pid?:int,token?:string,manager_pid?:int,started_at?:int}
+     */
+    public static function gatewayWorkerLockOwner(): array {
+        $path = dirname(SCF_ROOT) . '/var/' . APP_DIR_NAME . '_' . SERVER_ROLE . '_queue_manager.pid.worker.lock';
+        return self::readLockedWorkerOwner($path, true);
+    }
+
+    /**
+     * 通过非阻塞锁验证 owner；只读探测不会创建尚不存在的运行态文件。
+     *
+     * @param string $path 队列消费者的锁文件
+     * @param bool $readOnly 是否只读检查已有锁
+     * @return array<string, mixed> 已持锁的身份，或空数组表示没有消费者
+     */
+    protected static function readLockedWorkerOwner(string $path, bool $readOnly = false): array {
+        if ($readOnly && !is_file($path)) {
+            return [];
+        }
+        $handle = @fopen($path, $readOnly ? 'r' : 'c+');
         if (!is_resource($handle)) {
             // 无法验证时按“已有 worker”处理，安全地阻止重复消费者。
             return ['held' => true, 'pid' => 0, 'token' => ''];

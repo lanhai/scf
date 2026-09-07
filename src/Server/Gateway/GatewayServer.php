@@ -82,6 +82,7 @@ class GatewayServer {
     protected array $dashboardClients = [];
     protected array $nodeClients = [];
     protected array $bootstrappedManagedInstances = [];
+    protected array $startupCutoverCompleted = [];
     protected ?bool $lastConsoleSubscriptionState = null;
     protected ?UpstreamSupervisor $upstreamSupervisor = null;
     protected int $rpcPort = 0;

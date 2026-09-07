@@ -266,6 +266,27 @@ class AppInstanceManager {
     }
 
     /**
+     * 撤销尚未通过入口验证的激活，让候选实例保留在 prepared 状态等待重试。
+     * 不删除端点，不启动旧代排空计时；只有通过切流校验才能回收旧实例。
+     * @param string $candidate 本轮候选 generation。
+     * @param string $previous 激活前的 generation，首次启动为空。
+     * @return void
+     */
+    public function rollbackActivation(string $candidate, string $previous): void {
+        foreach ([$candidate => 'prepared', $previous => 'active'] as $version => $status) {
+            if ($version === '' || !isset($this->state['generations'][$version])) continue;
+            $generation = &$this->state['generations'][$version];
+            $generation['status'] = $status;
+            $generation['drain_started_at'] = null;
+            $generation['drain_deadline_at'] = null;
+            foreach ($generation['instances'] as &$instance) $instance['status'] = $status;
+            unset($instance, $generation);
+        }
+        $this->state['active_version'] = $previous !== '' ? $previous : null;
+        $this->touchState();
+    }
+
+    /**
      * 从所有 generation 中移除指定实例。
      *
      * @param string $host 目标实例主机名或 IP。

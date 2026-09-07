@@ -78,6 +78,7 @@ trait GatewayRuntimeLifecycleTrait {
         Runtime::instance()->delete(Key::RUNTIME_GATEWAY_UPSTREAM_SUPERVISOR_SYNC_INSTANCES);
         Runtime::instance()->delete(Key::RUNTIME_GATEWAY_LAST_REMOVED_GENERATIONS);
         Runtime::instance()->delete('gateway_lease_override_state');
+        Runtime::instance()->set('gateway_startup_ingress_ready', false);
         ConsoleRelay::setGatewayPort($this->port);
         ConsoleRelay::setLocalSubscribed(false);
         ConsoleRelay::setRemoteSubscribed(false);
@@ -423,6 +424,10 @@ trait GatewayRuntimeLifecycleTrait {
     }
 
     protected function shouldRenderStartupInfo(array $resultRows, float $elapsedSeconds): bool {
+        if ($this->managedUpstreamPlans && $this->nginxProxyModeEnabled()
+            && !(bool)Runtime::instance()->get('gateway_startup_ingress_ready')) {
+            return false;
+        }
         $requiredKeys = [
             Key::RUNTIME_GATEWAY_BUSINESS_COORDINATOR_PID,
             Key::RUNTIME_GATEWAY_HEALTH_MONITOR_PID,
@@ -1134,6 +1139,9 @@ trait GatewayRuntimeLifecycleTrait {
             return;
         }
         $this->gatewayShutdownPrepared = true;
+        // HTTP worker 发起的交接状态必须传到 master 的 BeforeShutdown，普通 PHP 属性不跨 fork 共享。
+        $this->preserveManagedUpstreamsOnShutdown = $this->preserveManagedUpstreamsOnShutdown
+            || Runtime::instance()->get('gateway_lease_override_state') === 'restarting';
         $this->stopGatewayLeaseRenewTimer();
         $this->persistGatewayLeaseForShutdown();
         // 关停早期就把 serverIsAlive 拉低，避免 SubProcessManager 在 wait(false) 回收窗口里
@@ -1352,7 +1360,14 @@ trait GatewayRuntimeLifecycleTrait {
             // 已经成功拉起过的 plan 先按原始 key 去重，避免先做端口改写后把“自家已启动实例”
             // 误当成新 plan 再启动一次。
             if ($originalPort > 0 && isset($this->bootstrappedManagedInstances[$originalKey])) {
-                continue;
+                if (isset($this->startupCutoverCompleted[$originalKey])) continue;
+                if ($this->launcher->isListening($originalHost, $originalPort, 0.2)) {
+                    $this->completeManagedStartupCutover($plan);
+                    continue;
+                }
+                // 候选进程退出后允许重新拉起；nginx 暂时失败但候选仍存活时只重试切流。
+                unset($this->bootstrappedManagedInstances[$originalKey]);
+                $this->instanceManager->removeInstance($originalHost, $originalPort);
             }
 
             $plan = $this->resolveManagedBootstrapPlan($plan);
@@ -1398,25 +1413,44 @@ trait GatewayRuntimeLifecycleTrait {
                 continue;
             }
 
-            $weight = (int)($plan['weight'] ?? 100);
-            $metadata = (array)($plan['metadata'] ?? []);
-            $metadata['managed'] = true;
-            $metadata['role'] = (string)($plan['role'] ?? ($metadata['role'] ?? SERVER_ROLE));
-            $metadata['rpc_port'] = (int)($plan['rpc_port'] ?? ($metadata['rpc_port'] ?? 0));
-            $metadata['started_at'] = (int)($metadata['started_at'] ?? time());
-            $metadata['managed_mode'] = 'gateway_supervisor';
-
-            if ($this->startupSummaryPending()) {
-                $this->recordStartupReadyInstance($plan);
-            }
-            $this->registerManagedPlan($plan, true);
-            $this->instanceManager->removeOtherInstances($version, $host, $port);
-            $rpcInfo = (int)($plan['rpc_port'] ?? 0) > 0 ? ', RPC:' . (int)$plan['rpc_port'] : '';
-            $cutoverReady = $this->syncNginxProxyTargets('register_managed_plan_activate');
-            if (!$cutoverReady) {
-                Console::warning("【Gateway】业务实例已启动，但入口切换未完成: {$version} {$host}:{$port}{$rpcInfo}");
-            }
+            $this->registerManagedPlan($plan, false);
+            $this->completeManagedStartupCutover($plan);
         }
+    }
+
+    /**
+     * 启动与滚动重启使用同一健康/入口验证口径，失败保留旧代和候选端点供下轮重试。
+     * @param array<string,mixed> $plan 已注册且监听就绪的启动计划。
+     * @return bool 入口是否已确认。
+     */
+    protected function completeManagedStartupCutover(array $plan): bool {
+        $version = (string)$plan['version'];
+        $key = $version . '@' . $plan['host'] . ':' . $plan['port'];
+        $state = $this->instanceManager->state();
+        $previous = (string)($state['active_version'] ?? '');
+        $previousInstances = $previous !== $version ? (array)($state['generations'][$previous]['instances'] ?? []) : [];
+        $health = $this->probeManagedUpstreamHealth($plan);
+        if (empty($health['healthy'])) return false;
+        $this->instanceManager->activateVersion($version, self::ROLLING_DRAIN_GRACE_SECONDS);
+        $ok = !$this->nginxProxyHandler()->enabled()
+            || $this->syncNginxProxyTargets('register_managed_plan_activate', [], true);
+        if ($ok) $ok = $this->waitForManagedGenerationCutover($version, [$plan], 'startup');
+        if (!$ok) {
+            $this->clearPendingNginxSyncSummary();
+            $this->instanceManager->rollbackActivation($version, $previous);
+            if ($previous !== '' && $previous !== $version) $this->syncNginxProxyTargets('startup_rollback');
+            Console::warning('【Gateway】启动入口尚未就绪，保留旧业务实例并等待下轮切流: ' . $this->describePlan($plan));
+            return false;
+        }
+        $this->startupCutoverCompleted[$key] = true;
+        $this->notifyManagedUpstreamGenerationIterated($version);
+        foreach ($previousInstances as $instance) {
+            if (!empty($instance['metadata']['managed'])) $this->quiesceManagedPlanBusinessPlane($instance);
+        }
+        $this->flushPendingNginxSyncSummary();
+        $this->recordStartupReadyInstance($plan);
+        Runtime::instance()->set('gateway_startup_ingress_ready', true);
+        return true;
     }
 
     protected function renderStartupInfo(array $resultRows = []): void {
