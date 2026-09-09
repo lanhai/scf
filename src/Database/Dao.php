@@ -187,26 +187,36 @@ class Dao extends Struct {
     }
 
     /**
-     * 获取一条对象化数据
+     * 获取一条对象化数据，并建立后续差量保存所需的快照。
+     *
+     * 数据源 actor 和 AR 缓存是独立维度；持锁后的状态门禁应在指定主库的同时
+     * 关闭缓存，避免旧快照放行或拒绝状态转换。默认保留现有缓存行为。
+     *
+     * @param bool $useCache 是否读取和填充 AR 缓存；false 时直接查询当前数据源。
      * @return NullAR|static
      */
-    public function ar(): static|NullAR {
-        $primaryVal = $this->_primaryVal ?? $this->queryPrimaryVal();
-        if (is_null($primaryVal)) {
+    public function ar(bool $useCache = true): static|NullAR {
+        $primaryVal = $this->_primaryVal ?? ($useCache ? $this->queryPrimaryVal() : null);
+        if ($useCache && is_null($primaryVal)) {
             return new NullAR(static::class, $this->whereSql);
         }
-        //获取缓存数据
-        if (!$result = Cache::instance()->get($this->getArCacheKey($primaryVal))) {
+        $result = $useCache ? Cache::instance()->get($this->getArCacheKey($primaryVal)) : null;
+        if (!$result) {
             try {
                 if (!$result = $this->first()) {
                     return new NullAR(static::class, $this->whereSql);
                 }
-                Cache::instance()->set($this->getArCacheKey($primaryVal), $result, $this->cacheLifeTime);
+                if ($useCache) {
+                    Cache::instance()->set($this->getArCacheKey($primaryVal), $result, $this->cacheLifeTime);
+                }
             } catch (PDOException $exception) {
                 $this->addError($this->_table . '_AR', $exception->getMessage());
                 Log::instance()->error($exception->getMessage());
                 return new NullAR(static::class, $this->whereSql);
             }
+        }
+        if (!$useCache && is_null($primaryVal)) {
+            $this->setPrimaryVal($result[$this->getPrimaryKey()] ?? null);
         }
         $this->_arExist = true;
         $this->install($result);
