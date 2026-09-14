@@ -307,18 +307,16 @@ class Redis extends Cache {
     }
 
     /**
-     * 实现分布式锁或确保某些操作只执行一次
-     * @param $key
-     * @param int $expire
+     * 原子获取带过期时间的分布式锁，供跨协程、进程的互斥操作使用。
+     *
+     * @param string $key 锁名，沿用当前连接的 key 前缀规则。
+     * @param int $expire 锁有效期（正整数秒）；竞争失败不修改原锁或续期。
      * @return bool
      */
     public function lock($key, int $expire = 5): bool {
         try {
-            if ($this->connection->get($this->setPrefix($key)) || $this->connection->setNX($this->setPrefix($key), time()) === false) {
-                return false;
-            }
-            $this->connection->expire($this->setPrefix($key), $expire);
-            return true;
+            // SETNX 与 EXPIRE 分开执行时，中途断连或进程退出会留下永久锁。
+            return $this->connection->set($this->setPrefix($key), time(), ['nx', 'ex' => $expire]) === true;
         } catch (Throwable $exception) {
             $this->onExecuteError($exception);
             return false;
