@@ -1,6 +1,13 @@
 <?php
 declare(strict_types=1);
 
+// This harness exercises real nginx from the synchronous CLI path. In PHP-only
+// test images the shim selects that branch; it does not test Swoole scheduling.
+if (!class_exists(\Swoole\Coroutine::class)) {
+    class NginxFixtureCliContext { public static function getCid(): int { return -1; } }
+    class_alias(NginxFixtureCliContext::class, \Swoole\Coroutine::class);
+}
+
 // Real nginx, private prefix/config/PID, and ephemeral ports: never load the host's includes.
 spl_autoload_register(static function (string $class): void {
     if (str_starts_with($class, 'Scf\\')) {
@@ -57,6 +64,7 @@ class StartupFixtureNginx extends \Scf\Server\Gateway\GatewayNginxProxyHandler {
     protected function activeInstances(): array { return []; }
     protected function nginxServerFileExists(): bool { return true; }
     public function warmup(): array { return $this->warmupRuntimeMeta(true); }
+    public function running(): bool { return $this->isNginxRunning(); }
 }
 
 $binary = getenv('SCF_TEST_NGINX') ?: '/opt/homebrew/bin/nginx';
@@ -83,9 +91,14 @@ file_put_contents($root . '/nginx.conf', "worker_processes 1;\npid {$root}/nginx
 $handler = new StartupFixtureNginx($root, $binary, $port);
 $passed = false;
 try {
+    // Container restart can reuse the persisted nginx PID for PHP/PID 1.
+    file_put_contents($root . '/nginx.pid', (string)getmypid());
+    checkNginx(!$handler->running(), 'A live unrelated PID must not be treated as nginx');
+    unlink($root . '/nginx.pid');
     $handler->warmup();
     checkNginx(!is_file($root . '/nginx.pid'), 'Metadata warmup must not start nginx with stale includes');
     $result = $handler->sync('register_managed_plan_activate');
+    checkNginx($handler->running(), 'The real nginx master must be identifiable without external ps');
     checkNginx($result['reloaded'], 'Cold start must load the generated entry');
     checkNginx(!file_exists($prefix . '.server.conf'), 'Retired same-app include must be quarantined');
     checkNginx(is_file($livePrefix . '.server.conf'), 'A same-app config with a live backend must be preserved');
@@ -134,7 +147,7 @@ try {
 } finally {
     if (is_file($root . '/nginx.pid')) {
         $pid = (int)file_get_contents($root . '/nginx.pid');
-        if ($pid > 0) {
+        if ($pid > 0 && $pid !== getmypid()) {
             posix_kill($pid, SIGQUIT);
             $deadline = microtime(true) + 3;
             while (posix_kill($pid, 0) && microtime(true) < $deadline) usleep(20000);

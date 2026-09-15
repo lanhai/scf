@@ -1229,9 +1229,10 @@ class GatewayNginxProxyHandler {
     }
 
     /**
-     * 判断 nginx 主进程是否存在。
+     * 按 PID 文件核验当前 nginx master；容器重启遗留的 PID 可能已被其它进程复用。
      *
-     * @return bool nginx 进程可访问时返回 true。
+     * @return bool 仅当前 PID 确认属于存活的 nginx master 时返回 true。
+     * @throws RuntimeException PID 存在但其身份不可读取时，禁止盲目 start/reload。
      */
     protected function isNginxRunning(): bool {
         $pidPath = (string)($this->nginxRuntimeMeta()['pid_path'] ?? '');
@@ -1243,10 +1244,15 @@ class GatewayNginxProxyHandler {
             return false;
         }
         $alive = function_exists('posix_kill') ? @posix_kill($pid, 0) : is_dir('/proc/' . $pid);
-        if (!$alive) return false;
-        $snapshot = ProcessInspector::snapshot(true);
-        if (!$snapshot) throw new RuntimeException('无法确认 nginx PID 归属，停止启动或重载');
-        return str_contains((string)($snapshot[$pid]['command'] ?? ''), 'nginx: master process');
+        // EPERM 表示进程可能仍在，不能把“无权发信号”当成 nginx 已停止。
+        if (!$alive && (!function_exists('posix_get_last_error') || posix_get_last_error() !== 1)) return false;
+        $process = ProcessInspector::find($pid, true);
+        if ($process === null) {
+            throw new RuntimeException('无法确认 nginx PID 归属，停止启动或重载: pid=' . $pid
+                . ', pid_file=' . $pidPath . ', platform=' . PHP_OS_FAMILY . ', 进程身份不可读取');
+        }
+        if (in_array($process['state'], ['Z', 'X'], true)) return false;
+        return preg_match('/^nginx: master process(?:\s|$)/', $process['command']) === 1;
     }
 
     /**
