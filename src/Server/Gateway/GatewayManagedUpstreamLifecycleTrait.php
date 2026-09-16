@@ -1189,7 +1189,7 @@ trait GatewayManagedUpstreamLifecycleTrait {
             foreach (($generation['instances'] ?? []) as $instance) {
                 $instancePort = (int)($instance['port'] ?? 0);
                 $instanceRpcPort = (int)(($instance['metadata']['rpc_port'] ?? 0));
-                if (!$isLiveGeneration) {
+                if (!$isLiveGeneration && !$this->managedStartupCutoverPending()) {
                     // offline 代际里的历史端口不应长期占用端口池，否则会导致“端口
                     // 明明可用却一直扫不到”的假失败。仅当端口现在仍被监听时才保留。
                     $httpInUse = $instancePort > 0 && \Scf\Core\Server::isPortInUse($instancePort, '127.0.0.1');

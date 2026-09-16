@@ -118,8 +118,46 @@ class CliBootstrap {
         $startup = self::buildGatewayStartupContext($opts, $launcher);
         $registry = new UpstreamRegistry($startup['state_file']);
         $manager = new AppInstanceManager($registry);
-        $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
-        $preservedUpstreamPorts = self::restartHandoffPorts($startup, $manager);
+        $upstreamBootstrap = static::prepareGatewayUpstreams($opts, $startup, $manager, $launcher);
+
+        $server = new GatewayServer(
+            $manager,
+            $startup['bind_host'],
+            $startup['bind_port'],
+            $startup['worker_num'],
+            $launcher,
+            $upstreamBootstrap['managed_upstream_plans'],
+            $startup['rpc_bind_port'],
+            $startup['control_bind_port'],
+            $startup['traffic_mode']
+        );
+        $server->start();
+    }
+
+    /**
+     * 在创建 Gateway server 前准备 registry 与启动计划。
+     * @param array<string,mixed> $opts CLI 参数。
+     * @param array<string,mixed> $startup 控制面启动上下文。
+     * @param AppInstanceManager $manager 历史实例注册表。
+     * @param AppServerLauncher $launcher 端口分配器。
+     * @return array<string,mixed> upstream 启动计划及复用元数据。
+     */
+    protected static function prepareGatewayUpstreams(array $opts, array $startup, AppInstanceManager $manager, AppServerLauncher $launcher): array {
+        $upstreamBootstrap = static::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
+        if ($upstreamBootstrap['managed_upstream_plans']) {
+            static::forgetGatewayRegistryEntries($manager, $startup['bind_host'], $startup['bind_port']);
+            // 新 upstream 使用空闲端口；旧 registry 及 owner 身份留给切流后的后台回收。
+            // 冷恢复同样需要独立 generation，不能仅在 restarting 租约交接时隔离同版本实例。
+            if ($manager->state()['generations'] ?? []) {
+                foreach ($upstreamBootstrap['managed_upstream_plans'] as &$plan) {
+                    $plan['metadata']['display_version'] = $plan['version'];
+                    $plan['version'] .= '-start-' . bin2hex(random_bytes(6));
+                }
+                unset($plan);
+            }
+            return $upstreamBootstrap;
+        }
+        $preservedUpstreamPorts = static::restartHandoffPorts($startup, $manager);
         $handoff = $preservedUpstreamPorts !== [];
         if ($upstreamBootstrap['spawn_metadata'] && !$upstreamBootstrap['managed_upstream_plans']) {
             $preservedPort = (int)($upstreamBootstrap['upstream_port'] ?? 0);
@@ -131,14 +169,14 @@ class CliBootstrap {
             }
         }
 
-        self::reconcileRegistry($manager, $launcher, $startup['bind_host'], $startup['bind_port']);
-        self::cleanupManagedUpstreams($manager, $launcher, $preservedUpstreamPorts);
-        self::cleanupOrphanManagedUpstreams($launcher, $startup['bind_port'], $preservedUpstreamPorts);
-        self::forgetGatewayRegistryEntries($manager, $startup['bind_host'], $startup['bind_port']);
+        static::reconcileRegistry($manager, $launcher, $startup['bind_host'], $startup['bind_port']);
+        static::cleanupManagedUpstreams($manager, $launcher, $preservedUpstreamPorts);
+        static::cleanupOrphanManagedUpstreams($launcher, $startup['bind_port'], $preservedUpstreamPorts);
+        static::forgetGatewayRegistryEntries($manager, $startup['bind_host'], $startup['bind_port']);
 
         // upstream 端口选择必须基于 cleanup 之后的真实监听态；否则一旦历史实例在
         // resolve 之后、spawn 之前才被清理或仍未完全退出，就会拿着过期端口继续启动。
-        $upstreamBootstrap = self::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
+        $upstreamBootstrap = static::resolveUpstreamBootstrap($opts, $startup, $manager, $launcher);
         if ($handoff) {
             // 同版本重复 start 也必须使用独立 generation，否则 activate/removeOtherInstances
             // 会把仍由 nginx 承载的旧端点直接覆盖，无法回滚或排空长请求。
@@ -168,18 +206,7 @@ class CliBootstrap {
             $manager->removeOtherInstances($startup['version'], $startup['upstream_host'], $upstreamBootstrap['upstream_port']);
         }
 
-        $server = new GatewayServer(
-            $manager,
-            $startup['bind_host'],
-            $startup['bind_port'],
-            $startup['worker_num'],
-            $launcher,
-            $upstreamBootstrap['managed_upstream_plans'],
-            $startup['rpc_bind_port'],
-            $startup['control_bind_port'],
-            $startup['traffic_mode']
-        );
-        $server->start();
+        return $upstreamBootstrap;
     }
 
     /**
@@ -310,6 +337,22 @@ class CliBootstrap {
             $controlBindPort,
         ], static fn(int $port): bool => $port > 0)));
 
+        if ($spawnUpstream && !$reuseExistingUpstream) {
+            // 旧进程可能已关闭监听但尚未退出。回收 IPC 按端口寻址，旧端点完全退役前不得给新代复用。
+            $historicalPorts = [];
+            foreach ($manager->managedInstances() as $instance) {
+                $historicalPorts[] = (int)($instance['port'] ?? 0);
+                $historicalPorts[] = (int)($instance['metadata']['rpc_port'] ?? 0);
+            }
+            $historicalPorts = array_values(array_unique(array_filter($historicalPorts, static fn(int $port): bool => $port > 0)));
+            foreach (['upstream_port', 'upstream_rpc_port'] as $option) {
+                if (isset($opts[$option]) && in_array((int)$opts[$option], $historicalPorts, true)) {
+                    throw new RuntimeException("指定的 {$option} 仍由历史实例登记，请使用新的端口或自动分配");
+                }
+            }
+            $reservedGatewayPorts = array_values(array_unique(array_merge($reservedGatewayPorts, $historicalPorts)));
+        }
+
         $upstreamPortExplicit = isset($opts['upstream_port']);
         $upstreamPort = $upstreamPortExplicit
             ? (int)$opts['upstream_port']
@@ -348,7 +391,8 @@ class CliBootstrap {
                 $upstreamPortExplicit,
                 $upstreamRpcPort,
                 $upstreamRpcPortExplicit,
-                $reuseExistingUpstream
+                $reuseExistingUpstream,
+                $reservedGatewayPorts
             );
         }
 
@@ -416,6 +460,7 @@ class CliBootstrap {
      * @param int $upstreamRpcPort 预期 RPC 端口
      * @param bool $upstreamRpcPortExplicit RPC 端口是否显式指定
      * @param bool $reuseExistingUpstream 是否允许复用已有 upstream
+     * @param array<int,int> $reservedPorts 本次启动必须避让的历史端口。
      * @return array{
      *     upstream_port:int,
      *     upstream_rpc_port:int,
@@ -437,13 +482,15 @@ class CliBootstrap {
         bool $upstreamPortExplicit,
         int $upstreamRpcPort,
         bool $upstreamRpcPortExplicit,
-        bool $reuseExistingUpstream
+        bool $reuseExistingUpstream,
+        array $reservedPorts = []
     ): array {
-        $reservedGatewayPorts = array_values(array_unique(array_filter([
+        $reservedGatewayPorts = array_values(array_unique(array_filter(array_merge($reservedPorts, [
             (int)($startup['bind_port'] ?? 0),
             (int)($startup['rpc_bind_port'] ?? 0),
             (int)($startup['control_bind_port'] ?? 0),
-        ], static fn(int $port): bool => $port > 0)));
+            $upstreamRpcPort,
+        ]), static fn(int $port): bool => $port > 0)));
         $portInUse = $launcher->isListening($upstreamHost, $upstreamPort, 0.2);
         if ($portInUse && !$upstreamPortExplicit) {
             $upstreamPort = $launcher->findAvailablePortAvoiding(
@@ -755,7 +802,7 @@ class CliBootstrap {
      * @param array $keepPorts 需要保留的 upstream 端口列表
      * @return array<int, array<string, mixed>>
      */
-    protected static function discoverOrphanManagedUpstreams(int $gatewayPort, array $keepPorts = []): array {
+    public static function discoverOrphanManagedUpstreams(int $gatewayPort, array $keepPorts = []): array {
         if ($gatewayPort <= 0) {
             return [];
         }

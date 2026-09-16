@@ -21,6 +21,10 @@ use Throwable;
 use Scf\Cloud\Ali\Dingtalk;
 
 
+/**
+ * 应用日志入口及本地落盘/计数协调层。HTTP 日志可经共享表与 Redis 转存，
+ * 文件写入和今日计数共用跨进程锁；锁等待不能阻塞 Swoole worker 的事件循环。
+ */
 class Log extends Component {
 
     protected string $_module = '';
@@ -610,6 +614,10 @@ class Log extends Component {
 
     /**
      * 用同一日志文件的锁串行化“append + Counter 提交”与异常重建。
+     * HTTP 运行时关闭了 FILE hook，协程内必须显式让出锁等待，避免冻结 worker。
+     * @param string $fileName 目标日志文件。
+     * @param callable $callback 获得跨进程锁后执行的写入或计数操作。
+     * @return mixed 回调结果；无法获得文件锁时返回 false。
      */
     protected function withLogCounterLock(string $fileName, callable $callback): mixed {
         $lockFile = $fileName . '.counter.lock';
@@ -617,11 +625,21 @@ class Log extends Component {
         if (!is_resource($handle)) {
             return $callback();
         }
-        @flock($handle, LOCK_EX);
+        $locked = false;
         try {
+            if (class_exists(\Swoole\Coroutine::class, false) && \Swoole\Coroutine::getCid() >= 0) {
+                do {
+                    $locked = @flock($handle, LOCK_EX | LOCK_NB, $wouldBlock);
+                    if (!$locked && !$wouldBlock) return false;
+                    if (!$locked) \Swoole\Coroutine::sleep(0.005);
+                } while (!$locked);
+            } else {
+                $locked = @flock($handle, LOCK_EX);
+                if (!$locked) return false;
+            }
             return $callback();
         } finally {
-            @flock($handle, LOCK_UN);
+            if ($locked) @flock($handle, LOCK_UN);
             fclose($handle);
         }
     }
@@ -631,7 +649,8 @@ class Log extends Component {
      */
     protected function logFileSignature(string $fileName): array {
         clearstatcache(true, $fileName);
-        $stat = @stat($fileName);
+        // 冷启动/跨日的缺失文件是正常状态，持锁期间不能触发错误处理器重新写日志。
+        $stat = is_file($fileName) ? @stat($fileName) : false;
         return [
             'size' => is_array($stat) ? (int)($stat['size'] ?? 0) : 0,
             'inode' => is_array($stat) ? (int)($stat['ino'] ?? 0) : 0,

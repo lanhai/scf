@@ -83,6 +83,8 @@ class GatewayServer {
     protected array $nodeClients = [];
     protected array $bootstrappedManagedInstances = [];
     protected array $startupCutoverCompleted = [];
+    /** 启动切流成功后，由业务协调器接管历史实例一次；协调器重建时可安全重入。 */
+    protected bool $startupHistoricalInstancesRetired = false;
     protected ?bool $lastConsoleSubscriptionState = null;
     protected ?UpstreamSupervisor $upstreamSupervisor = null;
     protected int $rpcPort = 0;

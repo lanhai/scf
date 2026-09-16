@@ -117,13 +117,13 @@ function scf_boot_command_matches(array $argv, string $processCommand): bool {
 }
 
 /**
- * 遵守 scf_define_runtime_constants 的环境解析规则，供 fork 前的身份与租约核验使用。
+ * 遵守 Env::initialize 的环境解析规则，供 fork 前的身份与租约核验使用。
  * @param array $argv 命令参数。
- * @return string dev 或 prod。
+ * @return string 实际运行环境名，默认为 production。
  */
 function scf_boot_command_environment(array $argv): string {
-    return getenv('APP_ENV') === 'dev' || strtolower((string)(scf_option_value($argv, 'env') ?? '')) === 'dev'
-        || scf_has_arg($argv, '-dev') ? 'dev' : 'prod';
+    return scf_has_arg($argv, '-dev') ? 'dev'
+        : (string)(scf_option_value($argv, 'env') ?? (getenv('APP_ENV') ?: 'production'));
 }
 
 /**

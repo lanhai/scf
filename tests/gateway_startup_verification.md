@@ -1,5 +1,22 @@
 # Gateway 启动与 nginx 切流验证
 
+## 2026-09-16：冷启动优先拉起新 upstream，后台回收历史实例
+
+生产日志显示 `start` 在新 upstream 创建前逐条执行历史实例 `stop(..., 2)`，13 个实例就消耗约 30 秒。业务协调器也先同步/探测/回收历史实例，再启动候选。这使旧进程退出速度进入了新服务启动的关键路径。
+
+- managed spawn 仅准备空闲端口和独立 generation，保留旧 registry 的 PID、epoch 等回收身份；同版本冷恢复也隔离新旧代际。尚未回收的历史 HTTP/RPC 端口，即使监听已关闭，也不能分配给新代，以免旧端口的回收 IPC 命中新服务。
+- 业务协调器先启动候选并验证健康、nginx 和真实入口。失败继续重试候选，不主动清理旧实例；健康监控在此阶段不并发触发旧代自愈。
+- 新入口确认后先设置共享 ready 状态并返回，下一轮协调才发现孤儿、静默旧业务、推进已有 draining/offline/pending recycle 状态机。保留既有 Swoole Timer 回收、owner 核验和强制回收策略，没有新增进程或修改停止/租约围栏语义。
+- boot 的环境解析与 `Env::initialize` 对齐：`-dev`、`-env`、`APP_ENV`、默认 `production`。此前默认使用 `prod`，导致生产租约文件名不匹配并输出 `lease=unknown`。
+
+验证：新增启动准备和 production 租约回归，扩展切流失败/重试、旧 active/prepared/孤儿后台接管和协调器优先级测试。真实 Swoole Timer 驱动原回收状态机，模拟旧实例延迟退出，验证其他定时器继续运行、新 generation 保留、旧 generation 最终移除。既有 8 种交接恢复、旧 boot 父子回收及隔离真实 nginx 回归通过。IPC 和进程存活探针使用 fixture，本轮没有部署或重启生产服务。
+
+```sh
+php tests/gateway_startup_deferred_cleanup_test.php
+php tests/gateway_startup_cutover_behavior_test.php
+php tests/gateway_boot_production_lease_test.php
+```
+
 2026-09-07，macOS / PHP 8.1 / Swoole 5.1.8 / nginx 1.29.7。
 
 ## 故障与执行链

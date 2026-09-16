@@ -690,12 +690,18 @@ trait GatewayRuntimeLifecycleTrait {
             // coordinator 在子进程内持续推进 registry / recycle 状态机，
             // 每轮先 reload，避免长生命周期子进程持有旧的 generation 视图。
             $this->instanceManager->reload();
-            if ($this->consumeFallbackBusinessReloadSignal()) {
+            if (!$this->managedStartupCutoverPending() && $this->consumeFallbackBusinessReloadSignal()) {
                 Console::info('【Gateway】检测到reload运行信号，开始执行业务平面重载');
                 $this->restartGatewayBusinessPlane(false);
             }
         }
         $this->observeUpstreamSupervisorProcess();
+        if ($this->managedStartupCutoverPending()) {
+            // 冷启动/交接优先拉起新代，旧实例的 IPC 扫描、supervisor 同步及回收均不得挡在前面。
+            $this->bootstrapManagedUpstreams();
+            return;
+        }
+        $this->retireStartupHistoricalInstances();
         $this->syncUpstreamSupervisorState();
         $this->refreshManagedUpstreamRuntimeStates();
         $this->instanceManager->tick();
@@ -1428,7 +1434,6 @@ trait GatewayRuntimeLifecycleTrait {
         $key = $version . '@' . $plan['host'] . ':' . $plan['port'];
         $state = $this->instanceManager->state();
         $previous = (string)($state['active_version'] ?? '');
-        $previousInstances = $previous !== $version ? (array)($state['generations'][$previous]['instances'] ?? []) : [];
         $health = $this->probeManagedUpstreamHealth($plan);
         if (empty($health['healthy'])) return false;
         $this->instanceManager->activateVersion($version, self::ROLLING_DRAIN_GRACE_SECONDS);
@@ -1444,13 +1449,62 @@ trait GatewayRuntimeLifecycleTrait {
         }
         $this->startupCutoverCompleted[$key] = true;
         $this->notifyManagedUpstreamGenerationIterated($version);
-        foreach ($previousInstances as $instance) {
-            if (!empty($instance['metadata']['managed'])) $this->quiesceManagedPlanBusinessPlane($instance);
-        }
         $this->flushPendingNginxSyncSummary();
         $this->recordStartupReadyInstance($plan);
         Runtime::instance()->set('gateway_startup_ingress_ready', true);
         return true;
+    }
+
+    /**
+     * worker、健康监控与业务协调器共享启动门槛，避免各子进程在切流前回收或自愈旧代。
+     * @return bool 是否仍在等待本次 managed startup 的入口验证。
+     */
+    protected function managedStartupCutoverPending(): bool {
+        return $this->managedUpstreamPlans
+            && !(bool)Runtime::instance()->get('gateway_startup_ingress_ready');
+    }
+
+    /**
+     * 入口验证后的下一轮业务协调中接管历史实例，不在 fork 前或启动成功路径等待退出。
+     * 保留 registry owner 元数据；孤儿只登记到独立旧代，随后复用 draining/offline/timer reaper。
+     * @return void
+     */
+    protected function retireStartupHistoricalInstances(): void {
+        if (!$this->managedUpstreamPlans || $this->managedStartupCutoverPending()
+            || $this->startupHistoricalInstancesRetired) return;
+
+        $state = $this->instanceManager->state();
+        $knownPorts = [];
+        foreach ($state['generations'] as $generation) {
+            foreach ($generation['instances'] as $instance) $knownPorts[] = (int)$instance['port'];
+        }
+        foreach ($this->discoverStartupOrphanInstances($knownPorts) as $instance) {
+            $version = 'startup-orphan-' . (int)($instance['metadata']['owner_epoch'] ?? 0) . '-' . (int)$instance['port'];
+            $this->instanceManager->registerUpstream($version, $instance['host'], $instance['port'], 100, $instance['metadata']);
+        }
+
+        $state = $this->instanceManager->state();
+        $active = (string)($state['active_version'] ?? '');
+        foreach ($state['generations'] as $version => $generation) {
+            if ((string)$version === $active) continue;
+            $managed = array_filter($generation['instances'], static fn(array $instance): bool =>
+                ($instance['metadata']['managed'] ?? false) === true);
+            if (!$managed) continue;
+            if (!in_array($generation['status'], ['draining', 'offline'], true)) {
+                $this->instanceManager->drainVersion((string)$version, self::ROLLING_DRAIN_GRACE_SECONDS);
+            }
+            foreach ($managed as $instance) $this->quiesceManagedPlanBusinessPlane($instance);
+        }
+        $this->startupHistoricalInstancesRetired = true;
+    }
+
+    /**
+     * 后台发现同一 app/gateway 的未登记进程；已登记端点（包括新代）必须排除。
+     * @param array<int,int> $knownPorts 当前 registry 中的端口。
+     * @return array<int,array<string,mixed>> 按端点去重的旧实例身份。
+     */
+    protected function discoverStartupOrphanInstances(array $knownPorts): array {
+        return CliBootstrap::discoverOrphanManagedUpstreams($this->businessPort(), $knownPorts);
     }
 
     protected function renderStartupInfo(array $resultRows = []): void {

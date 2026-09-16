@@ -93,6 +93,10 @@ class App extends RequestLifetime {
      * @param null $line
      */
     public function errorHandler($level, $message, $file = null, $line = null): void {
+        // @stat/@fopen 等探测允许失败，不能把被抑制的警告重新送入日志并递归加锁。
+        if (!(error_reporting() & $level)) {
+            return;
+        }
         \Scf\Core\Log::instance()->error($message, file: $file, line: $line);
         //判断是否是子携程触发的错误
         $response = Response::instance();

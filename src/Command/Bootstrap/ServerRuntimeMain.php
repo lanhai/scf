@@ -98,9 +98,23 @@ function scf_define_runtime_constants(array $argv, array $overrides = []): void 
         }
     }
 
-    foreach ($defaults as $name => $value) {
-        defined($name) || define($name, $value);
-    }
+    // 常量名必须保留为字面量，让 IDE 能索引全局声明；取值仍统一经过上面的覆盖逻辑。
+    defined('ENV_VARIABLES') || define('ENV_VARIABLES', $defaults['ENV_VARIABLES']);
+    defined('IS_DEV') || define('IS_DEV', $defaults['IS_DEV']);
+    defined('IS_PACK') || define('IS_PACK', $defaults['IS_PACK']);
+    defined('NO_PACK') || define('NO_PACK', $defaults['NO_PACK']);
+    defined('IS_HTTP_SERVER') || define('IS_HTTP_SERVER', $defaults['IS_HTTP_SERVER']);
+    defined('IS_GATEWAY_SERVER') || define('IS_GATEWAY_SERVER', $defaults['IS_GATEWAY_SERVER']);
+    defined('IS_HTTP_SERVER_START') || define('IS_HTTP_SERVER_START', $defaults['IS_HTTP_SERVER_START']);
+    defined('IS_GATEWAY_SERVER_START') || define('IS_GATEWAY_SERVER_START', $defaults['IS_GATEWAY_SERVER_START']);
+    defined('IS_SERVER_PROCESS_LOOP') || define('IS_SERVER_PROCESS_LOOP', $defaults['IS_SERVER_PROCESS_LOOP']);
+    defined('IS_SERVER_PROCESS_START') || define('IS_SERVER_PROCESS_START', $defaults['IS_SERVER_PROCESS_START']);
+    defined('RUNNING_BUILD') || define('RUNNING_BUILD', $defaults['RUNNING_BUILD']);
+    defined('RUNNING_INSTALL') || define('RUNNING_INSTALL', $defaults['RUNNING_INSTALL']);
+    defined('RUNNING_TOOLBOX') || define('RUNNING_TOOLBOX', $defaults['RUNNING_TOOLBOX']);
+    defined('RUNNING_BUILD_FRAMEWORK') || define('RUNNING_BUILD_FRAMEWORK', $defaults['RUNNING_BUILD_FRAMEWORK']);
+    defined('RUNNING_CREATE_AR') || define('RUNNING_CREATE_AR', $defaults['RUNNING_CREATE_AR']);
+    defined('FRAMEWORK_IS_PHAR') || define('FRAMEWORK_IS_PHAR', $defaults['FRAMEWORK_IS_PHAR']);
 }
 
 function scf_run(array $argv): void {

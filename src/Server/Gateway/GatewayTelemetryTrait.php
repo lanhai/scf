@@ -351,6 +351,8 @@ trait GatewayTelemetryTrait {
 
     protected function maintainManagedUpstreamHealth(): void {
         $maintainStartedAt = microtime(true);
+        // 启动候选由业务协调器负责；此时自愈历史 active 会与新代启动并发争抢 registry。
+        if ($this->managedStartupCutoverPending()) return;
         if ($this->managedUpstreamSelfHealing || $this->managedUpstreamRolling || !$this->launcher || !$this->upstreamSupervisor) {
             $this->traceGatewayHealthStep('maintain.health.guard_flags', $maintainStartedAt, [
                 'return' => 'self_healing_or_rolling_or_dependency_missing',
