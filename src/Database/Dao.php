@@ -1213,7 +1213,7 @@ class Dao extends Struct {
     }
 
     /**
-     * 数据转换
+     * 数据转换；数字推断只用于明确声明为 int/float 的字段，文本保持原值。
      * @param array|null $data
      * @return array
      */
@@ -1222,6 +1222,23 @@ class Dao extends Struct {
             return $data;
         }
         $data = is_null($data) ? $this->toArray(true) : $data;
+        // 复用 Struct 的字段反射缓存，每个 Dao 类仅解析一次类型；兼容 int|Calculator|null。
+        static $numericFieldTypes = [];
+        if (!isset($numericFieldTypes[static::class])) {
+            $numericFieldTypes[static::class] = [];
+            foreach ($this->_getFields() as $field) {
+                $type = $field->getType();
+                $types = $type instanceof \ReflectionUnionType ? $type->getTypes() : [$type];
+                $names = array_map(static fn($item) => $item instanceof \ReflectionNamedType ? $item->getName() : '', $types);
+                if (in_array('string', $names, true) || in_array('mixed', $names, true)) {
+                    continue;
+                }
+                $numeric = array_values(array_intersect($names, ['int', 'float']));
+                if (count($numeric) === 1) {
+                    $numericFieldTypes[static::class][$field->getName()] = $numeric[0];
+                }
+            }
+        }
         foreach ($this->_validate as $f => $v) {
             if (isset($data[$f])) {
                 if (isset($v['format'])) {
@@ -1238,8 +1255,8 @@ class Dao extends Struct {
                     } elseif ($dataType == 'code' || $dataType == 'url') {
                         $data[$f] = htmlspecialchars_decode($data[$f]);
                     }
-                } elseif (is_numeric($data[$f]) && !is_int($data[$f]) && !is_float($data[$f]) && strlen($data[$f]) < 10) {
-                    $data[$f] = (float)$data[$f];
+                } elseif (isset($numericFieldTypes[static::class][$f]) && is_string($data[$f]) && is_numeric($data[$f]) && strlen($data[$f]) < 10) {
+                    $data[$f] = $numericFieldTypes[static::class][$f] === 'int' ? (int)$data[$f] : (float)$data[$f];
                 }
             }
         }
