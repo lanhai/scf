@@ -12,6 +12,7 @@ use Scf\Core\InflightCounter;
 use Scf\Core\Table\Runtime;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Router;
+use Scf\Server\Worker\TaskWorkerSignalGuard;
 use Scf\Util\MemoryMonitor;
 use Swoole\Process;
 use Swoole\Timer;
@@ -28,7 +29,20 @@ use Scf\Mode\Rpc\App as Rpc;
  */
 class WorkerListener extends Listener {
 
+    /**
+     * 初始化 worker/task worker 的进程级运行时能力。
+     *
+     * task worker 的信号保护必须先于定时器、应用挂载和 RPC 初始化完成，
+     * 避免启动后的任一 socket/pipe 写入因 SIGPIPE 终止整个协程进程。
+     *
+     * @param Server $server 当前 Swoole server。
+     * @param int $workerId 当前 worker id（包含 task worker）。
+     * @return void
+     */
     protected function onWorkerStart(Server $server, $workerId): void {
+        if (!TaskWorkerSignalGuard::install($server, (int)$workerId)) {
+            Console::warning("【Worker】task worker SIGPIPE 保护注册失败: worker_id={$workerId}", false);
+        }
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
                 Process::kill($server->worker_pid, SIGKILL);
