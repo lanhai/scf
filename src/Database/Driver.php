@@ -4,7 +4,13 @@ namespace Scf\Database;
 
 use PDO;
 use PDOException;
+use Scf\Core\InflightCounter;
 
+/**
+ * 持有单个 PDO 会话，提供建连、关闭和不执行业务 SQL 的可用性探测。
+ *
+ * 连接池在独占连接时调用探测；本层不重连或重放业务操作，避免改变事务状态。
+ */
 class Driver {
 
     use DriverTrait;
@@ -87,6 +93,28 @@ class Driver {
             $this->password,
             $this->options()
         );
+    }
+
+    /**
+     * 在连接交给业务前探测 PDO 会话，完整释放探测结果并登记 I/O 在途计数。
+     *
+     * @return void
+     * @throws PDOException 连接已关闭或数据库拒绝探测时交由连接池处理。
+     */
+    public function ping(): void {
+        if ($this->pdo === null) {
+            throw new PDOException('Cannot probe a closed PDO connection');
+        }
+        InflightCounter::beginMysql();
+        try {
+            $statement = $this->pdo->query('SELECT 1');
+            if ($statement === false) {
+                throw new PDOException('PDO connection probe failed');
+            }
+            $statement->closeCursor();
+        } finally {
+            InflightCounter::endMysql();
+        }
     }
 
     /**

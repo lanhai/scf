@@ -1,0 +1,17 @@
+Verified at 2026-10-10T07:47:17.857953+00:00
+
+Original Swoole 5.1.8 reproduced event worker SIGBUS, PC=1, x0=13.
+
+Backport: skip SIG_IGN in the kqueue signal dispatcher.
+
+event_worker_broken_pipe_behavior_test.php exit=0
+PASS event worker: write returns false, original worker survives, callable signal still executes
+
+
+task_worker_sigpipe_guard_behavior_test.php exit=0
+PASS task worker: SIGPIPE is absorbed and the original coroutine worker stays alive
+
+
+/Users/lanhai/projects/swoole/scf/tools/swoole-sigpipe/build/v5.1.8.tar.gz sha256=ed4dd6767e087b54f61eb43d48865c7197e67ab52b22b04fe7f8c6cce059394a
+
+/Users/lanhai/projects/swoole/scf/tools/swoole-sigpipe/build/swoole-src-5.1.8/modules/swoole.so sha256=234086f2cd59cd72eb86e1ed51c739b04d604356eecd1f207bbf5eb1c3ebe9f3

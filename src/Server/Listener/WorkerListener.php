@@ -10,6 +10,7 @@ use Scf\Core\Config;
 use Scf\Core\Console;
 use Scf\Core\InflightCounter;
 use Scf\Core\Table\Runtime;
+use Scf\Database\Pool\IdleConnectionReaper;
 use Scf\Database\Statistics\StatisticModel;
 use Scf\Mode\Web\Router;
 use Scf\Server\Worker\TaskWorkerSignalGuard;
@@ -42,6 +43,11 @@ class WorkerListener extends Listener {
     protected function onWorkerStart(Server $server, $workerId): void {
         if (!TaskWorkerSignalGuard::install($server, (int)$workerId)) {
             Console::warning("【Worker】task worker SIGPIPE 保护注册失败: worker_id={$workerId}", false);
+        }
+        // 维护只在支持协程的业务 worker 中启用，CLI/独立进程不因维护定时器延长生命。
+        if ((!$server->taskworker && ($server->setting['enable_coroutine'] ?? true))
+            || ($server->taskworker && ($server->setting['task_enable_coroutine'] ?? false))) {
+            IdleConnectionReaper::start(static fn(): bool => !Runtime::instance()->serverIsDraining());
         }
         Timer::after(1000, function () use ($server, $workerId) {
             if (!Process::kill($server->master_pid, 0)) {
@@ -170,8 +176,20 @@ INFO;
      * @return void
      */
     protected function onWorkerExit(Server $server, int $workerId): void {
+        // 必须在 reactor 等待剩余事件之前清掉维护定时器；未完成业务仍可正常归还。
+        IdleConnectionReaper::stop();
         $pid = (int)($server->worker_pid ?? getmypid());
         $this->cleanupInflightResidueByPid($pid, $workerId, 'worker_exit');
+    }
+
+    /**
+     * 对非异步退出及 task worker 停止兜底撤销维护，不做数据库 I/O。
+     * @param Server $server 当前 server。
+     * @param int $workerId 停止 worker id。
+     * @return void
+     */
+    protected function onWorkerStop(Server $server, int $workerId): void {
+        IdleConnectionReaper::stop();
     }
 
     /**
