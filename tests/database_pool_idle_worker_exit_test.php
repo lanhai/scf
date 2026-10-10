@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace Scf\Core {
     class InflightCounter {
+        public static function beginRedis(): void {}
+        public static function endRedis(): void {}
         public static function cleanupProcessInflightByPid(int $pid): array { return ['total' => 0]; }
     }
 }
@@ -10,7 +12,8 @@ namespace Scf\Core {
 namespace {
     require dirname(__DIR__) . '/vendor/autoload.php';
     foreach (['Database/DriverTrait', 'Database/Driver', 'Database/Pool/IdleConnectionReaper',
-        'Database/Pool/ConnectionPool', 'Server/Listener/Listener', 'Server/Listener/WorkerListener'] as $file) {
+        'Database/Pool/ConnectionPool', 'Cache/Connection/InflightRedisConnection',
+        'Server/Listener/Listener', 'Server/Listener/WorkerListener'] as $file) {
         require dirname(__DIR__) . '/src/' . $file . '.php';
     }
 
@@ -34,6 +37,8 @@ namespace {
     }
 
     $taskMode = ($argv[1] ?? '') === '--task';
+    $redisOption = array_search('--redis', $argv, true);
+    $redisPort = $redisOption === false ? 0 : (int)$argv[$redisOption + 1];
     $records = new Table(16);
     foreach (['starts', 'first_pid', 'second_pid', 'exits', 'stops', 'errors', 'lost_active', 'late_timer',
         'work_done', 'result_done'] as $key) $records->column($key, Table::TYPE_INT);
@@ -48,8 +53,21 @@ namespace {
     $listener = new ExitTestListener($server);
     $pool = null;
     $timerId = new ReflectionProperty(IdleConnectionReaper::class, 'timerId');
-    $runBusiness = static function () use (&$pool, $records, $timerId): void {
+    $runBusiness = static function () use (&$pool, $records, $timerId, $redisPort): void {
         $active = $pool->borrow();
+        if ($redisPort > 0) {
+            $connection = new \Scf\Cache\Connection\InflightRedisConnection($active, null);
+            if ($connection->get('fixture') !== 'value') $records->incr('run', 'lost_active');
+            $pool->borrow()->__return();
+            Coroutine::sleep(0.3);
+            if (!$active->instance()->isConnected() || $connection->get('fixture') !== 'value') {
+                $records->incr('run', 'lost_active');
+            }
+            unset($connection);
+            if ($timerId->getValue() !== 0) $records->incr('run', 'late_timer');
+            $records->incr('run', 'work_done');
+            return;
+        }
         $active->instance()->exec('CREATE TABLE fixture (value INTEGER)');
         $active->instance()->beginTransaction();
         $active->instance()->exec('INSERT INTO fixture VALUES (7)');
@@ -79,11 +97,18 @@ namespace {
         });
         $server->on('Finish', static function () use ($records): void { $records->incr('run', 'result_done'); });
     }
-    $server->on('WorkerStart', static function (Server $server, int $id) use (&$pool, $records, $taskMode): void {
+    $server->on('WorkerStart', static function (Server $server, int $id) use (&$pool, $records, $taskMode, $redisPort): void {
         IdleConnectionReaper::start(static fn(): bool => true);
-        $pool = new ConnectionPool(new ExitTestDialer(), 2, 2, 0, 0);
+        $dialer = $redisPort > 0
+            ? new \Mix\Redis\Pool\Dialer('127.0.0.1', $redisPort, '', 0, 1, 0, 1)
+            : new ExitTestDialer();
+        $pool = new ConnectionPool($dialer, 2, 2, $redisPort > 0 ? 600 : 0, 0);
         $pool->setIdleTimeout(60);
-        Coroutine::create(static fn() => $pool->borrow()->__return());
+        Coroutine::create(static function () use ($pool, $redisPort): void {
+            $idle = $pool->borrow();
+            $idle->__return();
+            if ($redisPort > 0) $idle->createTime = time() - 601;
+        });
         $target = $taskMode ? $server->taskworker : !$server->taskworker;
         if ($target) {
             $generation = $records->incr('run', 'starts');
@@ -138,6 +163,6 @@ namespace {
         || $result['exits'] < 1 || $result['stops'] < 2) {
         throw new RuntimeException('Graceful idle maintenance reload failed: ' . json_encode($result));
     }
-    printf("PASS %s worker reload: active operation completed, 60s maintenance timer cleared, old PID retired in %.3fs, no forced worker exit\n",
-        $taskMode ? 'task' : 'HTTP', $result['stop_delay']);
+    printf("PASS %s %s worker reload: active operation completed, 60s maintenance timer cleared, old PID retired in %.3fs, no forced worker exit\n",
+        $redisPort > 0 ? 'Redis' : 'PDO', $taskMode ? 'task' : 'HTTP', $result['stop_delay']);
 }

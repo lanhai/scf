@@ -6,15 +6,15 @@ use Mix\ObjectPool\AbstractObjectPool;
 use Mix\ObjectPool\Exception\WaitTimeoutException;
 use PDOException;
 use Scf\Database\Driver;
-use Scf\Database\DriverTrait;
 use Scf\Database\Logger\PdoLogger;
 use Swoole\Coroutine;
 use Throwable;
+use WeakMap;
 
 /**
- * 管理 PDO 的独占借还，在借用边界淘汰过期连接并按配置探测复用会话。
+ * 为 PDO 与 Mix Redis 驱动管理独占借还，在借用边界淘汰过期连接。
  *
- * 探测只发生在业务 SQL/事务开始前；失败最多替换一次，不重放业务操作。
+ * PDO 探测只发生在业务 SQL/事务开始前；失败最多替换一次，不重放业务操作。
  * 空闲回收只操作 Channel 中已归还的会话，调度及退出边界由 worker 管理。
  */
 class ConnectionPool extends AbstractObjectPool {
@@ -24,18 +24,21 @@ class ConnectionPool extends AbstractObjectPool {
     protected PdoLogger $logger;
     /** @var array<string, int> 与 Channel 的 FIFO 顺序一致，只保存归还时间。 */
     protected array $idleSince = [];
+    /** @var ?WeakMap<object, bool> 关闭后交给等待者的容量标记，不依赖驱动将 instance 置空。 */
+    private ?WeakMap $retired = null;
 
 
     /**
      * 借用连接，交付前处理最大寿命、空闲期限及到期的可用性探测。
      *
-     * @return Driver
+     * @return Driver|\Mix\Redis\Driver
      * @throws WaitTimeoutException
      * @throws PDOException 建连失败或替换后的连接仍无法通过探测。
+     * @throws Throwable 驱动关闭或建连失败。
      */
     public function borrow(): object {
         //Console::info("连接池数量:" . $this->getTotalNumber() . ',最大数量:' . $this->maxOpen);
-        /** @var DriverTrait $driver */
+        /** @var Driver|\Mix\Redis\Driver $driver */
         if ($this->getIdleNumber() > 0 || ($this->maxOpen && $this->getTotalNumber() >= $this->maxOpen)) {
             // 队列有连接，从队列取
             // 达到最大连接数，从队列取
@@ -51,12 +54,13 @@ class ConnectionPool extends AbstractObjectPool {
         $now = time();
         $lifetimeExpired = $this->maxLifetime && $driver->createTime + $this->maxLifetime <= $now;
         $idleExpired = $this->idleIimeout > 0 && $driver->lastUseTime + $this->idleIimeout <= $now;
-        if ($driver->instance() === null || $lifetimeExpired || $idleExpired) {
+        $retired = $this->retired !== null && isset($this->retired[$driver]);
+        if ($retired || $driver->instance() === null || $lifetimeExpired || $idleExpired) {
             $this->retireBorrowed($driver);
             // 直接用新连接替换本次借用，避免递归遍历整池的旧连接。
             $driver = $this->createConnection();
             $this->actives[spl_object_hash($driver)] = '';
-        } elseif ($this->autoPingInterval > 0 && $driver->lastPingTime + $this->autoPingInterval <= $now) {
+        } elseif ($driver instanceof Driver && $this->autoPingInterval > 0 && $driver->lastPingTime + $this->autoPingInterval <= $now) {
             try {
                 $driver->ping();
             } catch (PDOException $exception) {
@@ -162,7 +166,7 @@ class ConnectionPool extends AbstractObjectPool {
             if ($stats['queue_num'] <= 0 || $stats['consumer_num'] > 0 || !$mayRun()) {
                 break;
             }
-            /** @var Driver $driver */
+            /** @var Driver|\Mix\Redis\Driver $driver */
             $driver = $this->pop();
             $this->actives[spl_object_hash($driver)] = '';
             $this->retireBorrowed($driver, true);
@@ -174,21 +178,29 @@ class ConnectionPool extends AbstractObjectPool {
     /**
      * 关闭本次借用的旧会话并释放容量，不主动建立替代连接。
      *
-     * @param Driver $driver 已从空闲队列移出并登记为 active 的连接。
+     * @param Driver|\Mix\Redis\Driver $driver 已从空闲队列移出并登记为 active 的连接。
      * @param bool $wakeWaiters 归还/回收释放空槽时唤醒等待者；本次借用替换时保留槽位。
      * @return void
+     * @throws Throwable 驱动关闭失败；容量仍会释放。
      */
-    protected function retireBorrowed(Driver $driver, bool $wakeWaiters = false): void {
+    protected function retireBorrowed(object $driver, bool $wakeWaiters = false): void {
         try {
-            // PDO 关闭也可能挂起；在完成前保留 active，避免其他协程抢占容量。
-            if ($driver->instance() !== null) {
+            // 关闭可能挂起；在完成前保留 active，避免其他协程抢占容量。
+            // Redis close() 保留底层对象，已交接的关闭标记不能再次关闭。
+            if (($this->retired === null || !isset($this->retired[$driver])) && $driver->instance() !== null) {
                 $driver->close();
             }
         } finally {
             unset($this->actives[spl_object_hash($driver)]);
+            if ($this->retired !== null) {
+                unset($this->retired[$driver]);
+            }
             // 关闭若挂起，期间可能有人因 maxOpen 等待。交付关闭标记让借出端
             // 按正常容量约束建连，不能让 wait_timeout=0 的消费者永久悬挂。
             if ($wakeWaiters && Coroutine::getCid() >= 0 && $this->queue->stats()['consumer_num'] > 0) {
+                // Channel push 会立即恢复消费者，必须先标记；弱键不延长驱动存活期。
+                $this->retired ??= new WeakMap();
+                $this->retired[$driver] = true;
                 $this->queue->push($driver, 0.001);
             }
         }
@@ -229,7 +241,7 @@ class ConnectionPool extends AbstractObjectPool {
     protected function createConnection(): object {
         //连接创建时会挂起当前协程，导致 actives 未增加，因此需先 actives++ 连接创建成功后 actives--
         $closure = function () {
-            /** @var DriverTrait $connection */
+            /** @var Driver|\Mix\Redis\Driver $connection */
             $connection = $this->dialer->dial();
             $connection->pool = $this;
             $connection->createTime = time();

@@ -48,6 +48,21 @@ python3 tests/database_pool_idle_worker_exit_test.py
 
 健康检查与下一条 SQL 之间仍有断连窗口；PDO 关闭旧连接时也可能发送 COM_QUIT，因此不能保证所有断管写入都消失。原生 Swoole 补丁仍须先应用，否则探测或淘汰也可能触发原来的 Worker 崩溃。本次新逻辑仅重试探测，不改变 `Connection::call()` 既有业务 SQL 重试行为，不提供写操作或事务自动重放的保证。生产需要更新 Swoole 原生扩展，并部署框架及应用配置；本地修改没有替换生产扩展、发布包或重启生产进程。
 
+### 1.3.83 Redis 共享池回归（2026-10-10，本地修复尚未发布）
+
+用户提供的 17:14–17:17 生产日志显示 `retireBorrowed()` 仅接受 `Scf\Database\Driver`，但 `Scf\Cache\Connection\RedisPool` 也直接使用该池，传入 `Mix\Redis\Driver`。Redis 默认 `max_life_time=600`，再次借用到期连接时触发类型错误；满空闲队列的析构归还也会经过同一错误分支。本地以实际 phpredis/Mix Redis 驱动复现相同异常，失败后池统计为 `active=1, idle=0`，后续借用因容量占位而阻塞。Redis 命令的 inflight 在借用成功后才增加，因而借用等待可呈现 HTTP 在途、Redis 在途为零；日志中的具体 11 个 HTTP 请求仍需现场协程栈确认，尚未归因。
+
+共享回收方法改为接受驱动对象，并修正 PDO 独占的注释与探测边界。Redis `close()` 会保留非空底层对象，因此只放宽类型仍会把已经关闭的驱动交给容量等待者；池用按需建立的 `WeakMap` 标记已关闭的交接对象，交付前按原容量约束重新建连。该标记不持有驱动强引用，不增加维护命令、心跳、定时器或后台协程，正常热借还只增加一次空标记表判断。
+
+回归覆盖真实 RedisPool 入口、到期替换、析构归还满队列、关闭挂起后 `wait_timeout=0` 等待者、关闭异常释放槽位、命令异常/discard 和 inflight 平衡；RESP 测试端只接收建连 SELECT 及测试请求的业务命令，无维护 PING。实际 Swoole 5.1.8 HTTP/task worker 重载期间 Redis 操作完成、维护定时器清除，旧 worker 约 0.2–0.3 秒退出。PDO 借用、空闲回收、TCP 断连和 worker 重载另行回归。
+
+```sh
+python3 tests/redis_shared_pool_socket_test.py
+python3 tests/redis_shared_pool_socket_test.py --reload
+```
+
+以上仅为本地修复与验证。新版框架需要被新实例加载；已部署 1.3.83 的旧实例不会因源码变更自动恢复已损坏的池。
+
 ## 原生根因与修复点
 
 - [Swoole v5.1.8 worker.cc](https://github.com/swoole/swoole-src/blob/v5.1.8/src/server/worker.cc) 的 `worker_signal_init()` 为 SIGPIPE 注册 SIG_IGN。
