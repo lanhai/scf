@@ -37,6 +37,12 @@ use Throwable;
 use const SIGKILL;
 
 
+/**
+ * 应用 upstream 的 HTTP/WebSocket 服务与 Gateway 本地 IPC 入口。
+ *
+ * 负责服务运行、worker 协同与运行状态输出；Gateway 消费这里的状态快照
+ * 完成路由和控制面展示，OS 内存采样统一交由 MemoryMonitor 批量执行。
+ */
 class Http extends \Scf\Core\Server {
     protected const RELOAD_DIAGNOSTIC_GRACE_SECONDS = 10;
     protected const RELOAD_DIAGNOSTIC_INTERVAL_MS = 5000;
@@ -997,6 +1003,7 @@ class Http extends \Scf\Core\Server {
      *
      * upstream master 会复用 MemoryMonitor::sum() 的 5 秒 last-good；缓存过期时
      * 所有 PID 也只触发一次批量 ps，gateway 不再逐行创建外部进程。
+     * 未采集的 OS 指标返回 null，避免表中的初始 0 覆盖有效 RSS。
      *
      * @return array<int, array<string, mixed>>
      */
@@ -1013,12 +1020,14 @@ class Http extends \Scf\Core\Server {
             }
             $pid = (int)($row['pid'] ?? 0);
             $pidMemory = $memoryByPid[$pid] ?? [];
+            // start() 把表中的 RSS/PSS 初始化为 0；它不代表已采到 OS 数据。
+            // 只有正值可以作为表内 last-good，批量快照中的显式 0 则仍然有效。
             $rssMb = isset($pidMemory['rss_kb']) && is_numeric($pidMemory['rss_kb'])
                 ? round(((float)$pidMemory['rss_kb']) / 1024, 1)
-                : (is_numeric($row['rss_mb'] ?? null) ? (float)$row['rss_mb'] : null);
+                : (is_numeric($row['rss_mb'] ?? null) && (float)$row['rss_mb'] > 0 ? (float)$row['rss_mb'] : null);
             $pssMb = isset($pidMemory['pss_kb']) && is_numeric($pidMemory['pss_kb'])
                 ? round(((float)$pidMemory['pss_kb']) / 1024, 1)
-                : (is_numeric($row['pss_mb'] ?? null) ? (float)$row['pss_mb'] : null);
+                : (is_numeric($row['pss_mb'] ?? null) && (float)$row['pss_mb'] > 0 ? (float)$row['pss_mb'] : null);
             $rows[] = [
                 'process' => (string)($row['process'] ?? ''),
                 'pid' => $pid,
