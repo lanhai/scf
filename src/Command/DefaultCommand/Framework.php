@@ -18,6 +18,11 @@ use Swoole\Coroutine\System;
 use Phar;
 use function Co\run;
 
+/**
+ * 框架维护 CLI 入口，负责框架源码包和 dashboard 资源包的构建与发布。
+ *
+ * dashboard 的增量判断以实际打包资源为准，版本清单只记录发布结果。
+ */
 class Framework implements CommandInterface {
 
     public function commandName(): string {
@@ -53,6 +58,12 @@ class Framework implements CommandInterface {
         Console::success('框架composer包发布成功:v' . $version);
     }
 
+    /**
+     * 检查 dashboard 构建资源，变化时打包并上传资源包和版本清单。
+     *
+     * @return void
+     * @throws \RuntimeException 构建资源无法读取时停止发布，避免保存不完整摘要
+     */
     public function dashboard(): void {
         $dashboardDir = SCF_ROOT . '/build/public/dashboard';
         if (!is_dir($dashboardDir)) {
@@ -69,7 +80,12 @@ class Framework implements CommandInterface {
             mkdir($buildDir, 0775);
         }
         $buildFilePath = $buildDir . '/dashboard.zip';
-        $md5 = md5_file($indexFile);
+        // 摘要和 ZIP 共用文件列表，避免入口不变时漏掉资源变更。
+        $publicFiles = array_values(array_filter(
+            Dir::scan($dashboardDir),
+            static fn(string $file): bool => pathinfo($file, PATHINFO_EXTENSION) !== 'map'
+        ));
+        $md5 = $this->dashboardContentMd5($dashboardDir, $publicFiles);
         $versionJson = $dashboardDir . '/version.json';
         if (!file_exists($versionJson)) {
             $version = [
@@ -77,7 +93,7 @@ class Framework implements CommandInterface {
             ];
         } else {
             $version = JsonHelper::recover(File::read($versionJson));
-            if ($version['md5'] == $md5) {
+            if (($version['md5'] ?? null) === $md5) {
                 Console::success('文件一致,无需更新');
                 return;
             }
@@ -86,8 +102,6 @@ class Framework implements CommandInterface {
         $version['version'] = StringHelper::incrementVersion($version['version']);
         //打包文件夹
         $publicObject = '/scf/dashboard.zip';
-        //打包public文件
-        $publicFiles = Dir::scan($dashboardDir);
         $config = require $buildDir . '/config.php';
         $oss = Oss::instance($config);
         if ($publicFiles) {
@@ -96,10 +110,6 @@ class Framework implements CommandInterface {
             try {
                 Console::line();
                 foreach ($publicFiles as $file) {
-                    $arr = explode('.', $file);
-                    if (array_pop($arr) == 'map') {
-                        continue;
-                    }
                     Console::write(str_replace($dashboardDir, "", $file));
                     $zip->addFile($file, str_replace($dashboardDir, "", $file));
                 }
@@ -138,6 +148,33 @@ class Framework implements CommandInterface {
         } else {
             Console::log('版本配置文件上传成功:' . Color::green($uploadResult->getData()));
         }
+    }
+
+    /**
+     * 按相对路径和内容计算资源摘要，兼容版本清单既有的 md5 字段。
+     *
+     * @param string $dashboardDir 构建资源根目录
+     * @param array<int, string> $files 已排除 source map 的实际打包文件列表
+     * @return string 与目录扫描顺序、绝对路径及版本清单内容无关的 MD5
+     * @throws \RuntimeException 任一资源无法读取时拒绝生成摘要
+     */
+    protected function dashboardContentMd5(string $dashboardDir, array $files): string {
+        sort($files, SORT_STRING);
+        $context = hash_init('md5');
+        $prefixLength = strlen(rtrim($dashboardDir, '/\\')) + 1;
+        foreach ($files as $file) {
+            $relativePath = substr($file, $prefixLength);
+            // 版本清单由发布流程改写，不参与摘要，避免每次发布都触发下一次。
+            if ($relativePath === 'version.json') {
+                continue;
+            }
+            $fileMd5 = md5_file($file);
+            if ($fileMd5 === false) {
+                throw new \RuntimeException('dashboard资源读取失败:' . $file);
+            }
+            hash_update($context, $relativePath . "\0" . $fileMd5 . "\0");
+        }
+        return hash_final($context);
     }
 
     public function build(): void {
