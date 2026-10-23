@@ -52,6 +52,8 @@ class RQueue {
     protected string $managerGeneration = '';
     protected bool $shouldExit = false;
     protected ?Channel $exitChannel = null;
+    /** @var int 本消费者已预留的执行槽位，包含尚在等待 Redis 的 pop，防止跨轮超额投递。 */
+    protected int $reservedSlots = 0;
 
     /**
      * 为当前 RedisQueue 执行进程准备退出同步通道。
@@ -556,20 +558,26 @@ class RQueue {
         return $this->managerId;
     }
 
+    /**
+     * 当前消费者是否仍属于持有的管理代际；退休后只排空已分派的任务。
+     * @return bool 不修改共享代际或 worker 租约
+     */
+    protected function ownsManagerGeneration(): bool {
+        $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
+        $latestGeneration = (string)(Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? '');
+        return $this->managerId == $latestManagerId
+            && ($this->managerGeneration === '' || ($latestGeneration !== '' && hash_equals($latestGeneration, $this->managerGeneration)));
+    }
+
+    /**
+     * 每轮只补齐空闲协程槽位，不能等待整批任务结束后才继续消费。
+     * @param int $mc 当前进程最大执行并发，预留槽位在子协程 finally 中释放
+     * @return void Timer 负责后续轮次，管理代际改变时保留原有排空退出语义
+     */
     protected function loop($mc): void {
-        //每一秒读取一次队列列表
         Timer::after(1000, function () use ($mc) {
-            $latestManagerId = Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESS);
-            $latestManagerGeneration = (string)(
-                Runtime::instance()->get(Key::RUNTIME_SUBPROCESS_MANAGER_GENERATION) ?? ''
-            );
-            $managerGenerationChanged = $this->managerGeneration !== ''
-                && (
-                    $latestManagerGeneration === ''
-                    || !hash_equals($latestManagerGeneration, $this->managerGeneration)
-                );
-            if ($this->managerId != $latestManagerId || $managerGenerationChanged) {
-                if ((int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0) > 0) {
+            if (!$this->ownsManagerGeneration()) {
+                if ($this->reservedSlots > 0 || (int)(Counter::instance()->get(Key::COUNTER_REDIS_QUEUE_PROCESSING) ?: 0) > 0) {
                     Timer::after(200, function () use ($mc) {
                         $this->loop($mc);
                     });
@@ -577,19 +585,21 @@ class RQueue {
                 }
                 $this->shutdownRuntime();
             } else {
-                if ($count = $this->count()) {
-                    $successed = 0;
-//                    for ($i = 0; $i <= min($count, $mc); $i++) {
-//                        if ($this->pop()) {
-//                            $successed++;
-//                        }
-//                    }
-                    Coroutine\parallel(min($count, $mc), function () use (&$successed) {
-                        if ($this->pop()) {
-                            $successed++;
+                $available = max(0, (int)$mc - $this->reservedSlots);
+                $dispatch = $available > 0 ? min($available, $this->count()) : 0;
+                for ($i = 0; $i < $dispatch; $i++) {
+                    // Redis rPop 自身会挂起：先预留，再创建协程，下一轮才能正确计算容量。
+                    $this->reservedSlots++;
+                    $cid = Coroutine::create(function (): void {
+                        try {
+                            if ($this->ownsManagerGeneration()) $this->pop();
+                        } catch (Throwable $error) {
+                            Log::instance()->setModule('RQueue')->error($error->getMessage());
+                        } finally {
+                            $this->reservedSlots--;
                         }
                     });
-                    Env::isDev() and Console::log('【RedisQueue】本次累计执行队列任务:' . min($count, $mc) . ',执行完成:' . $successed);
+                    if ($cid === false) $this->reservedSlots--;
                 }
                 $latestUsageUpdated = Runtime::instance()->get("redis:queue.memory.usage.updated") ?: 0;
                 if (time() - $latestUsageUpdated >= 5) {
