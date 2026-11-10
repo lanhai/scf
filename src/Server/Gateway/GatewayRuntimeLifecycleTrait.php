@@ -849,11 +849,15 @@ trait GatewayRuntimeLifecycleTrait {
     }
 
     protected function waitForGatewayPortsReleased(int $timeoutSeconds = 15, int $intervalMs = 200): void {
+        // Nginx retains ingress while the next upstream starts on a separate endpoint.
+        if ($this->nginxProxyModeEnabled()) {
+            return;
+        }
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $ports = array_values(array_unique(array_filter([
-            $this->nginxProxyModeEnabled() ? 0 : $this->port,
+            $this->port,
             $this->rpcPort,
-            ($this->tcpRelayModeEnabled() || $this->nginxProxyModeEnabled()) ? $this->controlPort() : 0,
+            $this->tcpRelayModeEnabled() ? $this->controlPort() : 0,
         ], static fn(int $port) => $port > 0)));
         if (!$ports) {
             return;
@@ -887,7 +891,7 @@ trait GatewayRuntimeLifecycleTrait {
 
     protected function createGatewaySocketServer(int $timeoutSeconds = 10, int $intervalMs = 200): Server {
         $listenPort = $this->controlPort();
-        $deadline = microtime(true) + max(1, $timeoutSeconds);
+        $deadline = microtime(true) + ($this->nginxProxyModeEnabled() ? 0 : max(1, $timeoutSeconds));
         $logged = false;
 
         while (microtime(true) < $deadline) {

@@ -182,7 +182,7 @@ class GatewayServer {
     /**
      * 启动 gateway 主服务。
      *
-     * 启动顺序比较讲究：先等待旧端口释放，再创建控制面 server，
+     * TCP 模式先等待旧端口释放。Nginx 模式直接绑定本轮选定的控制面端口，
      * 再注册 server 托管子进程，最后由 worker#0 仅建立 socket/cluster 入口。
      * housekeep、安装接管、upstream 状态推进等后台职责统一下沉到 addProcess 子进程。
      *

@@ -6,6 +6,7 @@ namespace Scf\Core {
     class Console {
         public static function timestamp(): string { return ''; }
         public static function warning(...$args): void {}
+        public static function success(...$args): void {}
     }
 }
 namespace {
@@ -43,6 +44,10 @@ namespace {
         protected static function restartHandoffPorts(array $startup, $manager): array { return []; }
         protected static function cleanupOrphanManagedUpstreams($launcher, int $port, array $keepPorts = []): void { self::$scans++; }
     }
+    class DeferredGateway extends \Scf\Server\Gateway\GatewayServer {
+        public function waitForPorts(): void { $this->waitForGatewayPortsReleased(2); }
+        public function bindControl(): void { $this->createGatewaySocketServer(2); }
+    }
     $root = sys_get_temp_dir() . '/scf-deferred-start-' . bin2hex(random_bytes(5));
     $manager = new \Scf\Server\Gateway\AppInstanceManager(new \Scf\Server\Gateway\UpstreamRegistry($root));
     $manager->bootstrap('same-version', '127.0.0.1', 30101, true, 100, ['managed' => true, 'pid' => 19018, 'owner_epoch' => 92]);
@@ -72,6 +77,16 @@ namespace {
                 'Nginx control listener must avoid the occupied, public and reserved ports');
             checkDeferred($tcp['control_bind_port'] === $occupied, 'TCP mode must retain its configured control port');
             checkDeferred(\Scf\Core\Server::isListeningPortInUse($occupied), 'Existing listener must survive');
+            $gateway = new DeferredGateway($manager, '127.0.0.1', 30100, controlBindPort: $occupied, configuredTrafficMode: 'nginx');
+            $startedAt = microtime(true);
+            $gateway->waitForPorts();
+            try {
+                $gateway->bindControl();
+                throw new LogicException('The occupied listener must reject the bind');
+            } catch (RuntimeException $exception) {
+                checkDeferred(str_contains($exception->getMessage(), '端口仍被占用'), 'Expose a bind conflict without retries');
+            }
+            checkDeferred(microtime(true) - $startedAt < 1.0, 'Nginx must not wait even if a port is claimed after planning');
         } finally {
             fclose($socket);
         }
