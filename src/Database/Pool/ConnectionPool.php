@@ -26,6 +26,8 @@ class ConnectionPool extends AbstractObjectPool {
     protected array $idleSince = [];
     /** @var ?WeakMap<object, bool> 关闭后交给等待者的容量标记，不依赖驱动将 instance 置空。 */
     private ?WeakMap $retired = null;
+    /** @var ?WeakMap<object, int> Mix 驱动的归还时间，弱键不延长连接寿命。 */
+    private ?WeakMap $redisReturnedAt = null;
 
 
     /**
@@ -53,7 +55,10 @@ class ConnectionPool extends AbstractObjectPool {
         $this->actives[$id] = ''; // 不可保存外部连接的引用，否则导致外部连接不析构
         $now = time();
         $lifetimeExpired = $this->maxLifetime && $driver->createTime + $this->maxLifetime <= $now;
-        $idleExpired = $this->idleIimeout > 0 && $driver->lastUseTime + $this->idleIimeout <= $now;
+        $lastUseTime = $driver instanceof Driver
+            ? $driver->lastUseTime
+            : ($this->redisReturnedAt[$driver] ?? $driver->createTime);
+        $idleExpired = $this->idleIimeout > 0 && $lastUseTime + $this->idleIimeout <= $now;
         $retired = $this->retired !== null && isset($this->retired[$driver]);
         if ($retired || $driver->instance() === null || $lifetimeExpired || $idleExpired) {
             $this->retireBorrowed($driver);
@@ -81,7 +86,9 @@ class ConnectionPool extends AbstractObjectPool {
             $driver->lastPingTime = time();
             $driver->pingTimes++;
         }
-        $driver->lastUseTime = time();
+        if ($driver instanceof Driver) {
+            $driver->lastUseTime = time();
+        }
         // 返回
         return $driver;
     }
@@ -96,7 +103,12 @@ class ConnectionPool extends AbstractObjectPool {
         if (!isset($this->actives[spl_object_hash($connection)])) {
             return false;
         }
-        $connection->lastUseTime = time();
+        if ($connection instanceof Driver) {
+            $connection->lastUseTime = time();
+        } else {
+            $this->redisReturnedAt ??= new WeakMap();
+            $this->redisReturnedAt[$connection] = time();
+        }
         return parent::return($connection);
     }
 
@@ -114,7 +126,9 @@ class ConnectionPool extends AbstractObjectPool {
         }
         $id = spl_object_hash($connection);
         // Channel::push 会立即唤醒消费者，必须在交接前登记，借出端负责删除。
-        $this->idleSince[$id] = $connection->lastUseTime;
+        $this->idleSince[$id] = $connection instanceof Driver
+            ? $connection->lastUseTime
+            : ($this->redisReturnedAt[$connection] ?? $connection->createTime);
         $returned = $this->queue->push($connection, 0.001);
         if (!$returned) {
             unset($this->idleSince[$id]);
@@ -245,10 +259,12 @@ class ConnectionPool extends AbstractObjectPool {
             $connection = $this->dialer->dial();
             $connection->pool = $this;
             $connection->createTime = time();
-            $connection->lastUseTime = time();
-            $connection->lastPingTime = time();
-            $connection->pingTimes = 0;
-            $connection->id = spl_object_hash($connection);
+            if ($connection instanceof Driver) {
+                $connection->lastUseTime = $connection->createTime;
+                $connection->lastPingTime = $connection->createTime;
+                $connection->pingTimes = 0;
+                $connection->id = spl_object_hash($connection);
+            }
             return $connection;
         };
         $id = spl_object_hash($closure);

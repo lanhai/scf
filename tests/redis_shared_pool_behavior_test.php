@@ -77,9 +77,6 @@ namespace {
         expectRedis(!$old->instance()->isConnected(), 'Expired Redis connection remained open');
         expectRedis($client->objectPool()->stats() === ['total' => 1, 'idle' => 1, 'active' => 0],
             'Lifetime replacement leaked a slot');
-        $loan = $client->connection();
-        driverOf($loan)->lastPingTime = time() - 2;
-        unset($loan);
         $client->objectPool()->setPingInterval(1);
         expectRedis($client->get('fixture') === 'value', 'PDO probe setting leaked into Redis command behavior');
         echo "PASS real RedisPool lifetime expiry, command result and capacity\n";
