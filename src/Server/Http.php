@@ -963,8 +963,7 @@ class Http extends \Scf\Core\Server {
     /**
      * 受理 gateway 下发的单 worker 平滑轮换请求。
      *
-     * 请求会在 upstream 本地 IPC 控制链里直接调用 `server->stop($workerId, true)`，
-     * 由 upstream 自己的 server 生命周期去平滑轮换指定 worker。
+     * 本地 IPC 回执写出后，交给 upstream 的 Server 生命周期平滑轮换指定 Worker。
      *
      * @param array $payload gateway 透传的 worker 定位信息。
      * @return array<string, mixed>
@@ -994,7 +993,14 @@ class Http extends \Scf\Core\Server {
 
         return $this->queueLocalIpcAction(function () use ($workerId, $workerNumber, $currentPid): void {
             Console::warning("【Server】收到内存治理请求, server侧平滑轮换 Worker#{$workerNumber}, PID:{$currentPid}", false);
-            $this->server->stop($workerId, true);
+            // 旧版扩展通过第二个参数等待事件排空，新版由 reload_async 控制。
+            $stop = new \ReflectionMethod($this->server, 'stop');
+            $accepted = $stop->getNumberOfParameters() > 1
+                ? $this->server->stop($workerId, true)
+                : $this->server->stop($workerId);
+            if (!$accepted) {
+                Console::warning("【Server】Swoole 拒绝轮换 Worker#{$workerNumber}, PID:{$currentPid}", false);
+            }
         }, 'restart_worker', 1);
     }
 

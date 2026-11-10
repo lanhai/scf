@@ -212,20 +212,22 @@ function newIdlePool(int $maxOpen = 2, int $maxIdle = 2, int $timeout = 60): arr
     expectIdle($untouched->instance() !== null && count(iterator_to_array(Timer::list())) === 0, 'Drain guard allowed maintenance I/O');
     IdleConnectionReaper::stop();
 
-    // An application can disable coroutine timer callbacks independently of server settings.
-    IdleConnectionReaper::start(static fn(): bool => true);
-    [$nonCoroutine] = newIdlePool(1, 1);
-    $untouched = $nonCoroutine->borrow();
-    $untouched->__return();
-    $nonCoroutine->age($untouched, 61);
-    $nonCoroutine->idleCheck();
-    // Retained but deprecated in 5.1.8; exercise legacy configuration without deprecation noise.
-    @Timer::set(['enable_coroutine' => false]);
-    Coroutine::sleep(0.2);
-    @Timer::set(['enable_coroutine' => true]);
-    expectIdle($untouched->instance() !== null && count(iterator_to_array(Timer::list())) === 0,
-        'Non-coroutine timer attempted Channel I/O');
-    IdleConnectionReaper::stop();
+    // Swoole 6.2 removed the independent coroutine timer setting.
+    if (method_exists(Timer::class, 'set')) {
+        IdleConnectionReaper::start(static fn(): bool => true);
+        [$nonCoroutine] = newIdlePool(1, 1);
+        $untouched = $nonCoroutine->borrow();
+        $untouched->__return();
+        $nonCoroutine->age($untouched, 61);
+        $nonCoroutine->idleCheck();
+        // Retained but deprecated in 5.1.8; exercise legacy configuration without deprecation noise.
+        @Timer::set(['enable_coroutine' => false]);
+        Coroutine::sleep(0.2);
+        @Timer::set(['enable_coroutine' => true]);
+        expectIdle($untouched->instance() !== null && count(iterator_to_array(Timer::list())) === 0,
+            'Non-coroutine timer attempted Channel I/O');
+        IdleConnectionReaper::stop();
+    }
 
     printf("PASS idle expiry, active isolation, zero maintenance probes/redials, shared timer, 32-connection batches, weak ownership, blocked borrower handoff, nonblocking return, drain/exit and CLI\n10000 hot checkouts: %.2f ms, 1 dial, 1 unchanged timer\n", $hotElapsed * 1000);
 });
