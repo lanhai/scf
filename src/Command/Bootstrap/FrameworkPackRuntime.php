@@ -69,7 +69,21 @@ function scf_prepare_framework_runtime_storage(?string &$error = null): bool {
 
     $activeRecord = scf_read_framework_active_record();
     if ($activeRecord && is_file((string)($activeRecord['path'] ?? ''))) {
-        return scf_sync_framework_fallback_pack((string)$activeRecord['path'], $error);
+        $activePack = (string)$activeRecord['path'];
+        $bundledPack = SCF_ROOT . '/build/src.pack';
+        $bundledInfo = scf_read_framework_pack_version($bundledPack) ?? [];
+        $bundledVersion = trim((string)($bundledInfo['version'] ?? ''));
+        $activeVersion = trim((string)($activeRecord['version'] ?? ''));
+        // Git and image releases replace src.pack. Adopt a newer release before
+        // the fallback sync can overwrite it with the previous active pack.
+        if ($bundledVersion !== '' && $activeVersion !== '' && version_compare($bundledVersion, $activeVersion, '>')) {
+            if (!scf_publish_framework_pack($bundledPack, $bundledInfo, false, $error)) {
+                return false;
+            }
+            scf_stdout('【Boot】已激活随发布交付的 framework 包: ' . $bundledVersion);
+            return true;
+        }
+        return scf_sync_framework_fallback_pack($activePack, $error);
     }
 
     if ($activeRecord && !is_file((string)($activeRecord['path'] ?? ''))) {
