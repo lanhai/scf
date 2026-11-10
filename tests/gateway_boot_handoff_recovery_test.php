@@ -44,7 +44,7 @@ $port = (int)substr(strrchr(stream_socket_get_name($socket, false), ':'), 1);
 $leaseFile = __DIR__ . '/apps/startup_fixture/update/gateway_lease_startup_fixture_dev_master_' . $opts['port'] . '.json';
 $lease = ['app' => 'startup_fixture', 'env' => 'dev', 'role' => 'master', 'gateway_port' => (int)$opts['port'],
     'epoch' => 1, 'state' => $mode === 'stopped' ? 'stopped' : 'running', 'expires_at' => time() + 60,
-    'meta' => ['gateway_pid' => getmypid(), 'grace_seconds' => 20, 'restart_grace_seconds' => 120]];
+    'meta' => ['gateway_pid' => getmypid(), 'control_port' => $port, 'grace_seconds' => 20, 'restart_grace_seconds' => 120]];
 if ($mode === 'expired') $lease['expires_at'] = time() - 200;
 file_put_contents($leaseFile, json_encode($lease));
 echo $port, PHP_EOL;
@@ -85,7 +85,12 @@ try {
         stream_set_timeout($pipes[1], 3);
         $controlPort = (int)trim((string)fgets($pipes[1]));
         checkHandoffRecovery($controlPort > 0, 'Fixture must listen: ' . $mode);
-        $args[] = '-control_port=' . $controlPort;
+        if (in_array($mode, ['stopped', 'expired'], true)) {
+            $args[] = '-control_port=' . $controlPort;
+        } else {
+            checkHandoffRecovery(in_array($controlPort, scf_command_guard_ports($args), true),
+                'Boot must discover the actual control port from the lease');
+        }
         if ($mode === 'active') {
             $guard = proc_open([PHP_BINARY, $root . '/guard.php', ...array_slice($args, 1)],
                 [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $guardPipes);

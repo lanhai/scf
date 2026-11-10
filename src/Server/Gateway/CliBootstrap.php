@@ -15,6 +15,7 @@ use Scf\Command\Manager;
 use Scf\Core\App;
 use Scf\Core\Console;
 use Scf\Core\Env;
+use Scf\Core\Server as CoreServer;
 use RuntimeException;
 use Scf\Server\Http;
 use Scf\Util\ProcessCommandLine;
@@ -228,11 +229,24 @@ class CliBootstrap {
         $controlBindPort = self::resolveControlPort($opts, $serverConfig, $bindPort, $configPort);
 
         self::validateGatewayListenerLayout($trafficMode, $bindPort, $controlBindPort, $rpcBindPort);
+        $bindHost = (string)($opts['host'] ?? '0.0.0.0');
+        if ($trafficMode === 'nginx' && !str_contains($bindHost, ':')
+            && CoreServer::isPortInUse($controlBindPort, $bindHost)) {
+            // Reserve the replacement before planning upstreams so HTTP/RPC cannot select it.
+            $replacement = $launcher->findAvailablePortAvoiding($bindHost, min($controlBindPort + 1, 65535 - 199), [
+                $bindPort,
+                $rpcBindPort,
+                (int)($opts['upstream_port'] ?? 0),
+                (int)($opts['upstream_rpc_port'] ?? 0),
+            ]);
+            Console::warning("【Gateway】控制面端口 {$controlBindPort} 已占用，使用 {$replacement} 启动并切换 nginx 转发");
+            $controlBindPort = $replacement;
+        }
 
         return [
             'server_config' => $serverConfig,
             'upstream_host' => (string)($opts['upstream_host'] ?? '127.0.0.1'),
-            'bind_host' => (string)($opts['host'] ?? '0.0.0.0'),
+            'bind_host' => $bindHost,
             'bind_port' => $bindPort,
             'rpc_bind_port' => $rpcBindPort,
             'control_bind_port' => $controlBindPort,

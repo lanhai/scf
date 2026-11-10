@@ -1,6 +1,6 @@
 ---
 name: scf-framework-publish
-description: 当用户明确要求“发布框架”时使用。这个 skill 会严格执行框架发布的固定顺序：framework build、framework push、build_main.sh，并在出现瞬时失败时继续重试，不能跳步也不能换顺序。
+description: 当用户明确要求“发布框架”时使用。这个 skill 会严格执行框架发布的固定顺序：framework build、framework push、按变更范围选择镜像构建入口，并在出现瞬时失败时继续重试，不能跳步也不能换顺序。
 ---
 
 # SCF 框架发布
@@ -15,7 +15,7 @@ description: 当用户明确要求“发布框架”时使用。这个 skill 会
 
 1. `framework build`
 2. `framework push`
-3. `/Users/lanhai/projects/swoole/etc/build_main.sh`
+3. 仅更新框架时执行 `/Users/lanhai/projects/swoole/etc/build_main_fast.sh`，更新运行环境时执行 `/Users/lanhai/projects/swoole/etc/build_main.sh`。
 
 ## 重试规则
 

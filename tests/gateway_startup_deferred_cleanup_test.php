@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 namespace Scf\Core {
+    class Config { public static function server(): array { return ['port' => 30100]; } }
     class Console {
         public static function timestamp(): string { return ''; }
         public static function warning(...$args): void {}
@@ -32,6 +33,9 @@ namespace {
     }
     class DeferredBootstrap extends \Scf\Server\Gateway\CliBootstrap {
         public static int $scans = 0;
+        public static function context(array $opts): array {
+            return parent::buildGatewayStartupContext($opts, new \Scf\Server\Gateway\AppServerLauncher());
+        }
         public static function prepare(array $startup, \Scf\Server\Gateway\AppInstanceManager $manager, DeferredLauncher $launcher): array {
             return parent::prepareGatewayUpstreams([], $startup, $manager, $launcher);
         }
@@ -48,6 +52,29 @@ namespace {
         'traffic_mode' => 'nginx', 'spawn_upstream' => true, 'reuse_existing_upstream' => false,
         'version' => 'same-version', 'server_config' => [], 'upstream_host' => '127.0.0.1', 'bootstrap_active' => true, 'weight' => 100];
     try {
+        $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        checkDeferred(is_resource($socket), 'Fixture must bind a private port');
+        try {
+            $occupied = (int)substr(strrchr(stream_socket_get_name($socket, false), ':'), 1);
+            $options = [
+                'host' => '127.0.0.1',
+                'port' => 30100,
+                'control_port' => $occupied,
+                'rpc_port' => $occupied + 1,
+                'upstream_port' => $occupied + 2,
+                'upstream_rpc_port' => $occupied + 3,
+                'upstream_version' => 'fixture',
+                'state_file' => $root,
+            ];
+            $nginx = DeferredBootstrap::context($options + ['traffic_mode' => 'nginx']);
+            $tcp = DeferredBootstrap::context($options + ['traffic_mode' => 'tcp']);
+            checkDeferred(!in_array($nginx['control_bind_port'], array_values($options), true),
+                'Nginx control listener must avoid the occupied, public and reserved ports');
+            checkDeferred($tcp['control_bind_port'] === $occupied, 'TCP mode must retain its configured control port');
+            checkDeferred(\Scf\Core\Server::isListeningPortInUse($occupied), 'Existing listener must survive');
+        } finally {
+            fclose($socket);
+        }
         $result = DeferredBootstrap::prepare($startup, $manager, $launcher);
         checkDeferred($launcher->stops === 0, 'New upstream startup must not synchronously stop historical instances');
         checkDeferred(DeferredBootstrap::$scans === 0, 'Historical reconciliation/orphan scanning must not precede startup');

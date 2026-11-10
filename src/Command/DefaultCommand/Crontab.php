@@ -10,6 +10,7 @@ use Scf\Core\App;
 use Scf\Core\Config;
 use Scf\Core\Env;
 use Scf\Core\Server;
+use Scf\Server\Gateway\GatewayLease;
 use Scf\Server\LinuxCrontab\LinuxCrontabManager;
 use Scf\Server\Task\Crontab as TaskCrontab;
 use Scf\Util\ProcessInspector;
@@ -503,7 +504,8 @@ class Crontab implements CommandInterface {
      *
      * 规则与 gateway 自身保持一致：
      * - 显式传入 `-control_port` 时优先使用；
-     * - 其次使用 server.php 里的 `gateway_control_port`；
+     * - 其次使用当前 Gateway 租约记录的实际监听端口；
+     * - 无有效租约时，使用 server.php 里的 `gateway_control_port`；
      * - 配置为 0 时默认取业务端口 + 1000。
      *
      * @return int
@@ -517,6 +519,13 @@ class Crontab implements CommandInterface {
         $businessPort = $this->resolveExpectedPort();
         if ($businessPort <= 0) {
             return 0;
+        }
+
+        $lease = GatewayLease::readLease($businessPort, SERVER_ROLE);
+        $leasedPort = (int)($lease['meta']['control_port'] ?? 0);
+        if (($lease['state'] ?? '') === 'running' && (int)($lease['expires_at'] ?? 0) >= time()
+            && $leasedPort > 0 && $leasedPort <= 65535) {
+            return $leasedPort;
         }
 
         $serverConfig = Config::server();

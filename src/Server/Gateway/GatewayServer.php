@@ -201,7 +201,6 @@ class GatewayServer {
         }
         Coroutine::set(['hook_flags' => $hookFlags]);
         $this->bootstrapRuntimeState();
-        $this->bootstrapGatewayLease();
         Console::enablePush(Config::server()['enable_log_push'] ?? STATUS_ON);
         Console::setPushHandler(function (string $time, string $message) {
             $this->pushConsoleLog($time, $message);
@@ -222,12 +221,6 @@ class GatewayServer {
             'pid_file' => $this->pidFile(),
         ]);
         $this->createBusinessTrafficListener();
-        $this->warmupNginxRuntimeMeta();
-        if ($this->nginxProxyModeEnabled() && !App::isReady()) {
-            // 只有“应用尚未安装”这个特殊场景，才需要在启动前把业务入口先切到 gateway 控制面。
-            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
-            $this->syncNginxProxyTargets('install_takeover');
-        }
         if ($this->rpcPort > 0) {
             $rpcListener = $this->server->listen($this->host, $this->rpcPort, SWOOLE_SOCK_TCP);
             if ($rpcListener === false) {
@@ -243,6 +236,15 @@ class GatewayServer {
                 'package_length_offset' => 0,
                 'package_body_offset' => 4,
             ]);
+        }
+
+        // Publish ownership only after all Swoole listeners have bound successfully.
+        $this->bootstrapGatewayLease();
+        $this->warmupNginxRuntimeMeta();
+        if ($this->nginxProxyModeEnabled() && !App::isReady()) {
+            // 只有“应用尚未安装”这个特殊场景，才需要在启动前把业务入口先切到 gateway 控制面。
+            Runtime::instance()->set(Key::RUNTIME_GATEWAY_INSTALL_TAKEOVER, true);
+            $this->syncNginxProxyTargets('install_takeover');
         }
 
         $this->attachUpstreamSupervisor();

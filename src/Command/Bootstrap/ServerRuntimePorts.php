@@ -137,9 +137,17 @@ function scf_request_gateway_start_handoff(array $argv, array $ports): bool {
     if (($argv[1] ?? '') !== 'gateway') return false;
     $opts = scf_parse_opts($argv);
     $port = (int)($opts['port'] ?? 9580);
-    $controlPort = (int)($opts['control_port'] ?? ($opts['gateway_control_port'] ?? ($port + 1000)));
-    $listeners = scf_conflicting_listener_pids($argv, [$controlPort]);
-    if (!in_array($controlPort, $ports, true) || !$listeners) return false;
+    $configuredControlPort = (int)($opts['control_port'] ?? ($opts['gateway_control_port'] ?? 0));
+    $candidates = array_intersect(array_unique([
+        scf_gateway_leased_control_port($argv),
+        $configuredControlPort > 0 ? $configuredControlPort : $port + 1000,
+    ]), $ports);
+    $listeners = [];
+    foreach ($candidates as $controlPort) {
+        $listeners = scf_conflicting_listener_pids($argv, [$controlPort]);
+        if ($listeners) break;
+    }
+    if (!$listeners) return false;
     $bootAncestors = scf_conflicting_boot_ancestor_pids($argv, $listeners);
     $payload = json_encode(['command' => 'handoff', 'params' => [
         'app' => $opts['app'] ?? (getenv('APP_DIR') ?: 'app'),
@@ -226,6 +234,20 @@ function scf_gateway_startup_lease(array $argv): ?array {
         || (int)($lease['epoch'] ?? 0) <= 0
         || !in_array($lease['state'] ?? '', ['running', 'restarting', 'stopped'], true)) return null;
     return $lease;
+}
+
+/**
+ * 从租约恢复实际绑定的控制端口。发送交接请求前仍需核对监听进程身份。
+ * @param array $argv 启动参数。
+ * @return int 已记录的控制端口，未运行时返回 0。
+ */
+function scf_gateway_leased_control_port(array $argv): int {
+    $lease = scf_gateway_startup_lease($argv);
+    if (!in_array($lease['state'] ?? '', ['running', 'restarting'], true)) {
+        return 0;
+    }
+    $port = (int)($lease['meta']['control_port'] ?? 0);
+    return $port > 0 && $port <= 65535 ? $port : 0;
 }
 
 /**
@@ -384,9 +406,8 @@ function scf_command_guard_ports(array $argv): array {
         if ($controlPort <= 0) {
             $controlPort = $bindPort + 1000;
         }
-        if ($controlPort > 0) {
-            $ports[] = $controlPort;
-        }
+        $ports[] = $controlPort;
+        $ports[] = scf_gateway_leased_control_port($argv);
     }
 
     return array_values(array_unique(array_filter(array_map('intval', $ports), static fn(int $port) => $port > 0)));

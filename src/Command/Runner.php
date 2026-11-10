@@ -12,6 +12,7 @@ use Scf\Command\DefaultCommand\Crontab;
 use Scf\Command\DefaultCommand\Install;
 use Scf\Command\DefaultCommand\Server;
 use Scf\Command\DefaultCommand\Native;
+use Scf\Command\DefaultCommand\Tcp;
 use Scf\Command\DefaultCommand\Toolbox;
 use Scf\Command\DefaultCommand\Run;
 use Scf\Root;
@@ -22,6 +23,7 @@ class Runner {
     public function __construct() {
         Manager::instance()->addCommand(new Server());//服务器
         Manager::instance()->addCommand(new Native());//原生应用
+        Manager::instance()->addCommand(new Tcp());
         Manager::instance()->addCommand(new Install());//应用安装
         Manager::instance()->addCommand(new Build());//应用构建
         Manager::instance()->addCommand(new Toolbox());//cli工具箱

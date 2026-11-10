@@ -116,7 +116,7 @@ When the user asks to publish the framework:
 
 1. Run `framework build`.
 2. Run `framework push`.
-3. After publish succeeds, run `/Users/lanhai/projects/swoole/etc/build_main.sh`.
+3. After publish succeeds, run `/Users/lanhai/projects/swoole/etc/build_main_fast.sh` for framework-only releases. Use `/Users/lanhai/projects/swoole/etc/build_main.sh` when the runtime environment changes.
 
 - Run publish commands from `/Users/lanhai/projects/swoole/scf/bin` using the SCF bin entry scripts.
 - Do not reorder or skip steps.

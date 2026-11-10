@@ -36,7 +36,7 @@ description: 当你要发布任意 SCF 应用时使用，包括 SCF build releas
 
 1. `framework build`
 2. `framework push`
-3. `/Users/lanhai/projects/swoole/etc/build_main.sh`
+3. 仅更新框架时执行 `/Users/lanhai/projects/swoole/etc/build_main_fast.sh`，更新运行环境时执行 `/Users/lanhai/projects/swoole/etc/build_main.sh`。
 
 不能跳步，不能换顺序。
 

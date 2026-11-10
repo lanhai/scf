@@ -613,6 +613,7 @@ class Http extends \Scf\Core\Server {
         );
         //是否允许跨域请求
         define('SERVER_ALLOW_CROSS_ORIGIN', (bool)($serverConfig['allow_cross_origin'] ?? false));
+        define('SERVER_ALLOW_CROSS_ORIGIN_HEADERS', (string)($serverConfig['allow_cross_origin_headers'] ?? 'Origin, X-Requested-With, Content-Type, Accept, Authorization'));
         //开启日志推送
         Console::enablePush($serverConfig['enable_log_push'] ?? STATUS_ON);
         ConsoleRelay::setGatewayPort((int)(Manager::instance()->getOpt('gateway_port') ?: 0));
@@ -709,6 +710,9 @@ class Http extends \Scf\Core\Server {
                 exit(1);
             }
             Runtime::instance()->rpcPort($rpcPort);
+        }
+        if (!empty($serverConfig['tcp'])) {
+            (new Tcp())->attach($this->server, $serverConfig['tcp']);
         }
         Listener::register([
             'SocketListener',

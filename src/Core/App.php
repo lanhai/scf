@@ -34,7 +34,8 @@ class App {
         MODE_RPC => [],
         MODE_CLI => [],
         MODE_NATIVE => [],
-        MODE_SOCKET => []
+        MODE_SOCKET => [],
+        MODE_TCP => []
     ];
     /**
      * 当前应用里声明了 crontab 注册的模块。
