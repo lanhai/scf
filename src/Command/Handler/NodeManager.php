@@ -2,6 +2,8 @@
 
 namespace Scf\Command\Handler;
 
+use RuntimeException;
+use Scf\Client\WebSocket;
 use ErrorException;
 use Scf\App\Updater;
 use Scf\Core\Console;
@@ -10,8 +12,6 @@ use Scf\Command\Color;
 use Scf\Helper\JsonHelper;
 use Scf\Server\Manager;
 use Scf\Server\Struct\Node;
-use Swlib\Http\Exception\RequestException;
-use Swlib\SaberGM;
 use Swoole\Coroutine;
 use Swoole\Event;
 use Swoole\Runtime;
@@ -168,7 +168,7 @@ class NodeManager {
                         } else {
                             $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                         }
-                        $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
+                        $websocket = WebSocket::connect(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
                         $websocket->push('log_subscribe');
                         // 使用 Swoole 定时器定期接收消息
                         while (true) {
@@ -178,13 +178,13 @@ class NodeManager {
                                     Console::info("【NODE-" . $node->ip . "】日志监听连接已断开", false);
                                     break;
                                 } else {
-                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
+                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply->data), false);
                                 }
                             }
                             Coroutine::sleep(0.1);
                         }
                     });
-                } catch (RequestException $exception) {
+                } catch (RuntimeException $exception) {
                     Console::error("【NODE-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
                 }
             }
@@ -211,7 +211,7 @@ class NodeManager {
                     } else {
                         $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
                     }
-                    $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
+                    $websocket = WebSocket::connect(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
                     Coroutine::create(function () use ($websocket, $node) {
                         $websocket->push('update');
                         while (true) {
@@ -221,13 +221,13 @@ class NodeManager {
                                     Console::info("【NODE-" . $node->ip . "】升级完成", false);
                                     break;
                                 } else {
-                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply), false);
+                                    Console::info("【NODE-" . $node->ip . "】" . Color::green($reply->data), false);
                                 }
                             }
                             Coroutine::sleep(0.1);
                         }
                     });
-                } catch (RequestException $exception) {
+                } catch (RuntimeException $exception) {
                     Console::error("【NODE-" . $node->ip . "】" . "连接失败:" . $exception->getMessage(), false);
                 }
             }
@@ -276,7 +276,7 @@ class NodeManager {
             } else {
                 $socketHost = $node->socketPort . '.' . $node->ip . '/dashboard.socket';
             }
-            $websocket = SaberGM::websocket(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
+            $websocket = WebSocket::connect(Manager::instance()->buildInternalSocketUrl($socketHost, 'manager'));
             Coroutine::create(function () use ($websocket, $msg, $node) {
                 $websocket->push($msg);
                 while (true) {
@@ -286,7 +286,7 @@ class NodeManager {
                     }
                     Coroutine::sleep(1);
                 }
-                Console::log("【" . $node->id . "】回复:" . Color::green($reply));
+                Console::log("【" . $node->id . "】回复:" . Color::green($reply->data));
             });
         });
     }

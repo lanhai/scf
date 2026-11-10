@@ -2,6 +2,8 @@
 
 namespace Scf\Server;
 
+use RuntimeException;
+use Scf\Client\WebSocket;
 use Scf\Cache\Redis;
 use Scf\Client\Http;
 use Scf\Command\Color;
@@ -21,12 +23,10 @@ use Scf\Server\DashboardAuth;
 use Scf\Server\Task\CrontabManager;
 use Scf\Util\Date;
 use Scf\Util\File;
-use Swlib\Saber\WebSocket;
-use Swlib\SaberGM;
 use Swoole\Coroutine;
+use Swoole\Coroutine\Http\Client as WebSocketClient;
 use Swoole\Coroutine\System;
 use Throwable;
-use Swlib\Http\Exception\RequestException;
 
 class Manager extends Component {
 
@@ -151,9 +151,9 @@ class Manager extends Component {
 
     /**
      * 连接master节点
-     * @return WebSocket
+     * @return WebSocketClient
      */
-    public function getMasterSocketConnection(): WebSocket {
+    public function getMasterSocketConnection(): WebSocketClient {
         $socketHost = $this->ensureMasterSocketPath($this->getMasterHost());
         $startedAt = time();
         $attempt = 0;
@@ -161,18 +161,12 @@ class Manager extends Component {
         while (true) {
             $attempt++;
             try {
-                $socket = SaberGM::websocket($this->buildInternalSocketUrl($socketHost, 'node-' . APP_NODE_ID));
-                if ($this->wsHandshakeEstablished($socket)) {
-                    if ($attempt > 1) {
-                        Console::success("【Server】已连接到master节点[{$socketHost}]，重试次数:{$attempt}", false);
-                    }
-                    return $socket;
+                $socket = WebSocket::connect($this->buildInternalSocketUrl($socketHost, 'node-' . APP_NODE_ID));
+                if ($attempt > 1) {
+                    Console::success("【Server】已连接到master节点[{$socketHost}]，重试次数:{$attempt}", false);
                 }
-                $cli = $this->getWsClient($socket);
-                $status = $cli->statusCode ?? 'null';
-                $err = $cli->errCode ?? 'null';
-                $this->logMasterConnectionRetry($socketHost, "握手未就绪: status={$status} err={$err}", $startedAt, $attempt, $retryDelay);
-            } catch (RequestException $throwable) {
+                return $socket;
+            } catch (RuntimeException $throwable) {
                 $this->logMasterConnectionRetry($socketHost, '连接失败:' . $throwable->getMessage(), $startedAt, $attempt, $retryDelay);
             }
             if (Coroutine::getCid() > 0) {
@@ -484,54 +478,15 @@ class Manager extends Component {
     }
 
     /**
-     * 取出 Saber WebSocket 底层 client（不同版本可能有 getClient 方法；否则用反射）
-     */
-    protected function getWsClient(WebSocket $ws) {
-        if (method_exists($ws, 'getClient')) {
-            return $ws->getClient();
-        }
-        $ref = new \ReflectionObject($ws);
-        if ($ref->hasProperty('client')) {
-            $prop = $ref->getProperty('client');
-            //$prop->setAccessible(true);
-            return $prop->getValue($ws);
-        }
-        return null;
-    }
-
-    /**
-     * 判断 Saber WebSocket 是否已完成握手升级。
-     *
-     * 这个判定只用于“初次建连”阶段，要求状态码为 `101`，确保连接真正升级为
-     * websocket；已建立连接后的存活判定请使用 `wsConnected`。
-     *
-     * @param WebSocket $ws
-     * @return bool
-     */
-    protected function wsHandshakeEstablished(WebSocket $ws): bool {
-        $cli = $this->getWsClient($ws);
-        if (!$cli) {
-            return false;
-        }
-        $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
-        $status = property_exists($cli, 'statusCode') ? (int)$cli->statusCode : 0;
-        return $connected && $status === 101;
-    }
-
-    /**
-     * 判断 Saber WebSocket 在“已建连阶段”是否仍可用。
+     * 判断 WebSocket 在“已建连阶段”是否仍可用。
      *
      * 子进程长轮询 `recv(timeout)` 时，底层 client 可能临时写入 EAGAIN/ETIMEDOUT。
      * 这些错误码只表示“当前无消息”，不能直接视为断链；否则 heartbeat/cluster
      * 会因为空轮询而频繁重连。
      */
-    protected function wsConnected(WebSocket $ws): bool {
-        $cli = $this->getWsClient($ws);
-        if (!$cli) {
-            return false;
-        }
-        $connected = property_exists($cli, 'connected') && (bool)$cli->connected;
-        $errCode = property_exists($cli, 'errCode') ? (int)$cli->errCode : 0;
+    protected function wsConnected(WebSocketClient $ws): bool {
+        $connected = (bool)$ws->connected;
+        $errCode = (int)$ws->errCode;
         if (!$connected) {
             return false;
         }
@@ -561,7 +516,7 @@ class Manager extends Component {
     /**
      * 仅在握手成功的情况下 push，失败返回 false
      */
-    protected function wsSafePush(WebSocket $ws, string $data): bool {
+    protected function wsSafePush(WebSocketClient $ws, string $data): bool {
         if (!$this->wsConnected($ws)) {
             return false;
         }
@@ -574,16 +529,16 @@ class Manager extends Component {
     }
 
     /**
-     * 对外暴露 Saber WebSocket 当前是否仍处于握手成功且连接存活状态。
+     * 对外暴露 WebSocket 当前是否仍处于握手成功且连接存活状态。
      *
      * cluster / heartbeat 这类长连接子进程在 recv timeout 时，需要区分
      * “当前仅无消息”与“底层连接已经断开”。这里复用框架内部已有的 wsConnected
      * 判定，避免每个子进程各自再做一套反射判断。
      *
-     * @param WebSocket $ws
+     * @param WebSocketClient $ws
      * @return bool
      */
-    public function isSocketConnected(WebSocket $ws): bool {
+    public function isSocketConnected(WebSocketClient $ws): bool {
         return $this->wsConnected($ws);
     }
 

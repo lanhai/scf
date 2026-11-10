@@ -7,6 +7,7 @@ use Filterus\Filter;
 use JetBrains\PhpStorm\Pure;
 use ReflectionClass;
 use ReflectionProperty;
+use Scf\Core\Filters\ObjectValue;
 use Scf\Database\Tools\Calculator;
 use Scf\Helper\JsonHelper;
 
@@ -333,6 +334,10 @@ class Struct {
                 foreach ($rules['rule'] as $rule) {
                     if (!self::$_filterRegistered) {
                         Filter::registerFilter('chs_string', '\Scf\Core\Filters\ChineseString');
+                        // 独立更新源码包的旧节点可能仍加载 Filterus 1.0.0。
+                        if (!class_exists(\Filterus\Filters\Objects::class)) {
+                            Filter::registerFilter('object', ObjectValue::class);
+                        }
                         self::$_filterRegistered = true;
                     }
                     $validator = match ($rule['kind']) {

@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "b47eddaff0a800d2af5d3d3f02a1ea7c",
+    "content-hash": "932175650e7d3e177c8561708ceaec6a",
     "packages": [
         {
             "name": "adbario/php-dot-notation",
@@ -1598,58 +1598,6 @@
             "time": "2023-06-05T12:46:42+00:00"
         },
         {
-            "name": "ircmaxell/filterus",
-            "version": "1.0.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/ircmaxell/filterus.git",
-                "reference": "6670d75f978b2713e1ec33acbdea73c92216e726"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/ircmaxell/filterus/zipball/6670d75f978b2713e1ec33acbdea73c92216e726",
-                "reference": "6670d75f978b2713e1ec33acbdea73c92216e726",
-                "shasum": ""
-            },
-            "require": {
-                "php": ">=5.3.0"
-            },
-            "require-dev": {
-                "phpunit/phpunit": "^5"
-            },
-            "type": "library",
-            "autoload": {
-                "files": [
-                    "lib/Filterus/functions.php"
-                ],
-                "psr-0": {
-                    "Filterus": "lib"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "authors": [
-                {
-                    "name": "Anthony Ferrara",
-                    "email": "ircmaxell@php.net",
-                    "homepage": "http://blog.ircmaxell.com"
-                }
-            ],
-            "description": "A library for filtering variables in PHP",
-            "homepage": "https://github.com/ircmaxell/filterus",
-            "keywords": [
-                "filter",
-                "security"
-            ],
-            "support": {
-                "issues": "https://github.com/ircmaxell/filterus/issues",
-                "source": "https://github.com/ircmaxell/filterus/tree/master"
-            },
-            "time": "2016-08-15T20:09:15+00:00"
-        },
-        {
             "name": "laravel/prompts",
             "version": "v0.1.24",
             "source": {
@@ -2732,172 +2680,6 @@
             "time": "2022-08-01T00:52:05+00:00"
         },
         {
-            "name": "swlib/http",
-            "version": "v1.0.8",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/swlib/http.git",
-                "reference": "e97d9d05b741d4ee7ef58824a280acf983354d5e"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/swlib/http/zipball/e97d9d05b741d4ee7ef58824a280acf983354d5e",
-                "reference": "e97d9d05b741d4ee7ef58824a280acf983354d5e",
-                "shasum": ""
-            },
-            "require": {
-                "php": ">=7.1",
-                "psr/http-message": "~1.0"
-            },
-            "require-dev": {
-                "phpunit/phpunit": "~7"
-            },
-            "type": "library",
-            "autoload": {
-                "files": [
-                    "src/functions.php"
-                ],
-                "psr-4": {
-                    "Swlib\\Http\\": "src"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "authors": [
-                {
-                    "name": "twosee",
-                    "email": "twose@qq.com"
-                }
-            ],
-            "description": "Swlib-HTTP base class repository, PSR implementation",
-            "keywords": [
-                "http",
-                "php",
-                "psr7",
-                "swoole"
-            ],
-            "support": {
-                "issues": "https://github.com/swlib/http/issues",
-                "source": "https://github.com/swlib/http/tree/v1.x"
-            },
-            "time": "2020-08-15T10:36:45+00:00"
-        },
-        {
-            "name": "swlib/saber",
-            "version": "v1.0.18",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/swlib/saber.git",
-                "reference": "24034ea70d64063cc9032c4aa08cb888995df190"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/swlib/saber/zipball/24034ea70d64063cc9032c4aa08cb888995df190",
-                "reference": "24034ea70d64063cc9032c4aa08cb888995df190",
-                "shasum": ""
-            },
-            "require": {
-                "php": ">=7.1",
-                "swlib/http": "^1.0",
-                "swlib/util": "^1.0"
-            },
-            "require-dev": {
-                "phpunit/phpunit": "~7"
-            },
-            "type": "library",
-            "autoload": {
-                "files": [
-                    "src/include/functions.php"
-                ],
-                "psr-4": {
-                    "Swlib\\Saber\\": "src"
-                },
-                "classmap": [
-                    "src/Saber.php",
-                    "src/SaberGM.php"
-                ]
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "Apache-2.0"
-            ],
-            "authors": [
-                {
-                    "name": "twosee",
-                    "email": "twose@qq.com"
-                }
-            ],
-            "description": "Swoole coroutine HTTP client",
-            "keywords": [
-                "ajax",
-                "axios",
-                "client",
-                "coroutine",
-                "curl",
-                "http",
-                "php",
-                "psr7",
-                "requests",
-                "swoole"
-            ],
-            "support": {
-                "issues": "https://github.com/swlib/saber/issues",
-                "source": "https://github.com/swlib/saber/tree/v1.0.18"
-            },
-            "time": "2021-04-20T06:28:59+00:00"
-        },
-        {
-            "name": "swlib/util",
-            "version": "v1.0.3",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/swlib/util.git",
-                "reference": "300f551753702f5bfcbfb814d53bdbf057719a43"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/swlib/util/zipball/300f551753702f5bfcbfb814d53bdbf057719a43",
-                "reference": "300f551753702f5bfcbfb814d53bdbf057719a43",
-                "shasum": ""
-            },
-            "require": {
-                "php": ">=7.0"
-            },
-            "require-dev": {
-                "phpunit/phpunit": "~7"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "Swlib\\Util\\": "src"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "Apache-2.0"
-            ],
-            "authors": [
-                {
-                    "name": "twosee",
-                    "email": "twose@qq.com"
-                }
-            ],
-            "description": "Swlib Toolkit",
-            "keywords": [
-                "php",
-                "swlib",
-                "swoole",
-                "util"
-            ],
-            "support": {
-                "issues": "https://github.com/swlib/util/issues",
-                "source": "https://github.com/swlib/util/tree/v1.0.3"
-            },
-            "time": "2020-08-24T10:00:58+00:00"
-        },
-        {
             "name": "swoole/ide-helper",
             "version": "5.1.3",
             "source": {
@@ -3939,7 +3721,9 @@
         "ext-curl": "*",
         "ext-openssl": "*",
         "ext-pdo": "*",
-        "ext-iconv": "*"
+        "ext-iconv": "*",
+        "ext-sodium": "*",
+        "ext-pcntl": "*"
     },
     "platform-dev": [],
     "plugin-api-version": "2.3.0"
