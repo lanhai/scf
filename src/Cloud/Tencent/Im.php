@@ -14,7 +14,7 @@ class Im extends TencentCloud {
 
     public function _init() {
         parent::_init();
-        $this->client = new TencentIM($this->_config);
+        $this->client = new ImClient($this->_config);
     }
 
     /**

@@ -363,7 +363,7 @@ class Request {
     }
 
     protected function filter($data, $filter = null): null|string|array {
-        is_array($data) && array_walk_recursive($data, 'self::filter_exp');
+        is_array($data) && array_walk_recursive($data, self::filter_exp(...));
         if ($data instanceof Validator || is_null($data) || is_bool($data)) {
             return null;
         }

@@ -16,8 +16,8 @@ declare(strict_types=1);
  * Command 之外的框架模块。
  */
 
-if (version_compare(PHP_VERSION, '8.1.0', '<')) {
-    fwrite(STDERR, '运行此应用需PHP8.1(含)以上版本, 当前环境版本: ' . PHP_VERSION . PHP_EOL);
+if (PHP_VERSION_ID < 80200) {
+    fwrite(STDERR, '运行此应用需PHP8.2(含)以上版本, 当前环境版本: ' . PHP_VERSION . PHP_EOL);
     exit(1);
 }
 

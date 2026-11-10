@@ -388,9 +388,11 @@ class Router {
     }
 
     public function fixPartition($key, $value): void {
-        $this->_partitions[$key] = $value;
         $property = '_' . $key;
-        $this->$property = $value;
+        $this->_partitions[$key] = $value;
+        if (property_exists($this, $property)) {
+            $this->$property = $value;
+        }
     }
 
     /**
